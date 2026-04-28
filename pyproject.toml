@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evennia-shards"
+version = "0.0.1"
+description = "Optional split deployment and horizontal sharding for Evennia, via configuration."
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+authors = [{name = "Tim Baird"}]
+requires-python = ">=3.10"
+dependencies = [
+    "evennia",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evennia_shards*"]

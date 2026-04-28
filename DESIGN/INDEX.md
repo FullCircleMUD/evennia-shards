@@ -1,0 +1,86 @@
+# Design Documentation Index
+
+The `DESIGN/` folder is the project's technical wiki. This index is the entry point — every design document is listed below with a one-line description and a suggested reading order for common situations.
+
+If you are an LLM agent picking up work in this repository, also read [`/CLAUDE.md`](../CLAUDE.md) for agent-specific instructions before diving in.
+
+## Conventions
+
+- **Naming.** Index-style files (this one, `CLAUDE.md`, `README.md`) use shouty UPPERCASE. Content design documents use kebab-case (`documentation-structure.md`, `phase-1-poc-plan.md`). The seed handover keeps its existing name (`evennia-shards-HANDOVER.md`) for traceability.
+- **Adding a doc.** Create the file in `DESIGN/` with a descriptive kebab-case filename, then add a one-line entry to the catalogue below in the appropriate section.
+- **Document structure.** See [documentation-structure.md](documentation-structure.md) for what kinds of content belong in `DESIGN/` (vs. `CLAUDE.md` or `README.md`).
+
+## Catalogue
+
+### Meta
+
+Documents about how the documentation itself is organised.
+
+- **[documentation-structure.md](documentation-structure.md)** — How the three documentation surfaces (`CLAUDE.md`, `README.md`, `DESIGN/`) are intended to be used. When to update each. Conventions for new design docs.
+- **[open-questions.md](open-questions.md)** — Tracker for design questions raised in conversation but not yet resolved. Items are removed as they get folded into permanent docs.
+
+### Architecture and design substrate
+
+Long-lived documents capturing the project's intent, architecture, and design rationale.
+
+- **[deployment-topology.md](deployment-topology.md)** — How a consumer game using this library is structured for development and production. The "same code, different config" property and its expression locally (terminals) and in production (platform services). Includes the four-case development phasing.
+- **[library-scope-and-mandates.md](library-scope-and-mandates.md)** — What the library provides, what it leaves to the consumer, and the single mandate (use `ShardGatewayMixin` for cross-shard boundary rooms).
+- **[consumer-constraints.md](consumer-constraints.md)** — What the library demands of consumer games. Hard constraints rooted in the first principle that any game object exists on exactly one shard.
+
+### Drafts (under review)
+
+*(none — all drafts have been reviewed and either promoted to the main catalogue or deleted.)*
+
+### Implementation plans
+
+*(none yet)*
+
+Future home of phase-by-phase implementation plans, e.g. `phase-1-router-and-shard.md`, once we move from design into build.
+
+### Decisions and refinements
+
+*(none yet)*
+
+Future home of focused decision records as the design refines through implementation. Each refinement should land here as its own document, leaving the handover stable as a historical seed.
+
+### Archive
+
+[`archive/`](archive/) holds documents that have been superseded or are no longer expected to be needed, but are retained for historical reference. Not part of the active catalogue. Move docs here rather than deleting them when they fall out of relevance.
+
+- **[archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md)** — The original brainstorm session that started this project. Captures the architectural sketch as first imagined: the three-mode design, the ticket-based redirect protocol, the `ShardGatewayMixin` primitive, the cache invariant, a phased PoC plan. The project's current decisions extend and refine this document; treat it as historical context, not as canonical project intent.
+
+## Reading paths
+
+Different audiences should walk through the docs in different orders. Pick the path that fits.
+
+### "I am new to the project — orient me."
+
+1. [`/README.md`](../README.md) — what the project is and isn't.
+2. [documentation-structure.md](documentation-structure.md) — how the docs are organised.
+3. [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — historical brainstorm; useful for the architectural sketch as first imagined. *Not authoritative.* Current decisions extend and refine it.
+
+### "I am an LLM agent picking up an implementation task."
+
+1. [`/CLAUDE.md`](../CLAUDE.md) — agent-facing instructions and load-bearing principles.
+2. This file ([INDEX.md](INDEX.md)) — locate the design docs relevant to your task.
+3. The relevant architecture or implementation document(s).
+4. [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — for historical context only. Do not treat its decisions as canonical without checking against current settled design.
+
+### "I want to understand the architecture in broad strokes."
+
+1. [`/README.md`](../README.md) — overview and the three modes.
+2. The "Core architecture: the three-mode design" and "The split-deployment model" sections of [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — substantive architectural sketch from the original brainstorm; still a useful overview, with the caveat that specific decisions may have been refined since.
+
+### "I am about to start Phase 1 of the PoC."
+
+1. The "Phased PoC plan" section of [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — original sketch of phasing.
+2. *(Future)* `phase-1-router-and-shard.md` — once written, supersedes the handover sketch.
+
+## Originating documents (external)
+
+Two FCM-internal design documents were the conversational inputs to the handover. They contain FCM-specific context and are **not** part of this repository, but are listed here for traceability:
+
+- **`design/SCALING.md`** *(FCM repo)* — Full multi-shard architecture from FCM's perspective.
+- **`design/WORLD_DEPLOYMENT.md`** *(FCM repo)* — World build/redeploy/hot-reload pipeline for FCM.
+
+These informed but do not bind this library. FCM-specific content stays in FCM; this library is deliberately game-agnostic.
