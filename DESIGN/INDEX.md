@@ -26,6 +26,7 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 - **[deployment-topology.md](deployment-topology.md)** — How a consumer game using this library is structured for development and production. The "same code, different config" property and its expression locally (terminals) and in production (platform services). Includes the four-case development phasing.
 - **[library-scope-and-mandates.md](library-scope-and-mandates.md)** — What the library provides, what it leaves to the consumer, and the single mandate (use `ShardGatewayMixin` for cross-shard boundary rooms).
 - **[consumer-constraints.md](consumer-constraints.md)** — What the library demands of consumer games. Hard constraints rooted in the first principle that any game object exists on exactly one shard.
+- **[shard-settings.md](shard-settings.md)** — The two settings (`SHARDS_ROLE`, `SHARD_ID`), how the library reads them, the defaults, and the rule that code reading them must use the `get_role()` / `get_shard_id()` accessors rather than raw `settings.X` reads.
 
 ### Drafts (under review)
 
@@ -42,6 +43,11 @@ Future home of phase-by-phase implementation plans, e.g. `phase-1-router-and-sha
 *(none yet)*
 
 Future home of focused decision records as the design refines through implementation. Each refinement should land here as its own document, leaving the handover stable as a historical seed.
+
+### Progress
+
+- **[progress.md](progress.md)** — Running log of high-level milestones. Each entry points to the artefact (test result, design doc, code change) that is the evidence for that milestone.
+- **[test-history/](test-history/)** — Captured test results, referenced from `progress.md` as evidence for testing milestones.
 
 ### Archive
 

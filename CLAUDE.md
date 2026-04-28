@@ -34,6 +34,7 @@ These are the principles every implementation decision must respect. They are re
 6. **Web-first.** Telnet support is a deliberate post-PoC concern.
 7. **Resist runtime config registries.** Source-controlled Python constants in the consumer game are the canonical config surface for things like zone→shard maps. Reshuffles are planned events, not hot operations.
 8. **Single-Postgres bound.** The whole design is scoped to "from one Evennia process today through however many shards run against a single, vertically scaled Postgres." Beyond that is explicitly deferred.
+9. **Use the role accessors, not raw settings reads.** Code that needs `SHARDS_ROLE` or `SHARD_ID` — library code *or* consumer game code — should call `evennia_shards.get_role()` / `get_shard_id()` rather than `settings.SHARDS_ROLE`. The accessors apply the documented defaults; raw `settings.SHARDS_ROLE` raises `AttributeError` whenever the consumer hasn't declared the setting (i.e. every monolith consumer). See [DESIGN/shard-settings.md](DESIGN/shard-settings.md).
 
 ## Out of scope
 

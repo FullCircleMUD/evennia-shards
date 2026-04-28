@@ -1,0 +1,23 @@
+# Progress
+
+A running log of high-level milestones as the project moves from design into build. Each entry is a brief note pointing to whatever artefact (test result, design doc, code change) is the evidence for that milestone. New entries go at the top.
+
+This is not a changelog (use `git log` for that) and not a roadmap (the phasing lives in [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md#phased-poc-plan)). It is a thin index of "what has actually happened so far."
+
+## Milestones
+
+### 2026-04-28 — Case 1 gate re-run with first library code (still satisfied)
+
+Re-ran `evennia test evennia` after the `config.py` accessors landed. Result identical to the previous gate run: 1662 / 2 errors / 38 skipped, same two errors (both missing optional Evennia contrib dependencies, unrelated to evennia-shards). The library's first real code is provably non-perturbing of Evennia's test suite. See [test-history/test_results_3_2026-04-28.md](test-history/test_results_3_2026-04-28.md).
+
+### 2026-04-28 — Config accessor wire proven (live, in-game)
+
+First piece of real library code: [evennia_shards/config.py](../evennia_shards/config.py) with `get_role()` / `get_shard_id()` accessors. Settings design documented in [shard-settings.md](shard-settings.md) and load-bearing principle 9 added to [CLAUDE.md](../CLAUDE.md). Wire proven end-to-end with a temporary `@shards_debug` superuser command in the demo game (since reverted): both accessors return the documented defaults when the consumer declares nothing, and return the consumer-declared values when overridden. See [test-history/test_results_2_2026-04-28.md](test-history/test_results_2_2026-04-28.md). Case 1 gate re-run with the new library code is still outstanding.
+
+### 2026-04-28 — Case 1 gate satisfied (empty-library state)
+
+Re-ran `evennia test evennia` with `evennia_shards 0.0.1` installed (`pip install -e .` from repo root). Result identical to baseline: 1662 / 2 errors / 38 skipped, same two errors. Zero delta — the library is genuinely dormant in monolith mode at its current (empty) state. Gate must be re-run after each future change that could execute at import or app-ready time. See [test-history/test_results_1_2026-04-28.md](test-history/test_results_1_2026-04-28.md).
+
+### 2026-04-28 — Baseline test run (vanilla Evennia)
+
+Ran `evennia test evennia` against vanilla Evennia 6.0.0 (with `evennia_shards` *not* installed) to establish the reference for the Case 1 verification gate. Result: 1662 tests, 2 errors (both missing optional contrib dependencies — `xyzgrid` needs scipy, `git_integration` needs GitPython), 38 skipped. See [test-history/test_results_0_2026-04-28.md](test-history/test_results_0_2026-04-28.md).
