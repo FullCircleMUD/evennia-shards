@@ -188,3 +188,61 @@ class FromDbChokepointTests(BaseEvenniaTestCase):
         # chokepoint is intentionally not triggered.
         result = list(ObjectDB.objects.filter(pk=pk).values("shard_id"))
         self.assertEqual(result, [{"shard_id": "shard1"}])
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class QsUpdateChokepointTests(BaseEvenniaTestCase):
+    """qs.update chokepoint: refuse bulk update if any row in scope is remote.
+
+    Permissive on shard_id=None (legacy unstamped) and shard_id="*" (global).
+    The check runs as a separate SELECT (using values_list to bypass from_db)
+    before any UPDATE SQL is issued, so owned rows in a mixed queryset are
+    not modified when a remote row is in scope.
+    """
+
+    def _db_key(self, pk):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT db_key FROM objects_objectdb WHERE id=%s", [pk])
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def test_owned_qs_update_passes(self):
+        obj = ObjectDB.objects.create(db_key="u1", db_typeclass_path=TYPECLASS)
+        ObjectDB.objects.filter(pk=obj.pk).update(db_key="u1_modified")
+        self.assertEqual(self._db_key(obj.pk), "u1_modified")
+
+    def test_global_sentinel_qs_update_passes(self):
+        obj = ObjectDB.objects.create(db_key="u2", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "*"
+        obj.save()
+        ObjectDB.objects.filter(pk=obj.pk).update(db_key="u2_modified")
+        self.assertEqual(self._db_key(obj.pk), "u2_modified")
+
+    def test_unstamped_qs_update_passes(self):
+        obj = ObjectDB.objects.create(db_key="u3", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(obj.pk, None)
+        ObjectDB.objects.filter(pk=obj.pk).update(db_key="u3_modified")
+        self.assertEqual(self._db_key(obj.pk), "u3_modified")
+
+    def test_remote_qs_update_raises(self):
+        obj = ObjectDB.objects.create(db_key="u4", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(obj.pk, "shard1")
+        with self.assertRaises(ShardIsolationError) as ctx:
+            ObjectDB.objects.filter(pk=obj.pk).update(db_key="u4_modified")
+        msg = str(ctx.exception)
+        self.assertIn("shard0", msg)
+        self.assertIn("shard1", msg)
+        # Verify the update did NOT run — db_key unchanged.
+        self.assertEqual(self._db_key(obj.pk), "u4")
+
+    def test_mixed_qs_update_raises_before_touching_owned_rows(self):
+        owned = ObjectDB.objects.create(db_key="u5_owned", db_typeclass_path=TYPECLASS)
+        remote = ObjectDB.objects.create(db_key="u5_remote", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(remote.pk, "shard1")
+        with self.assertRaises(ShardIsolationError):
+            ObjectDB.objects.filter(pk__in=[owned.pk, remote.pk]).update(db_key="u5_modified")
+        # Owned row must not have been updated — chokepoint refuses before SQL.
+        self.assertEqual(self._db_key(owned.pk), "u5_owned")
+        self.assertEqual(self._db_key(remote.pk), "u5_remote")

@@ -6,31 +6,29 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
-### 2026-04-29 — Bespoke spike chokepoints 1, 2, and 3 land with isolated tests
+### 2026-04-29 — Bespoke spike: all four chokepoints land with isolated tests
 
-The `bespoke` branch now carries the first three of the four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage:
+The `bespoke` branch now carries all four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage. The four-chokepoint spike is functionally complete.
 
 - **`pre_save` chokepoint** (commit `80226be`): the existing auto-stamp handler grew a second arm — refuse the save if `instance.shard_id` is set and is neither the current shard nor `"*"`. New `ShardIsolationError` exception type. Live smoke test confirmed via in-game `@py`.
 - **`pre_delete` chokepoint** (commit `0bcce76`): mirrors `pre_save` minus the auto-stamp arm. Refuses to delete a row whose `shard_id` is neither current nor `"*"` (and not `None`, since legacy/unstamped rows are tolerated). Covers both `instance.delete()` and `qs.delete()` because Django fires `pre_delete` per affected row even on bulk queryset deletes.
-- **`from_db` chokepoint** (this commit): patches `ObjectDB.from_db` from `AppConfig.ready()` with a closure-captured replacement that inspects `shard_id` in the row data before delegating to the original. Refuses construction if `row.shard_id` is set and is neither current nor `"*"`. Inherited automatically by typeclass subclasses (Room, Character, ...) via Python MRO. Covers all three Django call sites: `ModelIterable` (queryset iteration), `RawModelIterable` (raw queries), `RelatedPopulator` (select_related). Idempotent via a marker attribute against dev reload.
+- **`from_db` chokepoint** (commit `c7510ed`): patches `ObjectDB.from_db` from `AppConfig.ready()` with a closure-captured replacement that inspects `shard_id` in the row data before delegating to the original. Refuses construction if `row.shard_id` is set and is neither current nor `"*"`. Inherited automatically by typeclass subclasses (Room, Character, ...) via Python MRO. Covers all three Django call sites: `ModelIterable` (queryset iteration), `RawModelIterable` (raw queries), `RelatedPopulator` (select_related). Idempotent via a marker attribute against dev reload.
+- **`QuerySet.update()` chokepoint** (this commit): patches the queryset class returned by `ObjectDB.objects.get_queryset()` so that `update()` runs an upfront `values_list("shard_id")` SELECT to detect any non-owned, non-global rows in the queryset's scope. Raises before issuing the UPDATE if any are found, so owned rows in a mixed queryset are not partially modified. Inner `issubclass(self.model, ObjectDB)` guard so the patched class only enforces for ObjectDB-derived models in case the queryset class is shared.
 
-**Test infrastructure decoupled from `examples/demo_game/`:** `tests/test_settings.py` + `runtests.py` run the suite against an in-memory sqlite database with `evennia_shards` in `INSTALLED_APPS`, using `BaseEvenniaTestCase` to force `evennia.game_template.*` fallbacks. No gamedir needed. See [testing-setup.md](testing-setup.md). 18 tests passing (3 config + 1 app setup + 4 pre_save + 5 pre_delete + 5 from_db) in ~0.5s.
+**Test infrastructure decoupled from `examples/demo_game/`:** `tests/test_settings.py` + `runtests.py` run the suite against an in-memory sqlite database with `evennia_shards` in `INSTALLED_APPS`, using `BaseEvenniaTestCase` to force `evennia.game_template.*` fallbacks. No gamedir needed. See [testing-setup.md](testing-setup.md). 23 tests passing (3 config + 1 app setup + 4 pre_save + 5 pre_delete + 5 from_db + 5 qs.update) in ~0.7s.
 
 **What this proves:**
 
-- All three of the read/write chokepoints function exactly as designed.
-- `from_db` correctly catches remote-row instantiation in queryset iteration, FK-related lookups (when select_related is used), and raw queries — without forking Evennia's idmapper or replacing managers.
-- `.values()` / `.values_list()` correctly bypass the chokepoint (per design — they return row data without constructing instances).
-- The library has a deterministic, hermetic test suite that runs in under half a second.
+- All four chokepoints function exactly as designed in `shard-isolation.md` — read, save, delete-instance, delete-queryset, and bulk-update operations on remote-shard rows raise loudly with shard ids in the message.
+- The chokepoints compose cleanly: `from_db` catches read-side leaks, the signals catch instance-level writes, and the QuerySet override catches bulk updates. No idmapper subclassing, no broad manager replacement.
+- `.values()` / `.values_list()` correctly bypass `from_db` (per design — they return row data without constructing instances), and the `QuerySet.update` chokepoint uses this bypass internally to inspect remote rows for the upfront check.
+- The library has a deterministic, hermetic test suite that runs in under a second.
 
-**What this does *not* prove** (last spike step):
-
-- `QuerySet.update()` override (chokepoint 4) — the bulk-update guard.
-
-**Beyond the four-chokepoint spike** (Phase 2):
+**Beyond the four-chokepoint spike** (Phase 2 / out of scope here):
 
 - Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).
 - Backfill migration for legacy NULL rows.
+- Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.
 
 ### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
 

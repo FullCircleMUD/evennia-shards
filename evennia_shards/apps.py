@@ -83,6 +83,47 @@ class EvenniaShardsConfig(AppConfig):
             ObjectDB.from_db = classmethod(_shard_aware_from_db)
             ObjectDB._evennia_shards_from_db_patched = True
 
+        # qs.update chokepoint: refuse a bulk update if the queryset would
+        # touch any row whose shard_id is neither current nor "*". This is
+        # the one write operation Django does not fire signals for, so it
+        # needs an explicit override on the QuerySet's update() method.
+        # Idempotent via a marker on the QuerySet class.
+        QuerySetClass = type(ObjectDB.objects.get_queryset())
+        if not getattr(QuerySetClass, "_evennia_shards_update_patched", False):
+            original_update = QuerySetClass.update
+
+            def _shard_aware_update(self, **kwargs):
+                # Only enforce for ObjectDB-derived models in case this
+                # queryset class is shared with other Evennia models.
+                if not (isinstance(self.model, type) and issubclass(self.model, ObjectDB)):
+                    return original_update(self, **kwargs)
+
+                from evennia_shards import get_shard_id
+                from evennia_shards.errors import ShardIsolationError
+
+                current = get_shard_id()
+                # Find non-owned, non-global, non-NULL shard_ids in the
+                # queryset's scope. values_list bypasses from_db (per
+                # design — see shard-isolation.md), so this SELECT can
+                # read remote rows without raising. Cap at 5 distinct
+                # values for the error message.
+                foreign = list(
+                    self.exclude(shard_id__isnull=True)
+                    .exclude(shard_id="*")
+                    .exclude(shard_id=current)
+                    .values_list("shard_id", flat=True)
+                    .distinct()[:5]
+                )
+                if foreign:
+                    raise ShardIsolationError(
+                        f"qs.update refused: shard {current!r} would touch "
+                        f"{self.model.__name__} rows owned by {sorted(set(foreign))!r}"
+                    )
+                return original_update(self, **kwargs)
+
+            QuerySetClass.update = _shard_aware_update
+            QuerySetClass._evennia_shards_update_patched = True
+
 
 def _pre_save_chokepoint(sender, instance, **kwargs):
     from evennia.objects.models import ObjectDB
