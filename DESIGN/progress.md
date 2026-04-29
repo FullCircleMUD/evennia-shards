@@ -6,6 +6,24 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
+
+A pre_save signal handler in `EvenniaShardsConfig.ready()` now stamps `shard_id` to the current process's `SHARD_ID` whenever an `ObjectDB` (or subclass) is saved with `shard_id == None`. Explicit values (e.g. those set during a cross-shard handoff) are respected. Verified end-to-end: after a clean DB wipe + `evennia migrate` + `evennia start`, the bootstrap rows (`#1` superuser character, `#2` Limbo) and a runtime-dug `test` room (`#3`) all reported `shard_id = 'shard0'` via both the ORM and a raw SQL probe.
+
+**Key implementation finding** (worth recording): Evennia's typeclass system uses concrete Django subclasses of `ObjectDB` — `Room`, `Character`, `Exit`, and consumer-defined typeclasses — that all share the `ObjectDB` table. Django dispatches `pre_save` with `sender = type(instance)`, which is the subclass, never the `ObjectDB` base. A naïve `pre_save.connect(handler, sender=ObjectDB)` therefore matches *zero* saves of game-world objects. The fix is to connect without a sender filter and do an `isinstance(instance, ObjectDB)` check inside the handler. Performance cost of the universal handler is negligible (microseconds per save).
+
+**What this proves:**
+
+- Auto-population works for both bootstrap-time saves (via `at_initial_setup`) and runtime saves (via `dig` or any `create_object` path).
+- The "if shard_id is None" guard is load-bearing: it lets explicit consumer/library code (cross-shard handoff, central seed scripts) set values that the signal will respect.
+- Lazy-backfill side effect: legacy NULL rows would auto-populate on their next save, useful for monolith-to-shard adoption but not a substitute for an explicit migration backfill.
+
+**What this does *not* prove** (next spikes):
+
+- Backfill of pre-existing rows that never save again (the explicit `RunPython` migration is still required for that).
+- Auto-filtering manager composition with Evennia's `SharedMemoryManager` (idmapper) — the next big architectural unknown.
+- Cross-shard `UPDATE` semantics during handoff.
+
 ### 2026-04-29 — Migration spike confirmed: `shard_id` column on `ObjectDB` is viable
 
 A small spike proved the foundational partitioning mechanism. Library now ships an `apps.py` AppConfig and a `0001_add_shard_id_to_objectdb` migration; in shard mode the demo game adds `evennia_shards` to `INSTALLED_APPS` via a one-line conditional in `settings.py`. After `evennia migrate`, an in-game `@shard_check` command confirmed both ORM-level (`ObjectDB._meta` knows the field) and database-level (raw `SELECT shard_id` returns) presence of the column on existing rows.
