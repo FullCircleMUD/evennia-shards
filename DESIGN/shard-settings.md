@@ -51,6 +51,10 @@ A direct `settings.SHARDS_ROLE` read raises `AttributeError` whenever the consum
 
 The primary caller is library code (it reads the role to decide what to register at boot). Consumers can also call these — for instance, an admin command that prints the deployment mode — and should, rather than rolling their own `getattr` reads.
 
+## Row-level `shard_id` and the global sentinel
+
+The library also adds a `shard_id` column to `ObjectDB` (and likely other partitioned models in future) that tags each row with its owning shard. Most rows hold a specific shard identifier (e.g. `"shard0"`); the sentinel value `"*"` denotes a row owned by *all* shards — used for system-wide entities like global scripts that must run on every shard process. Global rows are instantiated independently on each shard, so any mutable per-instance state does not coordinate across shards without explicit cross-shard messaging.
+
 ## What this design doesn't address
 
 - **Validation.** Nothing checks that `SHARDS_ROLE` is one of the three valid strings, or that `SHARD_ID` is set when role is `"shard"`. Validation will land with whatever code first depends on it. Pre-building it now would be forward-design.
