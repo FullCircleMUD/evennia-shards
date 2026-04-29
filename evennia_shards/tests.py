@@ -11,6 +11,7 @@ from evennia_shards import (
     get_message_timeout,
     get_role,
     get_shard_id,
+    poll_messages,
     send_message,
 )
 from evennia_shards.models import Message
@@ -148,6 +149,52 @@ class SendMessageTests(BaseEvenniaTestCase):
         )
         loaded = Message.objects.get(pk=msg.pk)
         self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class PollMessagesTests(BaseEvenniaTestCase):
+    """poll_messages primitive: read messages addressed to a shard."""
+
+    def test_returns_only_messages_for_requested_shard(self):
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        send_message(kind="ping", payload={}, to_shard="shard2", from_shard="shard0")
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+
+        result = list(poll_messages("shard1"))
+        self.assertEqual(len(result), 2)
+        for msg in result:
+            self.assertEqual(msg.to_shard, "shard1")
+
+    def test_returns_empty_when_no_matching_messages(self):
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        result = list(poll_messages("shard9"))
+        self.assertEqual(result, [])
+
+    def test_results_ordered_by_created_at_ascending(self):
+        # Insert in non-chronological key order; created_at is auto, so
+        # insertion order = chronological order at this resolution.
+        first = send_message(kind="ping", payload={"n": 1}, to_shard="shard1", from_shard="shard0")
+        second = send_message(kind="ping", payload={"n": 2}, to_shard="shard1", from_shard="shard0")
+        third = send_message(kind="ping", payload={"n": 3}, to_shard="shard1", from_shard="shard0")
+
+        result = list(poll_messages("shard1"))
+        self.assertEqual([msg.pk for msg in result], [first.pk, second.pk, third.pk])
+
+    def test_default_shard_uses_current_setting(self):
+        send_message(kind="ping", payload={}, to_shard="shard0", from_shard="shard1")
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+
+        # SHARD_ID is "shard0" via class @override_settings
+        result = list(poll_messages())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].to_shard, "shard0")
+
+    def test_returns_queryset_not_list(self):
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        result = poll_messages("shard1")
+        # Caller can chain .filter / .count / .first without coercing
+        self.assertEqual(result.count(), 1)
+        self.assertIsNotNone(result.first())
 
 
 class AppSetupTests(BaseEvenniaTestCase):

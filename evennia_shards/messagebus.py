@@ -29,3 +29,19 @@ def send_message(
         to_shard=to_shard,
         from_shard=from_shard,
     )
+
+
+def poll_messages(shard_id: str | None = None):
+    """Return all `Message` rows addressed to `shard_id`, oldest first.
+
+    If `shard_id` is omitted, defaults to the current shard's `SHARD_ID`.
+    Returns a `QuerySet` — the caller composes further filtering, slicing,
+    iteration, or counting. Does not delete or mutate; use `delete_message`
+    after a row has been processed.
+    """
+    from .config import get_shard_id
+    from .models import Message
+
+    if shard_id is None:
+        shard_id = get_shard_id()
+    return Message.objects.filter(to_shard=shard_id).order_by("created_at")
