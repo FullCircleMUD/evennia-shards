@@ -37,9 +37,7 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 
 ### Implementation plans
 
-*(none yet)*
-
-Future home of phase-by-phase implementation plans, e.g. `phase-1-router-and-shard.md`, once we move from design into build.
+- **[ticket-auth-flow.md](ticket-auth-flow.md)** — The ticket-based authentication flow: how the router creates a ticket, redirects the client to a shard, and how the shard validates the token, authenticates the session, and puppets the character.
 
 ### Decisions and refinements
 

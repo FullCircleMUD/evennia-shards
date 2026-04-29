@@ -8,3 +8,7 @@ class ShardIsolationError(Exception):
 
 class MessageBusError(Exception):
     """Raised on misuse of the cross-shard message bus."""
+
+
+class TicketError(Exception):
+    """Raised when a ticket token is invalid, expired, or already consumed."""

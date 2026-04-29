@@ -24,3 +24,22 @@ class Message(models.Model):
     class Meta:
         app_label = "evennia_shards"
         indexes = [models.Index(fields=["to_shard", "created_at"])]
+
+
+class Ticket(models.Model):
+    """A single-use auth ticket for shard connections.
+
+    The router inserts a row when sending a player to a shard. The shard
+    looks up the token on incoming connection, authenticates the session,
+    puppets the character, and deletes the row. Token is the primary key
+    for fast indexed lookup.
+    """
+
+    token = models.CharField(max_length=64, primary_key=True)
+    account_id = models.IntegerField()
+    character_id = models.IntegerField()
+    to_shard = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "evennia_shards"

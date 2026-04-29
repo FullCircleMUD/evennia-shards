@@ -10,15 +10,19 @@ from evennia_shards import (
     MessageBusError,
     MessageHandler,
     ShardIsolationError,
+    TicketError,
+    create_ticket,
     delete_message,
+    delete_ticket,
     get_message_timeout,
     get_role,
     get_shard_id,
+    get_ticket,
     poll_messages,
     process_inbox,
     send_message,
 )
-from evennia_shards.models import Message
+from evennia_shards.models import Message, Ticket
 
 TYPECLASS = "evennia.objects.objects.DefaultObject"
 
@@ -695,3 +699,89 @@ class QsUpdateChokepointTests(BaseEvenniaTestCase):
         # Owned row must not have been updated — chokepoint refuses before SQL.
         self.assertEqual(self._db_key(owned.pk), "u5_owned")
         self.assertEqual(self._db_key(remote.pk), "u5_remote")
+
+
+# ── Ticket primitives ──────────────────────────────────────────────
+
+
+class TicketModelTests(BaseEvenniaTestCase):
+    """The Ticket model is wired and the migration deploys."""
+
+    def test_table_name_is_namespaced(self):
+        self.assertEqual(Ticket._meta.db_table, "evennia_shards_ticket")
+
+    def test_token_is_primary_key(self):
+        field = Ticket._meta.get_field("token")
+        self.assertTrue(field.primary_key)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class CreateTicketTests(BaseEvenniaTestCase):
+    """create_ticket inserts a Ticket row and returns a token."""
+
+    def test_returns_token_string(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        self.assertIsInstance(token, str)
+        self.assertEqual(len(token), 32)  # uuid4().hex is 32 chars
+
+    def test_inserts_ticket_row(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        ticket = Ticket.objects.get(token=token)
+        self.assertEqual(ticket.account_id, 1)
+        self.assertEqual(ticket.character_id, 2)
+        self.assertEqual(ticket.to_shard, "shard0")
+
+    def test_each_call_produces_unique_token(self):
+        t1 = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        t2 = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        self.assertNotEqual(t1, t2)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class GetTicketTests(BaseEvenniaTestCase):
+    """get_ticket looks up a ticket by token with shard check."""
+
+    def test_valid_token_returns_true_and_data(self):
+        token = create_ticket(account_id=10, character_id=20, to_shard="shard0")
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertEqual(data["account_id"], 10)
+        self.assertEqual(data["character_id"], 20)
+        self.assertEqual(data["to_shard"], "shard0")
+
+    def test_invalid_token_returns_false(self):
+        found, data = get_ticket("nonexistent")
+        self.assertFalse(found)
+        self.assertIsNone(data)
+
+    def test_wrong_shard_returns_false(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard1")
+        found, data = get_ticket(token, shard_id="shard0")
+        self.assertFalse(found)
+        self.assertIsNone(data)
+
+    def test_does_not_delete_ticket(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        get_ticket(token)
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class DeleteTicketTests(BaseEvenniaTestCase):
+    """delete_ticket removes a ticket by token."""
+
+    def test_deletes_existing_ticket(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        delete_ticket(token)
+        self.assertFalse(Ticket.objects.filter(token=token).exists())
+
+    def test_silent_on_nonexistent_token(self):
+        # Should not raise
+        delete_ticket("nonexistent")
+
+    def test_second_get_after_delete_returns_false(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        delete_ticket(token)
+        found, data = get_ticket(token)
+        self.assertFalse(found)
+        self.assertIsNone(data)
