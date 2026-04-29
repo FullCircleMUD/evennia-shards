@@ -25,13 +25,11 @@ class EvenniaShardsConfig(AppConfig):
                 models.CharField(max_length=64, null=True, blank=True, db_index=True),
             )
 
-        # Hybrid auto-stamp: any save on ObjectDB (or a subclass) sets
-        # shard_id to the current process's shard *only if* shard_id is
-        # currently None. Explicit values (e.g. set during a cross-shard
-        # handoff) are respected. As a side effect, legacy NULL rows get
-        # lazily backfilled on their next save — useful for monolith-to-
-        # shard migration, but the explicit RunPython backfill remains the
-        # primary mechanism for legacy rows that may never save again.
+        # pre_save chokepoint: combines auto-stamp (set shard_id to the
+        # current shard for new rows where shard_id is None) and write
+        # protection (raise ShardIsolationError if a save would persist
+        # to a row owned by another shard). The "*" sentinel denotes
+        # rows owned by all shards and is allowed.
         #
         # Connected without a sender filter because Evennia's typeclass
         # system uses concrete Django subclasses of ObjectDB (Room,
@@ -41,18 +39,31 @@ class EvenniaShardsConfig(AppConfig):
         # filter never matches the saves we care about. The handler does
         # the isinstance check in-line.
         pre_save.connect(
-            _stamp_shard_id_if_unset,
-            dispatch_uid="evennia_shards.stamp_shard_id",
+            _pre_save_chokepoint,
+            dispatch_uid="evennia_shards.pre_save_chokepoint",
         )
 
 
-def _stamp_shard_id_if_unset(sender, instance, **kwargs):
+def _pre_save_chokepoint(sender, instance, **kwargs):
     from evennia.objects.models import ObjectDB
 
     if not isinstance(instance, ObjectDB):
         return
 
-    if instance.shard_id is None:
-        from evennia_shards import get_shard_id
+    from evennia_shards import get_shard_id
+    from evennia_shards.errors import ShardIsolationError
 
-        instance.shard_id = get_shard_id()
+    current = get_shard_id()
+
+    if instance.shard_id is None:
+        instance.shard_id = current
+        return
+
+    if instance.shard_id == current or instance.shard_id == "*":
+        return
+
+    raise ShardIsolationError(
+        f"pre_save refused: shard {current!r} cannot persist "
+        f"{type(instance).__name__} pk={instance.pk!r} owned by shard "
+        f"{instance.shard_id!r}"
+    )

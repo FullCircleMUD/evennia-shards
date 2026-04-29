@@ -29,6 +29,7 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 - **[shard-settings.md](shard-settings.md)** — The two settings (`SHARDS_ROLE`, `SHARD_ID`), how the library reads them, the defaults, and the rule that code reading them must use the `get_role()` / `get_shard_id()` accessors rather than raw `settings.X` reads.
 - **[cross-shard-message-bus.md](cross-shard-message-bus.md)** — How shards communicate with each other: a Postgres `messages` table polled via a Twisted `LoopingCall`, with `kind`/JSONB extensibility, configurable per-kind timeouts, and a deliberate scope of "real-time inter-process messaging only — not persistent player-facing storage."
 - **[shard-isolation.md](shard-isolation.md)** — How the library enforces the partition between shards at the Django/Evennia level: four chokepoints (`from_db` override, `pre_save`/`pre_delete` signals, `QuerySet.update()` override) that together prevent cross-shard reads, writes, and deletes without a broad manager filter or idmapper modification.
+- **[testing-setup.md](testing-setup.md)** — How unit tests are configured to run from the library root without a consumer gamedir: `tests/test_settings.py` + `runtests.py` + `BaseEvenniaTestCase`. Decouples the test suite from `examples/demo_game/`.
 
 ### Drafts (under review)
 
