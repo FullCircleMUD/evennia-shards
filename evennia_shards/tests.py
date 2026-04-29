@@ -11,6 +11,7 @@ from evennia_shards import (
     get_message_timeout,
     get_role,
     get_shard_id,
+    send_message,
 )
 from evennia_shards.models import Message
 
@@ -106,6 +107,47 @@ class MessageModelTests(BaseEvenniaTestCase):
             kind="ping",
         )
         self.assertIsNone(msg.from_shard)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class SendMessageTests(BaseEvenniaTestCase):
+    """send_message primitive: insert a message row."""
+
+    def test_returns_created_message_instance(self):
+        msg = send_message(
+            kind="ping",
+            payload={"hello": "world"},
+            to_shard="shard1",
+        )
+        self.assertIsInstance(msg, Message)
+        self.assertIsNotNone(msg.pk)
+
+    def test_explicit_from_shard_is_recorded(self):
+        msg = send_message(
+            kind="ping",
+            payload={},
+            to_shard="shard1",
+            from_shard="shard2",
+        )
+        self.assertEqual(msg.from_shard, "shard2")
+
+    def test_default_from_shard_uses_current_setting(self):
+        msg = send_message(
+            kind="ping",
+            payload={},
+            to_shard="shard1",
+        )
+        # SHARD_ID is set to "shard0" via the class @override_settings
+        self.assertEqual(msg.from_shard, "shard0")
+
+    def test_payload_is_persisted(self):
+        msg = send_message(
+            kind="character_handoff",
+            payload={"char_id": 42, "to_room": 7},
+            to_shard="shard1",
+        )
+        loaded = Message.objects.get(pk=msg.pk)
+        self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
 
 
 class AppSetupTests(BaseEvenniaTestCase):
