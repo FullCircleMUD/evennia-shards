@@ -100,6 +100,8 @@ class MessageHandler:
             return self._handle_ping(message)
         if message.kind == "ping_received":
             return self._handle_ping_received(message)
+        if message.kind == "undeliverable_reply":
+            return self._handle_undeliverable_reply(message)
         return False
 
     def _handle_ping(self, message) -> bool:
@@ -123,16 +125,40 @@ class MessageHandler:
         # who want to observe ping replies can override this method.
         return True
 
+    def _handle_undeliverable_reply(self, message) -> bool:
+        # Notification that an earlier outbound message we sent timed
+        # out without being processed. Consumed silently in the base;
+        # consumers who care about delivery failure can override to
+        # surface it (UI notification, retry logic, metrics, etc.).
+        return True
+
 
 def process_inbox(handler: MessageHandler | None = None) -> int:
-    """Run one polling cycle: poll, dispatch, delete on success.
+    """Run one polling cycle: poll, dispatch, delete on success or timeout.
 
-    Returns the count of messages successfully processed (deleted). A
-    handler that raises is logged and the message is left for retry.
+    Lifecycle per message:
+    - handler returns truthy -> success, delete (counted as processed)
+    - handler returns falsy AND age <= lifespan -> defer for next cycle
+    - handler returns falsy AND age > lifespan -> insert
+      `undeliverable_reply` to original `from_shard` (if there is one
+      and it isn't us), then delete the original
+
+    A handler that raises is logged and the message is treated as falsy
+    for the rest of the cycle — it can still be deferred or timed out
+    on this pass.
+
+    Returns the count of messages that were successfully processed by
+    the handler (timed-out messages are counted separately in logs but
+    not in the return value).
+
     Pure function — testable without the reactor; the polling loop wraps
     this in a Twisted `LoopingCall`.
     """
     import logging
+
+    from django.utils import timezone
+
+    from .config import get_message_timeout, get_shard_id
 
     log = logging.getLogger(__name__)
 
@@ -140,19 +166,51 @@ def process_inbox(handler: MessageHandler | None = None) -> int:
         handler = MessageHandler()
 
     processed = 0
+    now = timezone.now()
     for msg in poll_messages():
         try:
-            handled = handler.handle(msg)
+            handled = bool(handler.handle(msg))
         except Exception:
             log.exception(
-                "MessageHandler raised on pk=%s kind=%r; leaving for retry",
+                "MessageHandler raised on pk=%s kind=%r; treating as defer",
                 msg.pk,
                 msg.kind,
             )
-            continue
+            handled = False
+
         if handled:
             delete_message(msg)
             processed += 1
+            continue
+
+        lifespan = get_message_timeout(msg.kind)
+        age = (now - msg.created_at).total_seconds()
+        if age <= lifespan:
+            continue
+
+        # Aged out. Reply with undeliverable to the original sender, if
+        # there is a valid one, then drop the original.
+        current = get_shard_id()
+        if msg.from_shard and msg.from_shard != current:
+            send_message(
+                kind="undeliverable_reply",
+                payload={
+                    "original_kind": msg.kind,
+                    "original_payload": msg.payload,
+                    "reason": "timeout",
+                },
+                to_shard=msg.from_shard,
+                from_shard=current,
+            )
+        else:
+            log.warning(
+                "Message pk=%s kind=%r timed out with no valid from_shard "
+                "(%r); dropping without reply",
+                msg.pk,
+                msg.kind,
+                msg.from_shard,
+            )
+        delete_message(msg)
     return processed
 
 

@@ -376,6 +376,121 @@ class ProcessInboxTests(BaseEvenniaTestCase):
         self.assertEqual(Message.objects.count(), 1)
 
 
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ProcessInboxTimeoutTests(BaseEvenniaTestCase):
+    """Aged-out unhandled messages produce undeliverable_reply and are deleted."""
+
+    def _age_message(self, msg, seconds):
+        # auto_now_add makes obj.created_at = X not stick on save, so update
+        # via QuerySet.update (Message uses Django's default QuerySet, not
+        # the patched ObjectDB one — the chokepoint guard doesn't apply).
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        Message.objects.filter(pk=msg.pk).update(
+            created_at=timezone.now() - timedelta(seconds=seconds),
+        )
+
+    def test_aged_out_message_with_valid_from_shard_inserts_undeliverable_reply(self):
+        msg = Message.objects.create(
+            kind="custom",
+            payload={"data": 1},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        self._age_message(msg, seconds=100)  # default lifespan is 10s
+
+        process_inbox()
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        replies = list(Message.objects.filter(kind="undeliverable_reply"))
+        self.assertEqual(len(replies), 1)
+        reply = replies[0]
+        self.assertEqual(reply.to_shard, "shard1")
+        self.assertEqual(reply.from_shard, "shard0")
+        self.assertEqual(reply.payload["original_kind"], "custom")
+        self.assertEqual(reply.payload["original_payload"], {"data": 1})
+        self.assertEqual(reply.payload["reason"], "timeout")
+
+    def test_aged_out_message_without_from_shard_just_deletes(self):
+        msg = Message.objects.create(
+            kind="custom",
+            payload={},
+            to_shard="shard0",
+            from_shard=None,
+        )
+        self._age_message(msg, seconds=100)
+
+        process_inbox()
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_non_aged_message_stays_in_queue(self):
+        msg = Message.objects.create(
+            kind="custom",
+            payload={},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        # Don't age it; default lifespan is 10s and it was just created.
+
+        process_inbox()
+
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_undeliverable_reply_kind_consumed_silently_by_base_handler(self):
+        msg = Message.objects.create(
+            kind="undeliverable_reply",
+            payload={"original_kind": "x", "original_payload": {}, "reason": "timeout"},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        # Handler doesn't insert anything — the row count stays at 1
+        # (the handler doesn't auto-delete; that's process_inbox's job).
+        self.assertEqual(Message.objects.count(), 1)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUTS={"custom": 60})
+    def test_per_kind_lifespan_override_is_respected(self):
+        msg = Message.objects.create(
+            kind="custom",
+            payload={},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        # 30s old, but per-kind override sets lifespan to 60s — should defer.
+        self._age_message(msg, seconds=30)
+
+        process_inbox()
+
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_handler_truthy_short_circuits_timeout_check(self):
+        # An aged-out message that the handler returns True for is treated
+        # as successfully processed — no undeliverable_reply.
+        msg = Message.objects.create(
+            kind="custom",
+            payload={},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        self._age_message(msg, seconds=100)
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        process_inbox(AlwaysHandle())
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+
 class AppSetupTests(BaseEvenniaTestCase):
     """AppConfig.ready() wires shard_id onto ObjectDB."""
 
