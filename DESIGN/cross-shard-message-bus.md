@@ -139,6 +139,6 @@ No schema migrations, no library release, no new table.
 
 ## TBDs
 
-[**TBD** — handler registry shape: decorator-based, explicit `kind → callable` map, entry-point convention, or something else. Small choice with small implications; pick when building.]
+**Handler registry shape (decided):** a base class `MessageHandler` whose `handle(message) -> bool` method dispatches by `message.kind`. Library-shipped kinds (`ping`, `ping_received`, `undeliverable_reply`) are handled in the base. Consumers extend by subclassing and calling `super().handle(message)` before adding their own kind dispatch — single override point, OO composition via super-call. The polling cycle is wired through `start_message_bus(handler, interval)`, which registers a Twisted `LoopingCall` around `process_inbox(handler)`.
 
 [**TBD** — payload schema evolution: when a `kind`'s payload shape changes (fields added or removed), a message inserted by older code might be processed by newer code (or vice versa) during rolling deploys. Standard solutions apply (versioned payloads, additive-only fields, ignore-unknown-keys), but we haven't picked a convention. Not a blocker for v1; worth deciding before we ship.]

@@ -6,6 +6,18 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-29 — Cross-shard message bus: primitives + lifecycle land
+
+The bus from [cross-shard-message-bus.md](cross-shard-message-bus.md) is in place on the `bespoke` branch, end-to-end:
+
+- **`Message` model + migration `0002`** (commit `463f2b6`): `id`, `created_at`, `to_shard`, `from_shard`, `kind`, `payload` (JSONField), composite index on `(to_shard, created_at)`. Also `get_message_timeout(kind)` accessor + `SHARDS_MESSAGE_TIMEOUT_DEFAULT` / `SHARDS_MESSAGE_TIMEOUTS` settings, same override pattern as `get_role` / `get_shard_id`.
+- **Primitives** — `send_message` (`4511139`), `poll_messages` (`88547b7`), `delete_message` (`7ac2dd5`). Module-level functions in `evennia_shards/messagebus.py`.
+- **Same-shard send guard** (`e3a992c`): new `MessageBusError` exception; `send_message` refuses if `to_shard == from_shard` (after defaulting), since the bus is for cross-shard communication and same-shard sends are almost always a misconfigured `SHARD_ID`.
+- **Polling cycle + handler hook** (`566bf11`): `process_inbox(handler)` runs one cycle (poll → dispatch → delete on success); `start_message_bus(handler, interval)` wraps it in a Twisted `LoopingCall`. `MessageHandler` base class is the consumer-overrideable hook — subclasses call `super().handle(message)` to compose library handling with their own kind dispatch. Library-shipped kinds: `ping` (replies with `ping_received`), `ping_received` and `undeliverable_reply` (silently consumed in the base). `examples/demo_game/server/conf/at_server_startstop.py` calls `start_message_bus()` from `at_server_start()` when role is non-monolith.
+- **Timeout / undeliverable_reply lifecycle** (`779f611`): `process_inbox` now does the three-way decision per message — handler truthy → delete, falsy + age ≤ lifespan → defer, falsy + age > lifespan → insert `undeliverable_reply` to original `from_shard` (with `original_kind`, `original_payload`, `reason="timeout"`) and delete the original. If `from_shard` is missing or equals current shard, log a warning and drop without reply.
+
+60 tests passing in ~1.5s. The bus is primitive-complete; deeper kinds (`character_handoff` for the gateway protocol) are deliberately deferred to Phase 2.
+
 ### 2026-04-29 — Bespoke spike: all four chokepoints land with isolated tests
 
 The `bespoke` branch now carries all four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage. The four-chokepoint spike is functionally complete.
