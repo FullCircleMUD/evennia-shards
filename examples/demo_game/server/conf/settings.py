@@ -34,6 +34,13 @@ from evennia.settings_default import *
 # This is the name of your game. Make it catchy!
 SERVERNAME = "demo_game"
 
+# TEMPORARY (spike) — enable evennia-shards in shard mode and add to INSTALLED_APPS.
+# Revert all three lines after spike is concluded.
+SHARDS_ROLE = "shard"
+SHARD_ID = "shard0"
+if SHARDS_ROLE != "monolith":
+    INSTALLED_APPS = list(INSTALLED_APPS) + ["evennia_shards"]
+
 
 ######################################################################
 # Settings given in secret_settings.py override those in this file.

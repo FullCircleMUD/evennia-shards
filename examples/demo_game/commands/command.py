@@ -10,6 +10,67 @@ from evennia.commands.command import Command as BaseCommand
 # from evennia import default_cmds
 
 
+class CmdShardCheck(BaseCommand):
+    """
+    Inspect an object's underlying ObjectDB row for the shard_id column.
+
+    Usage:
+      @shard_check <target>
+
+    Reports whether the column exists on the model, and its value if so.
+    Tries the ORM first; falls back to a raw SQL probe so we still get a
+    result if the column is in the database but the Python model isn't
+    aware of it.
+
+    TEMPORARY — added for the migration spike. Delete after the spike
+    is concluded.
+    """
+
+    key = "@shard_check"
+    locks = "cmd:perm(Developer)"
+    help_category = "Admin"
+
+    def func(self):
+        if not self.args.strip():
+            self.caller.msg("Usage: @shard_check <target>")
+            return
+
+        target = self.caller.search(self.args.strip())
+        if not target:
+            return
+
+        from evennia.objects.models import ObjectDB
+
+        # ORM-level check: is shard_id a known field on ObjectDB?
+        field_names = {f.name for f in ObjectDB._meta.get_fields()}
+        if "shard_id" in field_names:
+            row = ObjectDB.objects.get(id=target.id)
+            self.caller.msg(
+                f"ORM: ObjectDB row #{target.id} has shard_id field; "
+                f"value = {row.shard_id!r}"
+            )
+        else:
+            self.caller.msg(
+                f"ORM: ObjectDB has no shard_id field "
+                f"(EvenniaShardsConfig.ready() may not have run)."
+            )
+
+        # Database-level check: does the column exist in the table?
+        from django.db import connection
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT shard_id FROM objects_objectdb WHERE id = %s", [target.id]
+            )
+            try:
+                row = cur.fetchone()
+                self.caller.msg(
+                    f"DB:  raw SELECT shard_id WHERE id={target.id} returned {row!r}"
+                )
+            except Exception as e:  # noqa: BLE001
+                self.caller.msg(f"DB:  raw SELECT failed: {e!r}")
+
+
 class Command(BaseCommand):
     """
     Base command (you may see this if a child command had no help text defined)

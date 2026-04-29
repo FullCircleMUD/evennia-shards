@@ -6,6 +6,24 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-29 — Migration spike confirmed: `shard_id` column on `ObjectDB` is viable
+
+A small spike proved the foundational partitioning mechanism. Library now ships an `apps.py` AppConfig and a `0001_add_shard_id_to_objectdb` migration; in shard mode the demo game adds `evennia_shards` to `INSTALLED_APPS` via a one-line conditional in `settings.py`. After `evennia migrate`, an in-game `@shard_check` command confirmed both ORM-level (`ObjectDB._meta` knows the field) and database-level (raw `SELECT shard_id` returns) presence of the column on existing rows.
+
+**What this proves:**
+
+- A library-shipped Django migration can add a column to Evennia's `ObjectDB` table via `RunSQL`, anchored to Evennia's own migration history.
+- `add_to_class` from `AppConfig.ready()` makes the new field visible to the ORM without a model fork.
+- The library can be a Django app conditionally (only when `SHARDS_ROLE != "monolith"`), and the cross-app migration sequencing under `evennia migrate` works without bespoke command flow.
+- Consumer adoption is three lines in `settings.py` (`SHARDS_ROLE`, `SHARD_ID`, conditional `INSTALLED_APPS`).
+
+**What this does *not* prove** (next spikes):
+
+- Auto-population of `shard_id` on object creation (pre_save signal mechanism untested).
+- Backfill of pre-existing rows (`#1` superuser, `#2` Limbo currently `NULL`).
+- Auto-filtering manager composition with Evennia's `SharedMemoryManager` (idmapper).
+- Cross-shard `UPDATE` semantics during handoff.
+
 ### 2026-04-28 — Case 1 gate re-run with first library code (still satisfied)
 
 Re-ran `evennia test evennia` after the `config.py` accessors landed. Result identical to the previous gate run: 1662 / 2 errors / 38 skipped, same two errors (both missing optional Evennia contrib dependencies, unrelated to evennia-shards). The library's first real code is provably non-perturbing of Evennia's test suite. See [test-history/test_results_3_2026-04-28.md](test-history/test_results_3_2026-04-28.md).
