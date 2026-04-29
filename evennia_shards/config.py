@@ -11,6 +11,7 @@ current deployment role or shard id should call these.
 """
 
 DEFAULT_ROLE = "monolith"
+DEFAULT_MESSAGE_TIMEOUT = 10
 
 
 def get_role() -> str:
@@ -31,3 +32,18 @@ def get_shard_id() -> str | None:
     from django.conf import settings
 
     return getattr(settings, "SHARD_ID", None)
+
+
+def get_message_timeout(kind: str) -> int:
+    """Return the message-bus timeout (seconds) for `kind`.
+
+    Resolution: per-kind override map (`SHARDS_MESSAGE_TIMEOUTS`) first,
+    then the global default (`SHARDS_MESSAGE_TIMEOUT_DEFAULT`, library
+    default 10s).
+    """
+    from django.conf import settings
+
+    overrides = getattr(settings, "SHARDS_MESSAGE_TIMEOUTS", {})
+    if kind in overrides:
+        return overrides[kind]
+    return getattr(settings, "SHARDS_MESSAGE_TIMEOUT_DEFAULT", DEFAULT_MESSAGE_TIMEOUT)

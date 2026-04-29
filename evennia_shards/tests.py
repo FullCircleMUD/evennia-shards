@@ -6,7 +6,13 @@ from django.test import override_settings
 from evennia.objects.models import ObjectDB
 from evennia.utils.test_resources import BaseEvenniaTestCase
 
-from evennia_shards import ShardIsolationError, get_role, get_shard_id
+from evennia_shards import (
+    ShardIsolationError,
+    get_message_timeout,
+    get_role,
+    get_shard_id,
+)
+from evennia_shards.models import Message
 
 TYPECLASS = "evennia.objects.objects.DefaultObject"
 
@@ -40,6 +46,66 @@ class ConfigAccessorTests(BaseEvenniaTestCase):
     @override_settings(SHARD_ID="some-shard")
     def test_get_shard_id_reflects_setting(self):
         self.assertEqual(get_shard_id(), "some-shard")
+
+
+class MessageTimeoutAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_message_timeout accessor."""
+
+    def test_default_is_10_seconds_when_no_settings(self):
+        # No SHARDS_MESSAGE_TIMEOUT_DEFAULT, no SHARDS_MESSAGE_TIMEOUTS
+        self.assertEqual(get_message_timeout("anything"), 10)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUT_DEFAULT=20)
+    def test_global_default_is_overridden(self):
+        self.assertEqual(get_message_timeout("anything"), 20)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUTS={"tell": 5, "character_handoff": 30})
+    def test_per_kind_override_returns_specific_timeout(self):
+        self.assertEqual(get_message_timeout("tell"), 5)
+        self.assertEqual(get_message_timeout("character_handoff"), 30)
+
+    @override_settings(
+        SHARDS_MESSAGE_TIMEOUT_DEFAULT=20,
+        SHARDS_MESSAGE_TIMEOUTS={"tell": 5},
+    )
+    def test_unmapped_kind_falls_back_to_default(self):
+        self.assertEqual(get_message_timeout("tell"), 5)
+        self.assertEqual(get_message_timeout("other_kind"), 20)
+
+
+class MessageModelTests(BaseEvenniaTestCase):
+    """The Message model is wired and the migration deploys."""
+
+    def test_table_name_is_namespaced(self):
+        self.assertEqual(Message._meta.db_table, "evennia_shards_message")
+
+    def test_create_round_trips_payload(self):
+        msg = Message.objects.create(
+            to_shard="shard1",
+            from_shard="shard0",
+            kind="character_handoff",
+            payload={"char_id": 42, "to_room": 7},
+        )
+        loaded = Message.objects.get(pk=msg.pk)
+        self.assertEqual(loaded.to_shard, "shard1")
+        self.assertEqual(loaded.from_shard, "shard0")
+        self.assertEqual(loaded.kind, "character_handoff")
+        self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
+        self.assertIsNotNone(loaded.created_at)
+
+    def test_payload_defaults_to_empty_dict(self):
+        msg = Message.objects.create(
+            to_shard="shard1",
+            kind="ping",
+        )
+        self.assertEqual(msg.payload, {})
+
+    def test_from_shard_can_be_null(self):
+        msg = Message.objects.create(
+            to_shard="shard1",
+            kind="ping",
+        )
+        self.assertIsNone(msg.from_shard)
 
 
 class AppSetupTests(BaseEvenniaTestCase):
