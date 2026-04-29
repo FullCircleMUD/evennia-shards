@@ -8,12 +8,14 @@ from evennia.utils.test_resources import BaseEvenniaTestCase
 
 from evennia_shards import (
     MessageBusError,
+    MessageHandler,
     ShardIsolationError,
     delete_message,
     get_message_timeout,
     get_role,
     get_shard_id,
     poll_messages,
+    process_inbox,
     send_message,
 )
 from evennia_shards.models import Message
@@ -243,6 +245,135 @@ class DeleteMessageTests(BaseEvenniaTestCase):
         delete_message(msg)
 
         self.assertEqual(poll_messages("shard1").count(), 0)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class MessageHandlerTests(BaseEvenniaTestCase):
+    """The base MessageHandler dispatches library-shipped kinds."""
+
+    def test_unknown_kind_returns_false(self):
+        # Inject directly via Message.objects.create — bypass send_message
+        # to avoid the same-shard guard for this test fixture.
+        msg = Message.objects.create(
+            kind="unknown_kind",
+            payload={},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        self.assertFalse(MessageHandler().handle(msg))
+
+    def test_ping_returns_true_and_inserts_ping_received_reply(self):
+        ping = Message.objects.create(
+            kind="ping",
+            payload={"text": "hello"},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = MessageHandler().handle(ping)
+        self.assertTrue(result)
+
+        replies = list(Message.objects.filter(kind="ping_received"))
+        self.assertEqual(len(replies), 1)
+        reply = replies[0]
+        self.assertEqual(reply.to_shard, "shard1")
+        self.assertEqual(reply.from_shard, "shard0")
+        self.assertEqual(reply.payload, {"original_pk": ping.pk, "echo": {"text": "hello"}})
+
+    def test_ping_with_no_from_shard_returns_true_and_no_reply(self):
+        ping = Message.objects.create(
+            kind="ping",
+            payload={},
+            to_shard="shard0",
+            from_shard=None,
+        )
+        result = MessageHandler().handle(ping)
+        self.assertTrue(result)
+        self.assertFalse(Message.objects.filter(kind="ping_received").exists())
+
+    def test_ping_received_returns_true_and_inserts_nothing(self):
+        msg = Message.objects.create(
+            kind="ping_received",
+            payload={"original_pk": 99, "echo": {}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        # No new rows inserted (the message itself isn't auto-deleted by
+        # the handler — that's process_inbox's job).
+        self.assertEqual(Message.objects.count(), before_count)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ProcessInboxTests(BaseEvenniaTestCase):
+    """process_inbox runs one polling cycle: poll, dispatch, delete on success."""
+
+    def test_handler_truthy_deletes_message(self):
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        processed = process_inbox(AlwaysHandle())
+        self.assertEqual(processed, 1)
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_handler_falsy_leaves_message(self):
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class NeverHandle(MessageHandler):
+            def handle(self, message):
+                return False
+
+        processed = process_inbox(NeverHandle())
+        self.assertEqual(processed, 0)
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_handler_exception_leaves_message(self):
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class BrokenHandler(MessageHandler):
+            def handle(self, message):
+                raise RuntimeError("oops")
+
+        processed = process_inbox(BrokenHandler())
+        self.assertEqual(processed, 0)
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_default_handler_processes_ping(self):
+        # End-to-end with the default base handler: ping arrives, gets
+        # consumed, ping_received is inserted to the original sender.
+        Message.objects.create(
+            kind="ping", payload={"text": "hi"}, to_shard="shard0", from_shard="shard1",
+        )
+        processed = process_inbox()
+        self.assertEqual(processed, 1)
+        self.assertFalse(Message.objects.filter(kind="ping").exists())
+        self.assertEqual(
+            Message.objects.filter(kind="ping_received", to_shard="shard1").count(),
+            1,
+        )
+
+    def test_skips_messages_for_other_shards(self):
+        Message.objects.create(
+            kind="custom", payload={}, to_shard="shard9", from_shard="shard1",
+        )
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        processed = process_inbox(AlwaysHandle())
+        self.assertEqual(processed, 0)
+        self.assertEqual(Message.objects.count(), 1)
 
 
 class AppSetupTests(BaseEvenniaTestCase):
