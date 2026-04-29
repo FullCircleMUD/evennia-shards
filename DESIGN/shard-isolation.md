@@ -18,7 +18,7 @@ These together prevent cache poisoning, cross-shard data corruption, and silent 
 | 1 | **`Model.from_db()` override on `ObjectDB`** | All read paths that construct an instance from DB row data — normal queryset iteration, `raw()`, `select_related()`. Verified in Django source: three call sites, all use this method. | Refuses construction when `row.shard_id != current_shard` (and isn't `"*"`). |
 | 2 | **`pre_save` signal handler on `ObjectDB`** | Every `instance.save()` (whether triggered by code, typeclass factory, or post-load resave). | Refuses if `instance.shard_id != current_shard`. *(The same signal also runs the auto-stamp logic for new rows where `shard_id is None`; the two behaviours coexist via the same handler.)* |
 | 3 | **`pre_delete` signal handler on `ObjectDB`** | Both `instance.delete()` and `qs.delete()` — Django fires `pre_delete` per affected row, even for queryset bulk deletes (it has to, for cascade handling). | Refuses if `instance.shard_id != current_shard`. |
-| 4 | **`QuerySet.update()` override** *(in a thin custom QuerySet on the `ObjectDB` manager)* | Queryset bulk updates — the one write operation Django does **not** fire signals for. | Pre-filters with `WHERE shard_id = current_shard` before generating SQL. |
+| 4 | **`QuerySet.update()` override** *(in a thin custom QuerySet on the `ObjectDB` manager)* | Queryset bulk updates — the one write operation Django does **not** fire signals for. | Refuses if the queryset would touch any row whose `shard_id` is neither current nor `"*"`. Loud failure, consistent with the other three chokepoints. |
 
 Plus, for ownership handoff (future): `instance.flush_from_cache()` — Evennia's idmapper exposes this; the handoff protocol will call it on the source shard after writing the new ownership.
 
@@ -31,9 +31,16 @@ Plus, for ownership handoff (future): `instance.flush_from_cache()` — Evennia'
 
 ## What is *deliberately* not enforced
 
+The chokepoints cover **instantiation, persistence, and per-row mutation**. They do not cover scalar SQL inspection or row-data extraction that never builds an instance:
+
 - **Aggregate operations** (`count()`, `exists()`, `aggregate(...)`) return cross-shard answers. They don't construct instances or modify data; they return scalars. Wrong-but-not-damaging. Consumers should be aware that "how many characters exist in this table?" is a global question.
+- **`.values()` / `.values_list()`** return dicts/tuples of column data directly from rows, never going through `from_db`. So `Character.objects.values("db_key", "shard_id", "db_location_id")` happily pulls field data for remote rows. No instance is constructed and nothing is persisted, so neither invariant is violated — but consumers should know that row-data inspection is a global question, the same way aggregates are.
 - **Raw cursor SQL** (`with connection.cursor() as cur: cur.execute(...)`) bypasses every chokepoint by definition. Discipline-dependent — the same as it would be in any Django app. Documented as a consumer responsibility.
 - **Pickling/unpickling typeclass instances** bypasses `from_db`. Rare in practice; not currently a concern. Can be addressed if it ever surfaces.
+
+Worth disambiguating: **`Manager.raw()` *is* covered** — its iteration goes through `RawModelIterable`, which is one of `from_db`'s three call sites. People sometimes lump `raw()` with cursor SQL, but Django actually hooks raw queries through the same construction path.
+
+The general framing: the library prevents **cache poisoning, cross-shard data corruption, and silent state divergence**. It does not provide an information wall — a shard process can still ask scalar or row-data questions about rows it doesn't own. If we wanted information walls we'd be in schema-based multi-tenancy territory.
 
 ## How this meets the architectural goals
 
