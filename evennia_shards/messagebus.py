@@ -45,3 +45,13 @@ def poll_messages(shard_id: str | None = None):
     if shard_id is None:
         shard_id = get_shard_id()
     return Message.objects.filter(to_shard=shard_id).order_by("created_at")
+
+
+def delete_message(message) -> None:
+    """Delete a processed message row.
+
+    Thin wrapper over `message.delete()` so the API surface is consistent
+    (send / poll / delete) and so future side-effects (metrics, idempotency
+    bookkeeping) can land here without consumer changes.
+    """
+    message.delete()

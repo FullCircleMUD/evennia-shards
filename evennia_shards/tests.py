@@ -8,6 +8,7 @@ from evennia.utils.test_resources import BaseEvenniaTestCase
 
 from evennia_shards import (
     ShardIsolationError,
+    delete_message,
     get_message_timeout,
     get_role,
     get_shard_id,
@@ -195,6 +196,29 @@ class PollMessagesTests(BaseEvenniaTestCase):
         # Caller can chain .filter / .count / .first without coercing
         self.assertEqual(result.count(), 1)
         self.assertIsNotNone(result.first())
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class DeleteMessageTests(BaseEvenniaTestCase):
+    """delete_message primitive: remove a processed message row."""
+
+    def test_deletes_only_the_named_message(self):
+        keep = send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        drop = send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+
+        delete_message(drop)
+
+        remaining_pks = list(Message.objects.values_list("pk", flat=True))
+        self.assertIn(keep.pk, remaining_pks)
+        self.assertNotIn(drop.pk, remaining_pks)
+
+    def test_subsequent_poll_does_not_return_deleted_message(self):
+        msg = send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        self.assertEqual(poll_messages("shard1").count(), 1)
+
+        delete_message(msg)
+
+        self.assertEqual(poll_messages("shard1").count(), 0)
 
 
 class AppSetupTests(BaseEvenniaTestCase):
