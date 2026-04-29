@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-29 — Bespoke spike chokepoints 1 & 2 land with isolated tests
+
+The `bespoke` branch now carries the first two of the four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage:
+
+- **`pre_save` chokepoint** (commit `80226be`): the existing auto-stamp handler grew a second arm — refuse the save if `instance.shard_id` is set and is neither the current shard nor `"*"`. New `ShardIsolationError` exception type. Live smoke test confirmed via in-game `@py` (the chokepoint raised with the expected stack trace pointing at the offending caller).
+- **`pre_delete` chokepoint** (this commit): mirrors `pre_save` minus the auto-stamp arm. Refuses to delete a row whose `shard_id` is neither current nor `"*"` (and not `None`, since legacy/unstamped rows are tolerated). Covers both `instance.delete()` and `qs.delete()` because Django fires `pre_delete` per affected row even on bulk queryset deletes.
+
+**Test infrastructure decoupled from `examples/demo_game/`:** `tests/test_settings.py` + `runtests.py` run the suite against an in-memory sqlite database with `evennia_shards` in `INSTALLED_APPS`, using `BaseEvenniaTestCase` to force `evennia.game_template.*` fallbacks. No gamedir needed. See [testing-setup.md](testing-setup.md). 13 tests passing (3 config + 1 app setup + 4 pre_save + 5 pre_delete).
+
+**What this proves:**
+
+- Both write-side chokepoints function exactly as designed in `shard-isolation.md`.
+- The single `pre_delete` handler covers both delete entry points (instance + queryset) without a separate qs.delete override, confirming Django's per-row signal dispatch on bulk deletes.
+- The library has a deterministic, hermetic test suite that runs in under half a second.
+
+**What this does *not* prove** (next steps in the spike):
+
+- `from_db` override (chokepoint 3) — the read-side guard.
+- `QuerySet.update()` override (chokepoint 4) — the bulk-update guard.
+- Cross-shard ownership handoff and the bypass primitive.
+
 ### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
 
 A pre_save signal handler in `EvenniaShardsConfig.ready()` now stamps `shard_id` to the current process's `SHARD_ID` whenever an `ObjectDB` (or subclass) is saved with `shard_id == None`. Explicit values (e.g. those set during a cross-shard handoff) are respected. Verified end-to-end: after a clean DB wipe + `evennia migrate` + `evennia start`, the bootstrap rows (`#1` superuser character, `#2` Limbo) and a runtime-dug `test` room (`#3`) all reported `shard_id = 'shard0'` via both the ORM and a raw SQL probe.

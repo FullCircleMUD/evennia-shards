@@ -16,7 +16,7 @@ class EvenniaShardsConfig(AppConfig):
         # of the column the migration adds. Idempotent — guards against
         # double-installation in dev reload scenarios.
         from django.db import models
-        from django.db.models.signals import pre_save
+        from django.db.models.signals import pre_delete, pre_save
         from evennia.objects.models import ObjectDB
 
         if not any(f.name == "shard_id" for f in ObjectDB._meta.get_fields()):
@@ -43,6 +43,16 @@ class EvenniaShardsConfig(AppConfig):
             dispatch_uid="evennia_shards.pre_save_chokepoint",
         )
 
+        # pre_delete chokepoint: refuse to delete a row owned by another
+        # shard. Covers both instance.delete() and qs.delete() — Django
+        # fires pre_delete per affected row even on bulk queryset deletes
+        # (it has to, for cascade handling). Connected without a sender
+        # filter for the same reason as pre_save.
+        pre_delete.connect(
+            _pre_delete_chokepoint,
+            dispatch_uid="evennia_shards.pre_delete_chokepoint",
+        )
+
 
 def _pre_save_chokepoint(sender, instance, **kwargs):
     from evennia.objects.models import ObjectDB
@@ -64,6 +74,30 @@ def _pre_save_chokepoint(sender, instance, **kwargs):
 
     raise ShardIsolationError(
         f"pre_save refused: shard {current!r} cannot persist "
+        f"{type(instance).__name__} pk={instance.pk!r} owned by shard "
+        f"{instance.shard_id!r}"
+    )
+
+
+def _pre_delete_chokepoint(sender, instance, **kwargs):
+    from evennia.objects.models import ObjectDB
+
+    if not isinstance(instance, ObjectDB):
+        return
+
+    from evennia_shards import get_shard_id
+    from evennia_shards.errors import ShardIsolationError
+
+    current = get_shard_id()
+
+    if instance.shard_id is None or instance.shard_id == "*":
+        return
+
+    if instance.shard_id == current:
+        return
+
+    raise ShardIsolationError(
+        f"pre_delete refused: shard {current!r} cannot delete "
         f"{type(instance).__name__} pk={instance.pk!r} owned by shard "
         f"{instance.shard_id!r}"
     )

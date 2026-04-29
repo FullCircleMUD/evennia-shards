@@ -11,6 +11,21 @@ from evennia_shards import ShardIsolationError, get_role, get_shard_id
 TYPECLASS = "evennia.objects.objects.DefaultObject"
 
 
+def _forge_db_shard(pk, shard_id):
+    """Bypass chokepoints to set a row's shard_id directly via raw SQL.
+
+    Used by tests to set up "remote shard" scenarios. Raw cursor SQL is
+    deliberately not covered by the chokepoints (see shard-isolation.md).
+    """
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE objects_objectdb SET shard_id=%s WHERE id=%s",
+            [shard_id, pk],
+        )
+
+
 class ConfigAccessorTests(BaseEvenniaTestCase):
     """Tests for the get_role / get_shard_id accessors."""
 
@@ -67,3 +82,50 @@ class PreSaveChokepointTests(BaseEvenniaTestCase):
         msg = str(ctx.exception)
         self.assertIn("shard0", msg)
         self.assertIn("shard1", msg)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class PreDeleteChokepointTests(BaseEvenniaTestCase):
+    """pre_delete chokepoint: refuse delete of remote-shard rows.
+
+    Permissive on shard_id=None (legacy unstamped) and shard_id="*" (global).
+    Covers both instance.delete() and qs.delete() — Django fires pre_delete
+    per row even on bulk queryset deletes.
+    """
+
+    def test_owned_instance_delete_passes(self):
+        obj = ObjectDB.objects.create(db_key="d1", db_typeclass_path=TYPECLASS)
+        # auto-stamped to shard0 by pre_save
+        obj.delete()
+
+    def test_global_sentinel_instance_delete_passes(self):
+        obj = ObjectDB.objects.create(db_key="d2", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "*"
+        obj.save()
+        obj.delete()
+
+    def test_unstamped_instance_delete_passes(self):
+        obj = ObjectDB.objects.create(db_key="d3", db_typeclass_path=TYPECLASS)
+        obj.shard_id = None
+        obj.delete()
+
+    def test_remote_instance_delete_raises(self):
+        obj = ObjectDB.objects.create(db_key="d4", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "shard1"
+        with self.assertRaises(ShardIsolationError) as ctx:
+            obj.delete()
+        msg = str(ctx.exception)
+        self.assertIn("shard0", msg)
+        self.assertIn("shard1", msg)
+
+    def test_remote_qs_delete_raises(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="d5", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, "shard1")
+        # Flush idmapper so qs.delete() loads a fresh instance with shard_id
+        # populated from the DB row (rather than the cached shard0 value).
+        flush_cache()
+        with self.assertRaises(ShardIsolationError):
+            ObjectDB.objects.filter(pk=pk).delete()
