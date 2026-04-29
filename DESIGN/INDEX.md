@@ -27,6 +27,7 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 - **[library-scope-and-mandates.md](library-scope-and-mandates.md)** — What the library provides, what it leaves to the consumer, and the single mandate (use `ShardGatewayMixin` for cross-shard boundary rooms).
 - **[consumer-constraints.md](consumer-constraints.md)** — What the library demands of consumer games. Hard constraints rooted in the first principle that any game object exists on exactly one shard.
 - **[shard-settings.md](shard-settings.md)** — The two settings (`SHARDS_ROLE`, `SHARD_ID`), how the library reads them, the defaults, and the rule that code reading them must use the `get_role()` / `get_shard_id()` accessors rather than raw `settings.X` reads.
+- **[cross-shard-message-bus.md](cross-shard-message-bus.md)** — How shards communicate with each other: a Postgres `messages` table polled via a Twisted `LoopingCall`, with `kind`/JSONB extensibility, configurable per-kind timeouts, and a deliberate scope of "real-time inter-process messaging only — not persistent player-facing storage."
 
 ### Drafts (under review)
 

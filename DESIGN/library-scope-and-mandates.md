@@ -4,26 +4,43 @@ What this library provides and what it deliberately leaves to the consumer. The 
 
 ## Scope bound
 
-The library is bound to the **single-Postgres era** — from one Evennia process today through however many shards run against a single, vertically scaled Postgres. Per the [archived handover](archive/evennia-shards-HANDOVER.md#project-identity-and-positioning), anything beyond that bound is explicitly out of scope.
+The library is bound to the **single-Postgres era** — from one Evennia process today through however many shards run against a single, vertically scaled Postgres. Per the [archived handover](../archive/evennia-shards-HANDOVER.md#project-identity-and-positioning), anything beyond that bound is explicitly out of scope.
 
-## Mandate: use `ShardGatewayMixin` for cross-shard boundary rooms
+## Library primitives (working set)
 
-The consumer must apply `ShardGatewayMixin` to any room typeclass that acts as a cross-shard boundary. The mixin provides the machinery for:
+A 2026-04-29 conversation reframed the library's value as a small set of cross-shard primitives rather than a consumer-facing typeclass mandate. The primitives identified, in build order:
 
-- Stable identification of gateway rooms across processes, independent of auto-generated DB IDs.
-- Reading data about a gateway room from another shard without instantiating the object into the local idmapper (cache invariant).
-- Landing a character into a gateway room during cross-shard handoff.
+1. **Cross-shard message bus.** Foundational. A way for one shard's process to send a message to another. Used internally for the teleport handoff signal and externally for cross-shard tells, channel propagation, and similar.
+2. **Cross-shard query helpers.** `.values()`-shaped reads of rows owned by another shard, returning data without instantiating typeclass objects locally (preserving the cache invariant).
+3. **Cross-shard teleport.** Library-extended movement primitive that handles same-shard and cross-shard targets transparently. Internally: serialise row, evict from source idmapper, signal destination via (1), destination loads row, redirect player session.
 
-The form of that machinery — exact identifier scheme, lookup mechanism, attribute layout — is implementation work, not a scope commitment. The scope-level commitment is that the mixin exists and that consumers must use it for cross-shard boundary rooms.
+A possible fourth, deferred:
 
-The mixin handles both **intra-shard** and **inter-shard** movement transparently. When a gateway's destination is on the same shard, the mixin teleports the character locally; when the destination is on another shard, it triggers the cross-shard handoff. A consumer can therefore design their world with gateways at every place they might *eventually* want a shard boundary, run as monolith indefinitely, and later shard the deployment without changing the world — only the deployment configuration changes.
+4. **Extended exit traversal.** Consumer exits whose destinations are on other shards. Mechanically a thin wrapper on (3) once (3) exists; deferred because the UX risk is real — `east` taking a noticeable moment will feel unresponsive in a way that "use portal" or "recall" does not. Worth doing only if the implementation is genuinely cheap by then and the UX is acceptable.
+
+## External dependencies
+
+Research on 2026-04-29 surfaced existing Django ecosystem libraries relevant to our partitioning machinery. The picture as of end of that day:
+
+- **`django-multitenant`** *(candidate, not committed)* — shared-schema, `tenant_id` column, auto-filtering manager. Conceptually the same shape we want for "every world-object row carries `shard_id`." Process-scoped active shard (we set it once at boot from `SHARDS_ROLE` / `SHARD_ID`) is even simpler than the request-scoped tenant the library was built for. Composition with Evennia's `SharedMemoryManager` (the idmapper) is the most likely friction point — see [open-questions.md](open-questions.md).
+- **No external messaging dependency.** Earlier thinking considered `channels_redis` for the cross-shard message bus. A subsequent conversation reframed the bus as a Postgres `messages` table with polling — see [cross-shard-message-bus.md](cross-shard-message-bus.md). Removing Redis from the picture means one less ops dependency; the only infrastructure required by the library is Postgres, which Evennia already requires.
+
+## Mandate: TBD pending review
+
+The previous mandate of this document was: *"Consumers must apply `ShardGatewayMixin` to any room typeclass that acts as a cross-shard boundary."* The 2026-04-29 conversation called this into question. The reasoning:
+
+- If the cross-shard machinery lives in library-provided primitives (teleport, query helpers, message bus), there is no need for a special "boundary room" typeclass — any room can be a cross-shard target, transparently.
+- The mixin's three jobs (stable identification, cross-shard data access, handoff landing) all reduce to *"every row has `(shard_id, pk)`"* plus the primitives above.
+- Removing the mandate makes the library invisible to consumers: they write rooms and exits the way they always did; the library handles cross-shard cases inside its own primitives.
+
+[**TBD** — needs discussion: whether the library has any consumer-facing mandate at all, or whether the entire surface is "use the library's teleport/exit/messaging primitives in place of the corresponding raw Evennia ones." The original mixin mandate is no longer treated as canonical; the replacement (if any) is open.]
 
 ## What the library does not provide
 
 - **Game concepts.** The library does not ship typeclasses for rooms, characters, items, exits, doors, or any other game-domain entity. These belong to the consumer.
-- **Build helpers for non-gateway entities.** No `get_or_create_room`, no exit factories, no NPC builders. Patterns for these may be documented elsewhere as advisory, but the library does not ship the code.
+- **Build helpers for game entities.** No `get_or_create_room`, no exit factories, no NPC builders. Patterns for these may be documented elsewhere as advisory, but the library does not ship the code.
 - **Operational policy.** The library does not dictate when or how the consumer's build script runs.
-- **Zone-to-shard mapping mechanism.** This is a Python constant in the consumer's source code. The library does not provide a runtime registry, config file, or service for it.
+- **Higher-level organisational concepts** (zones, regions, areas, biomes). Whether and how a consumer groups rooms is their world-design choice; the library partitions at the **room** level, not at any higher organisational level.
 
 ## Two principles that drove the scoping
 
