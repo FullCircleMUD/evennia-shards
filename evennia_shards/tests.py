@@ -7,6 +7,7 @@ from evennia.objects.models import ObjectDB
 from evennia.utils.test_resources import BaseEvenniaTestCase
 
 from evennia_shards import (
+    MessageBusError,
     ShardIsolationError,
     delete_message,
     get_message_timeout,
@@ -150,6 +151,29 @@ class SendMessageTests(BaseEvenniaTestCase):
         )
         loaded = Message.objects.get(pk=msg.pk)
         self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
+
+    def test_explicit_same_shard_send_raises(self):
+        with self.assertRaises(MessageBusError) as ctx:
+            send_message(
+                kind="ping",
+                payload={},
+                to_shard="shard0",
+                from_shard="shard0",
+            )
+        self.assertIn("shard0", str(ctx.exception))
+
+    def test_default_from_shard_same_as_to_shard_raises(self):
+        # SHARD_ID is "shard0" via class @override_settings;
+        # no explicit from_shard, so it defaults to "shard0",
+        # matching to_shard and tripping the check.
+        with self.assertRaises(MessageBusError):
+            send_message(kind="ping", payload={}, to_shard="shard0")
+
+    def test_no_message_row_inserted_when_same_shard_send_raises(self):
+        before = Message.objects.count()
+        with self.assertRaises(MessageBusError):
+            send_message(kind="ping", payload={}, to_shard="shard0", from_shard="shard0")
+        self.assertEqual(Message.objects.count(), before)
 
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")

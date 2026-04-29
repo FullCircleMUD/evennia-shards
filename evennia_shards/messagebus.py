@@ -17,12 +17,23 @@ def send_message(
 
     If `from_shard` is omitted, defaults to the current shard's `SHARD_ID`.
     Returns the created `Message` instance.
+
+    Raises `MessageBusError` if `to_shard == from_shard` — the bus is for
+    cross-shard messaging; same-shard sends are almost always a bug or a
+    misconfigured `SHARD_ID`. For deferred work on the same shard, use
+    Twisted's `reactor.callLater` or call the function directly.
     """
     from .config import get_shard_id
+    from .errors import MessageBusError
     from .models import Message
 
     if from_shard is None:
         from_shard = get_shard_id()
+    if to_shard == from_shard:
+        raise MessageBusError(
+            f"send_message refused: to_shard ({to_shard!r}) equals from_shard "
+            f"({from_shard!r}). The bus is for cross-shard messaging only."
+        )
     return Message.objects.create(
         kind=kind,
         payload=payload,
