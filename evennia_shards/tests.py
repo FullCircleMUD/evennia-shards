@@ -129,3 +129,62 @@ class PreDeleteChokepointTests(BaseEvenniaTestCase):
         flush_cache()
         with self.assertRaises(ShardIsolationError):
             ObjectDB.objects.filter(pk=pk).delete()
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class FromDbChokepointTests(BaseEvenniaTestCase):
+    """from_db chokepoint: refuse to instantiate rows owned by another shard.
+
+    Permissive on shard_id=None (legacy unstamped) and shard_id="*" (global).
+    Bypassed by .values() / .values_list() (per design — they don't construct
+    instances). See DESIGN/shard-isolation.md.
+    """
+
+    def test_owned_get_passes(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="r1", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        flush_cache()
+        ObjectDB.objects.get(pk=pk)
+
+    def test_global_sentinel_get_passes(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="r2", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "*"
+        obj.save()
+        pk = obj.pk
+        flush_cache()
+        ObjectDB.objects.get(pk=pk)
+
+    def test_unstamped_get_passes(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="r3", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, None)
+        flush_cache()
+        ObjectDB.objects.get(pk=pk)
+
+    def test_remote_get_raises(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="r4", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, "shard1")
+        flush_cache()
+        with self.assertRaises(ShardIsolationError) as ctx:
+            ObjectDB.objects.get(pk=pk)
+        msg = str(ctx.exception)
+        self.assertIn("shard0", msg)
+        self.assertIn("shard1", msg)
+
+    def test_values_bypass_does_not_raise(self):
+        obj = ObjectDB.objects.create(db_key="r5", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, "shard1")
+        # values() returns row data without going through from_db, so the
+        # chokepoint is intentionally not triggered.
+        result = list(ObjectDB.objects.filter(pk=pk).values("shard_id"))
+        self.assertEqual(result, [{"shard_id": "shard1"}])

@@ -6,26 +6,31 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
-### 2026-04-29 — Bespoke spike chokepoints 1 & 2 land with isolated tests
+### 2026-04-29 — Bespoke spike chokepoints 1, 2, and 3 land with isolated tests
 
-The `bespoke` branch now carries the first two of the four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage:
+The `bespoke` branch now carries the first three of the four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage:
 
-- **`pre_save` chokepoint** (commit `80226be`): the existing auto-stamp handler grew a second arm — refuse the save if `instance.shard_id` is set and is neither the current shard nor `"*"`. New `ShardIsolationError` exception type. Live smoke test confirmed via in-game `@py` (the chokepoint raised with the expected stack trace pointing at the offending caller).
-- **`pre_delete` chokepoint** (this commit): mirrors `pre_save` minus the auto-stamp arm. Refuses to delete a row whose `shard_id` is neither current nor `"*"` (and not `None`, since legacy/unstamped rows are tolerated). Covers both `instance.delete()` and `qs.delete()` because Django fires `pre_delete` per affected row even on bulk queryset deletes.
+- **`pre_save` chokepoint** (commit `80226be`): the existing auto-stamp handler grew a second arm — refuse the save if `instance.shard_id` is set and is neither the current shard nor `"*"`. New `ShardIsolationError` exception type. Live smoke test confirmed via in-game `@py`.
+- **`pre_delete` chokepoint** (commit `0bcce76`): mirrors `pre_save` minus the auto-stamp arm. Refuses to delete a row whose `shard_id` is neither current nor `"*"` (and not `None`, since legacy/unstamped rows are tolerated). Covers both `instance.delete()` and `qs.delete()` because Django fires `pre_delete` per affected row even on bulk queryset deletes.
+- **`from_db` chokepoint** (this commit): patches `ObjectDB.from_db` from `AppConfig.ready()` with a closure-captured replacement that inspects `shard_id` in the row data before delegating to the original. Refuses construction if `row.shard_id` is set and is neither current nor `"*"`. Inherited automatically by typeclass subclasses (Room, Character, ...) via Python MRO. Covers all three Django call sites: `ModelIterable` (queryset iteration), `RawModelIterable` (raw queries), `RelatedPopulator` (select_related). Idempotent via a marker attribute against dev reload.
 
-**Test infrastructure decoupled from `examples/demo_game/`:** `tests/test_settings.py` + `runtests.py` run the suite against an in-memory sqlite database with `evennia_shards` in `INSTALLED_APPS`, using `BaseEvenniaTestCase` to force `evennia.game_template.*` fallbacks. No gamedir needed. See [testing-setup.md](testing-setup.md). 13 tests passing (3 config + 1 app setup + 4 pre_save + 5 pre_delete).
+**Test infrastructure decoupled from `examples/demo_game/`:** `tests/test_settings.py` + `runtests.py` run the suite against an in-memory sqlite database with `evennia_shards` in `INSTALLED_APPS`, using `BaseEvenniaTestCase` to force `evennia.game_template.*` fallbacks. No gamedir needed. See [testing-setup.md](testing-setup.md). 18 tests passing (3 config + 1 app setup + 4 pre_save + 5 pre_delete + 5 from_db) in ~0.5s.
 
 **What this proves:**
 
-- Both write-side chokepoints function exactly as designed in `shard-isolation.md`.
-- The single `pre_delete` handler covers both delete entry points (instance + queryset) without a separate qs.delete override, confirming Django's per-row signal dispatch on bulk deletes.
+- All three of the read/write chokepoints function exactly as designed.
+- `from_db` correctly catches remote-row instantiation in queryset iteration, FK-related lookups (when select_related is used), and raw queries — without forking Evennia's idmapper or replacing managers.
+- `.values()` / `.values_list()` correctly bypass the chokepoint (per design — they return row data without constructing instances).
 - The library has a deterministic, hermetic test suite that runs in under half a second.
 
-**What this does *not* prove** (next steps in the spike):
+**What this does *not* prove** (last spike step):
 
-- `from_db` override (chokepoint 3) — the read-side guard.
 - `QuerySet.update()` override (chokepoint 4) — the bulk-update guard.
-- Cross-shard ownership handoff and the bypass primitive.
+
+**Beyond the four-chokepoint spike** (Phase 2):
+
+- Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).
+- Backfill migration for legacy NULL rows.
 
 ### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
 

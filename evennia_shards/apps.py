@@ -53,6 +53,36 @@ class EvenniaShardsConfig(AppConfig):
             dispatch_uid="evennia_shards.pre_delete_chokepoint",
         )
 
+        # from_db chokepoint: refuse to construct an instance from a row
+        # whose shard_id is owned by another shard. Covers all read paths
+        # that produce a Model instance — queryset iteration, raw() queries,
+        # and select_related (the three Django call sites that go through
+        # Model.from_db). Inherited automatically by typeclass subclasses
+        # (Room, Character, ...) since they look up from_db via Python's
+        # MRO and ObjectDB is the patched class.
+        if not getattr(ObjectDB, "_evennia_shards_from_db_patched", False):
+            original_from_db = ObjectDB.from_db.__func__
+
+            def _shard_aware_from_db(cls, db, field_names, values):
+                field_names_list = list(field_names)
+                if "shard_id" in field_names_list:
+                    idx = field_names_list.index("shard_id")
+                    row_shard = values[idx]
+                    if row_shard is not None and row_shard != "*":
+                        from evennia_shards import get_shard_id
+                        from evennia_shards.errors import ShardIsolationError
+
+                        current = get_shard_id()
+                        if row_shard != current:
+                            raise ShardIsolationError(
+                                f"from_db refused: shard {current!r} cannot "
+                                f"instantiate {cls.__name__} with shard_id={row_shard!r}"
+                            )
+                return original_from_db(cls, db, field_names, values)
+
+            ObjectDB.from_db = classmethod(_shard_aware_from_db)
+            ObjectDB._evennia_shards_from_db_patched = True
+
 
 def _pre_save_chokepoint(sender, instance, **kwargs):
     from evennia.objects.models import ObjectDB
