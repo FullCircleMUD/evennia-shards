@@ -17,6 +17,7 @@ from evennia_shards import (
     get_message_timeout,
     get_role,
     get_shard_id,
+    get_shard_url,
     get_ticket,
     poll_messages,
     process_inbox,
@@ -56,6 +57,36 @@ class ConfigAccessorTests(BaseEvenniaTestCase):
     @override_settings(SHARD_ID="some-shard")
     def test_get_shard_id_reflects_setting(self):
         self.assertEqual(get_shard_id(), "some-shard")
+
+
+class ShardUrlAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_shard_url accessor."""
+
+    @override_settings(SHARD_URLS={"shard0": "http://localhost:4001"})
+    def test_returns_url_for_known_shard(self):
+        self.assertEqual(get_shard_url("shard0"), "http://localhost:4001")
+
+    @override_settings(SHARD_URLS={"shard0": "http://localhost:4001"})
+    def test_raises_key_error_for_unknown_shard(self):
+        with self.assertRaises(KeyError):
+            get_shard_url("shard99")
+
+    def test_raises_value_error_when_not_configured(self):
+        # No SHARD_URLS in settings at all (monolith case).
+        with self.assertRaises(ValueError):
+            get_shard_url("shard0")
+
+    @override_settings(
+        SHARD_URLS={
+            "router": "http://router.example.com",
+            "shard0": "http://shard0.example.com",
+            "shard1": "http://shard1.example.com",
+        }
+    )
+    def test_multiple_shards(self):
+        self.assertEqual(get_shard_url("router"), "http://router.example.com")
+        self.assertEqual(get_shard_url("shard0"), "http://shard0.example.com")
+        self.assertEqual(get_shard_url("shard1"), "http://shard1.example.com")
 
 
 class MessageTimeoutAccessorTests(BaseEvenniaTestCase):

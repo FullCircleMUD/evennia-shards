@@ -34,6 +34,26 @@ def get_shard_id() -> str | None:
     return getattr(settings, "SHARD_ID", None)
 
 
+def get_shard_url(shard_id: str) -> str:
+    """Return the webclient base URL for `shard_id`.
+
+    Reads from the consumer's ``SHARD_URLS`` setting — a dict mapping
+    shard IDs to base URLs (e.g. ``{"shard0": "http://host:4001"}``).
+
+    Raises ``KeyError`` if the shard ID is not found, ``ValueError``
+    if ``SHARD_URLS`` is not configured.
+    """
+    from django.conf import settings
+
+    urls = getattr(settings, "SHARD_URLS", None)
+    if urls is None:
+        raise ValueError(
+            "SHARD_URLS is not configured. Define a dict mapping shard IDs "
+            "to base URLs in your Django settings."
+        )
+    return urls[shard_id]
+
+
 def get_message_timeout(kind: str) -> int:
     """Return the message-bus timeout (seconds) for `kind`.
 
