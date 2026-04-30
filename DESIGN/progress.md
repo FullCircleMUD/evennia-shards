@@ -6,6 +6,34 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-30 — Client redirect spike proven end-to-end
+
+The client-side redirect mechanism from [ticket-auth-flow.md](ticket-auth-flow.md) is validated on the `bespoke` branch. An OOB `shard_redirect` message triggers a full page navigation to the target instance's webclient with a ticket token. The target instance's middleware injects the token into the WebSocket connection, and the auth cascade logs the player in.
+
+**What was proven** (live smoke test on router instance redirecting to itself):
+
+| Step | Result |
+|------|--------|
+| Server sends `shard_redirect` OOB | JS plugin catches it (direct emitter listener bypasses `default_out.js`) |
+| `window.location.href` navigates to target | Browser loads target webclient page |
+| Middleware injects `&ticket=TOKEN` into `window.csessid` | Token flows into WebSocket URL query string |
+| `onOpen()` auth cascade: session first, then ticket | Ticket validated, auto-login succeeds |
+| Page refresh with stale `?ticket=` in URL | Browser session takes priority, stale token ignored |
+
+**Key implementation decisions**:
+
+- **Full page redirect** (not WebSocket-level reconnect): avoids fighting Evennia's private `WebsocketConnection` class, URL construction conflicts (`wsurl + '?' + csessid`), and emitter lifecycle. Browser address bar updates, so refresh stays on the target instance.
+- **Auth priority reorder**: browser session checked before ticket (was ticket-first). Load-bearing for page refresh — tickets are single-use, so checking them first would fail on refresh after consumption.
+- **Middleware dual role**: injects both the `shard_redirect.js` plugin (always) and the ticket injection script (only when `?ticket=` in page URL). Zero consumer config beyond `INSTALLED_APPS`.
+
+**Components**:
+
+- `shard_redirect.js`: OOB listener → `window.location.href = url`
+- `middleware.py`: `ShardRedirectScriptMiddleware` — script tag injection + ticket-to-csessid injection
+- `protocols.py`: `onOpen()` refactored from two-phase to single-phase with three-way auth cascade (session → ticket → role gate)
+
+96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, IC/OOC command overrides).
+
 ### 2026-04-30 — Ticket auth: auto-login spike proven end-to-end
 
 The ticket-based auto-login flow from [ticket-auth-flow.md](ticket-auth-flow.md) is validated end-to-end on the `bespoke` branch. A WebSocket connection arriving with `?ticket=<token>` is intercepted, validated, consumed, and the session is auto-logged-in before `sessionhandler.connect()` fires — so the Server sees `logged_in=True` and `uid` already set, triggering Evennia's built-in `portal_connect()` auto-login path.
@@ -31,7 +59,7 @@ The ticket-based auto-login flow from [ticket-auth-flow.md](ticket-auth-flow.md)
 
 **New files**: `DESIGN/evennia-upgrade-checklist.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
 
-96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, client-side redirect).
+96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, client-side redirect). Note: the two-phase `onOpen()` was later refactored into a single-phase auth cascade — see the "Client redirect spike" milestone above.
 
 ### 2026-04-30 — Ticket auth: full validation spike proven
 

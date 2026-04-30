@@ -21,6 +21,7 @@ from commands.command import (  # TEMPORARY (spike) — delete with the commands
     CmdCreateTicketWithIp,
     CmdCreateTicketWithWrongIp,
     CmdShardCheck,
+    CmdTestRedirect,
 )
 
 
@@ -45,6 +46,7 @@ class CharacterCmdSet(default_cmds.CharacterCmdSet):
         self.add(CmdCreateTicketNoIp())  # TEMPORARY (spike)
         self.add(CmdCreateTicketWithIp())  # TEMPORARY (spike)
         self.add(CmdCreateTicketWithWrongIp())  # TEMPORARY (spike)
+        self.add(CmdTestRedirect())  # TEMPORARY (spike)
 
 
 class AccountCmdSet(default_cmds.AccountCmdSet):

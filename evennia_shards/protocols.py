@@ -53,41 +53,22 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
     def onOpen(self):
         """Called when the WebSocket connection is fully established.
 
-        Two-phase flow:
+        Reproduced from Evennia 6.0.0 WebSocketClient.onOpen() with
+        ticket-based auth layered in.
+        See DESIGN/evennia-upgrade-checklist.md for what to diff on upgrade.
 
-        Phase 1 (pre-session): extract and validate the ticket token.
-        On failure, send an error and close — no session is registered.
-        On success, stash account/character IDs for Phase 2.
-        If no token and role is shard, reject (shards are ticket-only).
-
-        Phase 2 (reproduced from Evennia 6.0.0): init the session, check
-        for browser-session or ticket auth, set protocol flags, and call
-        ``sessionhandler.connect()``.
+        Auth priority:
+        1. Existing browser session (csessid) — handles page refresh
+           with a stale ?ticket= in the URL without re-consuming it.
+        2. Ticket token in URL — fresh connection, validate and consume.
+        3. No session and no token:
+           - Shard: reject (shards are ticket-only).
+           - Router: fall through to normal login screen.
         """
-        # ── Phase 1: pre-session ticket validation ─────────────────
+        # Extract ticket token from URL (if any) but don't validate yet.
         token = self._extract_ticket_token()
 
-        if token:
-            client_address = self._get_client_address()
-            valid, result = self._validate_ticket(token, client_address)
-            if not valid:
-                self._send_text(result)
-                self.sendClose(4001, result)
-                return
-            # Stash for Phase 2 — survives init_session() reset.
-            self._ticket_account_id = result["account_id"]
-            self._ticket_character_id = result["character_id"]
-        else:
-            # No token: role-dependent gating.
-            role = get_role()
-            if role == "shard":
-                msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
-                self._send_text(msg)
-                self.sendClose(4001, msg)
-                return
-            # Router (or any non-shard role): fall through to normal login.
-
-        # ── Phase 2: reproduced Evennia WebSocketClient.onOpen() ───
+        # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
         # Based on Evennia 6.0.0. See DESIGN/evennia-upgrade-checklist.md.
         client_address = self._get_client_address()
 
@@ -96,26 +77,41 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         csession = self.get_client_session()  # sets self.csessid
         csessid = self.csessid
 
-        # Auth injection: ticket auth takes priority, then browser session.
-        if hasattr(self, "_ticket_account_id"):
-            self.uid = self._ticket_account_id
+        # Auth: browser session first, then ticket, then role gate.
+        uid = csession and csession.get("webclient_authenticated_uid", None)
+        nonce = csession and csession.get("webclient_authenticated_nonce", 0)
+        if uid:
+            # Existing browser session — use it, ignore any stale token.
+            self.uid = uid
+            self.nonce = nonce
             self.logged_in = True
-        else:
-            # Existing Evennia browser-session auth (router path).
-            uid = csession and csession.get("webclient_authenticated_uid", None)
-            nonce = csession and csession.get("webclient_authenticated_nonce", 0)
-            if uid:
-                self.uid = uid
-                self.nonce = nonce
-                self.logged_in = True
 
-                for old_session in self.sessionhandler.sessions_from_csessid(csessid):
-                    if (
-                        hasattr(old_session, "websocket_close_code")
-                        and old_session.websocket_close_code != CLOSE_NORMAL
-                    ):
-                        self.sessid = old_session.sessid
-                        self.sessionhandler.disconnect(old_session)
+            for old_session in self.sessionhandler.sessions_from_csessid(csessid):
+                if (
+                    hasattr(old_session, "websocket_close_code")
+                    and old_session.websocket_close_code != CLOSE_NORMAL
+                ):
+                    self.sessid = old_session.sessid
+                    self.sessionhandler.disconnect(old_session)
+        elif token:
+            # No session — try ticket auth.
+            valid, result = self._validate_ticket(token, client_address)
+            if not valid:
+                self._send_text(result)
+                self.sendClose(4001, result)
+                return
+            self.uid = result["account_id"]
+            self.logged_in = True
+            self._ticket_character_id = result["character_id"]
+        else:
+            # No session, no token — role-dependent gating.
+            role = get_role()
+            if role == "shard":
+                msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
+                self._send_text(msg)
+                self.sendClose(4001, msg)
+                return
+            # Router (or any non-shard role): fall through to login screen.
 
         browserstr = f":{self.browserstr}" if self.browserstr else ""
         self.protocol_flags["CLIENTNAME"] = f"Evennia Webclient (websocket{browserstr})"

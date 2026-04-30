@@ -31,6 +31,16 @@ class EvenniaShardsConfig(AppConfig):
                 "evennia_shards.protocols.ShardWebSocketClient"
             )
 
+            # Inject the shard redirect JS middleware so the webclient
+            # gets the redirect plugin without any template edits.
+            _middleware_path = (
+                "evennia_shards.middleware.ShardRedirectScriptMiddleware"
+            )
+            if _middleware_path not in settings.MIDDLEWARE:
+                settings.MIDDLEWARE = list(settings.MIDDLEWARE) + [
+                    _middleware_path
+                ]
+
         # Late-bind shard_id onto Evennia's ObjectDB so the ORM is aware
         # of the column the migration adds. Idempotent — guards against
         # double-installation in dev reload scenarios.

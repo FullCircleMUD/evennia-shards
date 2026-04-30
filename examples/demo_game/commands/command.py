@@ -201,6 +201,33 @@ class CmdCreateTicketWithWrongIp(BaseCommand):
         )
 
 
+class CmdTestRedirect(BaseCommand):
+    """
+    Send a test OOB redirect message with a ticket token.
+
+    Usage:
+      @test_redirect <token>
+
+    Builds http://localhost:4001/webclient?ticket=<token> and sends
+    a ``shard_redirect`` OOB message to the current session.
+
+    TEMPORARY — added for the redirect spike. Delete after.
+    """
+
+    key = "@test_redirect"
+    locks = "cmd:perm(Developer)"
+    help_category = "Admin"
+
+    def func(self):
+        token = self.args.strip()
+        if not token:
+            self.caller.msg("|rUsage: @test_redirect <token>|n")
+            return
+        url = f"http://localhost:4001/webclient?ticket={token}"
+        self.session.msg(shard_redirect=[[url], {}])
+        self.caller.msg(f"|wSent shard_redirect OOB:|n {url}")
+
+
 class Command(BaseCommand):
     """
     Base command (you may see this if a child command had no help text defined)

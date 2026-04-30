@@ -16,21 +16,28 @@ Router                          Client                          Shard
   |    account_id, character_id,  |                               |
   |    "shard0")                  |                               |
   |                               |                               |
-  |  shard_ws = get_shard_ws(     |                               |
+  |  shard_url = get_shard_url(   |                               |
   |    "shard0")                  |                               |
   |                               |                               |
-  |  redirect_client(shard_ws,    |                               |
-  |    token)                     |                               |
+  |  OOB: shard_redirect          |                               |
+  |  [shard_url?ticket=T]         |                               |
   |------------------------------>|                               |
-  |                               |  ws://shard:port/ws?ticket=T  |
+  |                               |  window.location.href =       |
+  |                               |  http://shard/webclient?       |
+  |                               |    ticket=T                   |
   |                               |------------------------------>|
   |                               |                               |
-  |                               |  validate_ticket(T)           |
-  |                               |  -> account_id, character_id  |
+  |                               |  middleware injects ticket     |
+  |                               |  into window.csessid           |
   |                               |                               |
-  |                               |  auto-login session           |
-  |                               |  puppet character             |
-  |                               |  delete ticket                |
+  |                               |  ws connects with             |
+  |                               |  &ticket=T in query string    |
+  |                               |                               |
+  |                               |  onOpen() auth cascade:       |
+  |                               |  1. browser session? (no)     |
+  |                               |  2. ticket? validate + login  |
+  |                               |  3. puppet character          |
+  |                               |  4. delete ticket             |
   |                               |                               |
   |                               |  player is IC, playing        |
   |                               |<----------------------------->|
@@ -67,11 +74,30 @@ Token extraction happens in a custom `WebSocketClient` subclass wired in via Eve
 
 2. **Dynamic base class**: The library does *not* hardcode Evennia's `WebSocketClient` as the base class. Instead, `AppConfig.ready()` stashes the consumer's *current* `WEBSOCKET_PROTOCOL_CLASS` value before overwriting it. When `protocols.py` is later imported by `service.py`, it resolves the stashed path via `class_from_module` and subclasses *that*. This preserves any consumer customisations to the WebSocket protocol — the library layers on top rather than replacing.
 
+## Auth priority in onOpen()
+
+The `onOpen()` override uses a three-way auth cascade:
+
+1. **Browser session** (csessid): if the browser already has an authenticated Django session, use it. This handles page refreshes — a stale `?ticket=` in the URL is ignored, avoiding re-consumption of an already-deleted ticket.
+2. **Ticket token**: if no browser session but `?ticket=` is present in the WebSocket URL, validate and consume the ticket. Sets `uid` + `logged_in` for `portal_connect()` auto-login.
+3. **No session, no token**: role-dependent gating. Shards reject ("this shard requires a ticket"). Routers fall through to the normal login screen.
+
+This ordering is load-bearing: tickets are single-use, so checking them first would break page refresh (the token is already consumed on first use, but `at_login()` saved the uid to the browser session).
+
+## Client-side redirect mechanism
+
+The redirect uses a full page navigation (`window.location.href`), not a WebSocket-level reconnect. This is simpler and gives better UX:
+
+- **OOB message**: server sends `["shard_redirect", ["http://host:port/webclient?ticket=TOKEN"], {}]`
+- **JS plugin** (`shard_redirect.js`): catches the OOB via a direct emitter listener (bypasses `default_out.js` catch-all) and navigates the browser to the target URL.
+- **Middleware** (`ShardRedirectScriptMiddleware`): intercepts the target instance's webclient HTML response. If `?ticket=` is present in the HTTP URL, injects an inline `<script>` that appends `&ticket=TOKEN` to `window.csessid`. This places the ticket in the WebSocket URL's query string alongside Evennia's positional params (`csessid&ticket=TOKEN&cuid&browser`), where both Evennia's positional parser and the library's `parse_qs()` extraction handle it correctly.
+- **Browser refresh**: works because `at_login()` saves the uid to the Django session via csessid. A refresh re-sends the stale `?ticket=` in the URL, but the browser session check (auth priority #1) catches it first.
+
+The middleware and JS plugin are auto-injected by `AppConfig.ready()` — zero consumer configuration beyond `INSTALLED_APPS`.
+
 ## Not yet implemented
 
-- Auto-login: set `uid` + `logged_in` from validated ticket to trigger `portal_connect()` auto-login. Complication: `init_session()` resets both to `None`/`False`, so auth state must be injected between `init_session()` and `sessionhandler.connect()` — both called inside `super().onOpen()`.
 - Server-side puppet hook (go IC after auto-login)
-- IC command override on router
-- OOC command override on shard (redirect back to router)
-- `get_shard_websocket()` lookup
-- Client-side redirect handling (OOB message + JS plugin for WebSocket reconnect)
+- IC command override (on all instances, gated by role — redirects on router, normal on shard)
+- OOC command override (on all instances, gated by role — normal on router, redirects on shard)
+- `get_shard_url()` lookup
