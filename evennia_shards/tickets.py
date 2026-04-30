@@ -12,15 +12,19 @@ See DESIGN/ticket-auth-flow.md for the full flow.
 import uuid
 
 
-def create_ticket(account_id, character_id, to_shard):
+def create_ticket(account_id, character_id, to_shard, client_ip=None):
     """Create a single-use auth ticket for a shard connection.
 
     Generates a unique token, inserts a Ticket row, and returns the token.
     Called by the router when a player goes IC.
 
+    If ``client_ip`` is provided, the receiving shard will reject
+    connections from a different IP (token-theft protection).
+
     Usage::
 
-        token = create_ticket(account.id, character.id, "shard0")
+        token = create_ticket(account.id, character.id, "shard0",
+                              client_ip=session.address)
         # then redirect client to ws://shard:port/websocket?ticket=<token>
     """
     from .models import Ticket
@@ -31,6 +35,7 @@ def create_ticket(account_id, character_id, to_shard):
         account_id=account_id,
         character_id=character_id,
         to_shard=to_shard,
+        client_ip=client_ip,
     )
     return token
 
@@ -62,6 +67,7 @@ def get_ticket(token, shard_id=None):
         "account_id": ticket.account_id,
         "character_id": ticket.character_id,
         "to_shard": ticket.to_shard,
+        "client_ip": ticket.client_ip,
     }
 
 

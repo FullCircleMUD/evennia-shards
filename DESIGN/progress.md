@@ -6,6 +6,30 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-30 — Ticket auth: full validation spike proven
+
+The ticket-based auth flow from [ticket-auth-flow.md](ticket-auth-flow.md) is validated end-to-end on the `bespoke` branch. A WebSocket connection arriving with `?ticket=<token>` is intercepted, looked up by token PK, IP-validated, consumed (single-use), and the result reported to the client.
+
+**What was proven** (live smoke test with `test_ticket_ws.py` against the demo game):
+
+| Case | Result |
+|------|--------|
+| Valid ticket + matching IP | `Ticket validated` with correct account/character IDs |
+| Valid ticket + wrong IP | `Ticket rejected: IP mismatch` |
+| Valid ticket + no IP pinning | `Ticket validated` (IP check skipped) |
+| No ticket in URL | Normal login screen, no ticket messages |
+| Bogus/nonexistent token | `Ticket not found or wrong shard` |
+| Reused consumed token | `Ticket not found` (single-use enforced) |
+
+**Components**:
+
+- **`Ticket` model** (`models.py`): `token` (PK), `account_id`, `character_id`, `to_shard`, `client_ip` (nullable, for IP pinning), `created_at`. Migrations `0003` + `0004`.
+- **Ticket primitives** (`tickets.py`): `create_ticket()`, `get_ticket()`, `delete_ticket()`.
+- **`ShardWebSocketClient`** (`protocols.py`): token extraction from URL query string, ticket validation with IP check, single-use consumption. Dynamic base class preserves consumer customisations.
+- **`AppConfig.ready()` wiring** (`apps.py`): protocol override gated on `get_role() != "monolith"`.
+
+90 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-login, puppet hook, client-side redirect).
+
 ### 2026-04-30 — Ticket auth: protocol override PoC proven
 
 The WebSocket protocol override mechanism from [ticket-auth-flow.md](ticket-auth-flow.md) is wired and proven on the `bespoke` branch:

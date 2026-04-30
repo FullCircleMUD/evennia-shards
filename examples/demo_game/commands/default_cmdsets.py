@@ -16,7 +16,12 @@ own cmdsets by inheriting from them or directly from `evennia.CmdSet`.
 
 from evennia import default_cmds
 
-from commands.command import CmdShardCheck  # TEMPORARY (spike) — delete with the command
+from commands.command import (  # TEMPORARY (spike) — delete with the commands
+    CmdCreateTicketNoIp,
+    CmdCreateTicketWithIp,
+    CmdCreateTicketWithWrongIp,
+    CmdShardCheck,
+)
 
 
 class CharacterCmdSet(default_cmds.CharacterCmdSet):
@@ -37,6 +42,9 @@ class CharacterCmdSet(default_cmds.CharacterCmdSet):
         # any commands you add below will overload the default ones.
         #
         self.add(CmdShardCheck())  # TEMPORARY (spike) — delete with the command
+        self.add(CmdCreateTicketNoIp())  # TEMPORARY (spike)
+        self.add(CmdCreateTicketWithIp())  # TEMPORARY (spike)
+        self.add(CmdCreateTicketWithWrongIp())  # TEMPORARY (spike)
 
 
 class AccountCmdSet(default_cmds.AccountCmdSet):

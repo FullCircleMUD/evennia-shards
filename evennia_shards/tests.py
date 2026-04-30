@@ -736,6 +736,19 @@ class CreateTicketTests(BaseEvenniaTestCase):
         t2 = create_ticket(account_id=1, character_id=2, to_shard="shard0")
         self.assertNotEqual(t1, t2)
 
+    def test_client_ip_stored_when_provided(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="192.168.1.42",
+        )
+        ticket = Ticket.objects.get(token=token)
+        self.assertEqual(ticket.client_ip, "192.168.1.42")
+
+    def test_client_ip_defaults_to_none(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        ticket = Ticket.objects.get(token=token)
+        self.assertIsNone(ticket.client_ip)
+
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
 class GetTicketTests(BaseEvenniaTestCase):
@@ -759,6 +772,21 @@ class GetTicketTests(BaseEvenniaTestCase):
         found, data = get_ticket(token, shard_id="shard0")
         self.assertFalse(found)
         self.assertIsNone(data)
+
+    def test_returns_client_ip(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertEqual(data["client_ip"], "10.0.0.1")
+
+    def test_returns_none_client_ip_when_not_set(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertIsNone(data["client_ip"])
 
     def test_does_not_delete_ticket(self):
         token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
@@ -785,3 +813,134 @@ class DeleteTicketTests(BaseEvenniaTestCase):
         found, data = get_ticket(token)
         self.assertFalse(found)
         self.assertIsNone(data)
+
+
+# ── Protocol override ─────────────────────────────────────────────
+
+
+class _FakeProtocol:
+    """Minimal stand-in for testing protocol methods without Twisted.
+
+    Provides the attributes that _extract_ticket_token and _handle_ticket
+    rely on (http_request_uri, address, sendLine).
+    """
+
+    def __init__(self, uri=None, address=None):
+        self.http_request_uri = uri
+        self.address = address
+        self.sent_lines = []
+
+    def sendLine(self, data):
+        self.sent_lines.append(data)
+
+
+# Bind the unbound methods onto _FakeProtocol so tests can call them
+# without instantiating the real ShardWebSocketClient (which needs
+# Twisted reactor + Autobahn).
+from evennia_shards.protocols import ShardWebSocketClient as _SWC
+
+_FakeProtocol._extract_ticket_token = _SWC._extract_ticket_token
+_FakeProtocol._handle_ticket = _SWC._handle_ticket
+
+
+class ExtractTicketTokenTests(BaseEvenniaTestCase):
+    """_extract_ticket_token parses ?ticket= from the WebSocket URL."""
+
+    def test_extracts_token_from_query_string(self):
+        proto = _FakeProtocol(uri="/websocket?ticket=abc123")
+        self.assertEqual(proto._extract_ticket_token(), "abc123")
+
+    def test_returns_none_when_no_ticket_param(self):
+        proto = _FakeProtocol(uri="/websocket?csessid=xyz")
+        self.assertIsNone(proto._extract_ticket_token())
+
+    def test_returns_none_when_no_uri(self):
+        proto = _FakeProtocol(uri=None)
+        self.assertIsNone(proto._extract_ticket_token())
+
+    def test_returns_first_token_when_multiple(self):
+        proto = _FakeProtocol(uri="/websocket?ticket=first&ticket=second")
+        self.assertEqual(proto._extract_ticket_token(), "first")
+
+    def test_handles_full_url(self):
+        proto = _FakeProtocol(
+            uri="ws://shard0:4002/websocket?ticket=tok123&csessid=abc"
+        )
+        self.assertEqual(proto._extract_ticket_token(), "tok123")
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class HandleTicketTests(BaseEvenniaTestCase):
+    """_handle_ticket validates, IP-checks, and consumes the ticket."""
+
+    def test_valid_ticket_sends_validated_message(self):
+        token = create_ticket(account_id=10, character_id=20, to_shard="shard0")
+        proto = _FakeProtocol(address="127.0.0.1")
+        proto._handle_ticket(token)
+        self.assertEqual(len(proto.sent_lines), 1)
+        self.assertIn("Ticket validated", proto.sent_lines[0])
+        self.assertIn("account_id=10", proto.sent_lines[0])
+        self.assertIn("character_id=20", proto.sent_lines[0])
+
+    def test_valid_ticket_is_consumed(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto = _FakeProtocol(address="127.0.0.1")
+        proto._handle_ticket(token)
+        self.assertFalse(Ticket.objects.filter(token=token).exists())
+
+    def test_second_use_of_same_token_rejected(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto1 = _FakeProtocol(address="127.0.0.1")
+        proto1._handle_ticket(token)
+        proto2 = _FakeProtocol(address="127.0.0.1")
+        proto2._handle_ticket(token)
+        self.assertIn("not found", proto2.sent_lines[0])
+
+    def test_invalid_token_sends_not_found(self):
+        proto = _FakeProtocol(address="127.0.0.1")
+        proto._handle_ticket("nonexistent")
+        self.assertEqual(len(proto.sent_lines), 1)
+        self.assertIn("not found", proto.sent_lines[0])
+
+    def test_invalid_token_does_not_delete_anything(self):
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto = _FakeProtocol(address="127.0.0.1")
+        proto._handle_ticket("wrong_token")
+        # The real ticket is untouched
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+    def test_ip_match_passes(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol(address="10.0.0.1")
+        proto._handle_ticket(token)
+        self.assertIn("Ticket validated", proto.sent_lines[0])
+
+    def test_ip_mismatch_rejected(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol(address="192.168.1.99")
+        proto._handle_ticket(token)
+        self.assertIn("IP mismatch", proto.sent_lines[0])
+
+    def test_ip_mismatch_does_not_consume_ticket(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol(address="192.168.1.99")
+        proto._handle_ticket(token)
+        # Ticket survives — the legitimate client can still use it
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+    def test_no_ip_on_ticket_skips_ip_check(self):
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+        )
+        proto = _FakeProtocol(address="192.168.1.99")
+        proto._handle_ticket(token)
+        self.assertIn("Ticket validated", proto.sent_lines[0])

@@ -71,6 +71,131 @@ class CmdShardCheck(BaseCommand):
                 self.caller.msg(f"DB:  raw SELECT failed: {e!r}")
 
 
+class CmdCreateTicketNoIp(BaseCommand):
+    """
+    Create a test ticket without IP pinning.
+
+    Usage:
+      @create_ticket_no_ip
+
+    Creates a ticket for the current account/character with no client_ip.
+    Prints the token for use with the WebSocket test script.
+
+    TEMPORARY — added for the ticket-auth spike.
+    """
+
+    key = "@create_ticket_no_ip"
+    locks = "cmd:perm(Developer)"
+    help_category = "Admin"
+
+    def func(self):
+        from evennia_shards.config import get_shard_id
+        from evennia_shards.tickets import create_ticket
+
+        account = self.account
+        character = self.caller
+        shard_id = get_shard_id()
+
+        token = create_ticket(
+            account_id=account.id,
+            character_id=character.id,
+            to_shard=shard_id,
+        )
+        self.caller.msg(
+            f"|wTicket created (no IP):|n\n"
+            f"  token     = {token}\n"
+            f"  account   = {account.id} ({account.key})\n"
+            f"  character = {character.id} ({character.key})\n"
+            f"  to_shard  = {shard_id}\n"
+            f"  session IP = {self.session.address}"
+        )
+
+
+class CmdCreateTicketWithIp(BaseCommand):
+    """
+    Create a test ticket with the session's real IP (should pass validation).
+
+    Usage:
+      @create_ticket_with_ip
+
+    Creates a ticket pinned to the current session's IP address.
+    A WebSocket connection from the same IP should be accepted.
+
+    TEMPORARY — added for the ticket-auth spike.
+    """
+
+    key = "@create_ticket_with_ip"
+    locks = "cmd:perm(Developer)"
+    help_category = "Admin"
+
+    def func(self):
+        from evennia_shards.config import get_shard_id
+        from evennia_shards.tickets import create_ticket
+
+        account = self.account
+        character = self.caller
+        shard_id = get_shard_id()
+        client_ip = self.session.address
+
+        token = create_ticket(
+            account_id=account.id,
+            character_id=character.id,
+            to_shard=shard_id,
+            client_ip=client_ip,
+        )
+        self.caller.msg(
+            f"|wTicket created (IP-pinned):|n\n"
+            f"  token     = {token}\n"
+            f"  account   = {account.id} ({account.key})\n"
+            f"  character = {character.id} ({character.key})\n"
+            f"  to_shard  = {shard_id}\n"
+            f"  client_ip = {client_ip}"
+        )
+
+
+class CmdCreateTicketWithWrongIp(BaseCommand):
+    """
+    Create a test ticket with a wrong IP (should fail validation).
+
+    Usage:
+      @create_ticket_with_wrong_ip
+
+    Creates a ticket pinned to 203.0.113.99 (a documentation-reserved IP
+    that will never match the connecting client). Tests IP mismatch rejection.
+
+    TEMPORARY — added for the ticket-auth spike.
+    """
+
+    key = "@create_ticket_with_wrong_ip"
+    locks = "cmd:perm(Developer)"
+    help_category = "Admin"
+
+    def func(self):
+        from evennia_shards.config import get_shard_id
+        from evennia_shards.tickets import create_ticket
+
+        account = self.account
+        character = self.caller
+        shard_id = get_shard_id()
+        wrong_ip = "203.0.113.99"
+
+        token = create_ticket(
+            account_id=account.id,
+            character_id=character.id,
+            to_shard=shard_id,
+            client_ip=wrong_ip,
+        )
+        self.caller.msg(
+            f"|wTicket created (wrong IP):|n\n"
+            f"  token     = {token}\n"
+            f"  account   = {account.id} ({account.key})\n"
+            f"  character = {character.id} ({character.key})\n"
+            f"  to_shard  = {shard_id}\n"
+            f"  client_ip = {wrong_ip}\n"
+            f"  session IP = {self.session.address} (will mismatch)"
+        )
+
+
 class Command(BaseCommand):
     """
     Base command (you may see this if a child command had no help text defined)

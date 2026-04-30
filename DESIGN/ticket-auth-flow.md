@@ -55,6 +55,7 @@ The difference between roles is what *else* is available alongside token auth:
 
 - **Token as primary key**: Single indexed DB lookup on the hot path — no JSON scanning.
 - **Single-use**: Ticket is deleted after validation. A second connection with the same token is refused.
+- **IP-pinned**: The ticket records the client's IP at creation time. The receiving instance compares it against the connecting client's IP and rejects mismatches. Prevents token theft — an intercepted token is useless from a different IP. The field is nullable, so IP pinning is opt-in (e.g. omitted in test harnesses or when the IP is unavailable).
 - **No session transfer**: The receiving instance creates a new session. The token is the only bridge between connections.
 - **Same codebase**: The router and shard run identical code. Behaviour differences are gated on `SHARDS_ROLE`.
 
@@ -68,10 +69,9 @@ Token extraction happens in a custom `WebSocketClient` subclass wired in via Eve
 
 ## Not yet implemented
 
-- Token extraction from WebSocket URL query string (`?ticket=<token>`)
-- Auto-login: set `uid` + `logged_in` from validated ticket to trigger `portal_connect()` auto-login
+- Auto-login: set `uid` + `logged_in` from validated ticket to trigger `portal_connect()` auto-login. Complication: `init_session()` resets both to `None`/`False`, so auth state must be injected between `init_session()` and `sessionhandler.connect()` — both called inside `super().onOpen()`.
 - Server-side puppet hook (go IC after auto-login)
 - IC command override on router
 - OOC command override on shard (redirect back to router)
 - `get_shard_websocket()` lookup
-- Client-side redirect handling
+- Client-side redirect handling (OOB message + JS plugin for WebSocket reconnect)

@@ -39,6 +39,7 @@ class Ticket(models.Model):
     account_id = models.IntegerField()
     character_id = models.IntegerField()
     to_shard = models.CharField(max_length=64, db_index=True)
+    client_ip = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
