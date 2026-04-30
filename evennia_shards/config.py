@@ -34,6 +34,24 @@ def get_shard_id() -> str | None:
     return getattr(settings, "SHARD_ID", None)
 
 
+def get_router_url() -> str:
+    """Return the webclient base URL for the router.
+
+    Reads from the consumer's ``ROUTER_URL`` setting.
+
+    Raises ``ValueError`` if ``ROUTER_URL`` is not configured.
+    """
+    from django.conf import settings
+
+    url = getattr(settings, "ROUTER_URL", None)
+    if url is None:
+        raise ValueError(
+            "ROUTER_URL is not configured. Define the router's base URL "
+            "in your Django settings."
+        )
+    return url
+
+
 def get_shard_url(shard_id: str) -> str:
     """Return the webclient base URL for `shard_id`.
 

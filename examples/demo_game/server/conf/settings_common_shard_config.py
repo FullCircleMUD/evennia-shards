@@ -17,10 +17,14 @@ from server.conf.settings import *  # noqa: F401, F403
 # Add evennia_shards to all sharded instances.
 INSTALLED_APPS = list(INSTALLED_APPS) + ["evennia_shards"]
 
+# Router webclient base URL (used by shards for OOC redirect).
+# In production, set via environment variable.
+ROUTER_URL = "http://localhost:4001"
+
 # Map of shard IDs to their webclient base URLs.
-# Used by get_shard_url() to build redirect URLs.
+# Used by get_shard_url() to build IC redirect URLs.
+# Shard IDs are flexible — name them to match your game world.
 # In production, set these via environment variables.
 SHARD_URLS = {
-    "router": "http://localhost:4001",
     "shard0": "http://localhost:4001",
 }

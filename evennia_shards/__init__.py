@@ -1,6 +1,6 @@
 """evennia-shards: optional split deployment and sharding for Evennia."""
 
-from .config import get_message_timeout, get_role, get_shard_id, get_shard_url
+from .config import get_message_timeout, get_role, get_router_url, get_shard_id, get_shard_url
 from .errors import MessageBusError, ShardIsolationError, TicketError
 from .messagebus import (
     MessageHandler,
@@ -18,6 +18,7 @@ __all__ = [
     "get_role",
     "get_shard_id",
     "get_shard_url",
+    "get_router_url",
     "get_message_timeout",
     "send_message",
     "poll_messages",

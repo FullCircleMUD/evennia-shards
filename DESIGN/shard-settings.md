@@ -8,7 +8,8 @@ How the library's configuration items are declared, read, and defaulted.
 |---|---|---|---|
 | `SHARDS_ROLE` | `str` | `"monolith"` | One of `"monolith"`, `"router"`, `"shard"`. Selects which role this Evennia process plays. |
 | `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Meaningful only when `SHARDS_ROLE == "shard"`. |
-| `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Required for any sharded deployment. |
+| `ROUTER_URL` | `str \| None` | `None` | Webclient base URL for the router. Used by shards for OOC redirect. |
+| `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Used by router for IC redirect. Shard IDs are flexible — name them to match your game world. |
 
 ## How they flow
 
@@ -43,11 +44,12 @@ The accessors live in [`evennia_shards/config.py`](../evennia_shards/config.py) 
 Code that needs shard configuration — library code *or* consumer game code — should call the accessors rather than reading `settings.*` directly:
 
 ```python
-from evennia_shards import get_role, get_shard_id, get_shard_url
+from evennia_shards import get_role, get_shard_id, get_shard_url, get_router_url
 role = get_role()                  # "monolith" if undeclared
 shard = get_shard_id()             # None if undeclared
-url = get_shard_url("shard0")      # ValueError if SHARD_URLS not configured
+url = get_shard_url("overworld")   # ValueError if SHARD_URLS not configured
                                    # KeyError if shard_id not in the dict
+router = get_router_url()          # ValueError if ROUTER_URL not configured
 ```
 
 A direct `settings.SHARDS_ROLE` read raises `AttributeError` whenever the consumer hasn't declared the setting — i.e. every monolith consumer. The accessors apply the documented defaults and are the single source of truth for fallback values, so any future change to a default lands in one place.
@@ -58,21 +60,25 @@ The primary caller is library code (it reads the role to decide what to register
 
 The library also adds a `shard_id` column to `ObjectDB` (and likely other partitioned models in future) that tags each row with its owning shard. Most rows hold a specific shard identifier (e.g. `"shard0"`); the sentinel value `"*"` denotes a row owned by *all* shards — used for system-wide entities like global scripts that must run on every shard process. Global rows are instantiated independently on each shard, so any mutable per-instance state does not coordinate across shards without explicit cross-shard messaging.
 
-## `SHARD_URLS` and redirect routing
+## URL settings and redirect routing
 
-`SHARD_URLS` is a dict mapping every shard ID (including the router) to its webclient base URL. The IC/OOC redirect flow uses it to build the target URL when sending a player to a different instance.
+The router and shards have separate URL settings, reflecting their different roles in the redirect flow:
+
+- **`ROUTER_URL`** — single string. Shards use `get_router_url()` to build OOC redirect URLs (sending players back to the router).
+- **`SHARD_URLS`** — dict mapping shard IDs to URLs. The router uses `get_shard_url(shard_id)` to build IC redirect URLs (sending players to a shard).
 
 ```python
+ROUTER_URL = "http://router.example.com"
 SHARD_URLS = {
-    "router": "http://router.example.com",
-    "shard0": "http://shard0.example.com",
-    "shard1": "http://shard1.example.com:5001",
+    "overworld": "http://overworld.example.com",
+    "dungeons": "http://dungeons.example.com",
+    "pvp_arena": "http://pvp.example.com:5001",
 }
 ```
 
-The library reads this via `get_shard_url(shard_id)`, which raises `ValueError` if the setting is absent and `KeyError` if the shard ID is not in the dict. In production, URLs are typically set via environment variables. For local development, all instances share the same settings file with localhost URLs on different ports.
+Shard IDs are flexible — name them to match your game world. Each instance's `SHARD_ID` must match a key in `SHARD_URLS`. In production, URLs are typically set via environment variables.
 
-The routing decision itself comes from the character's game state: `character.location or character.home` → room's `shard_id` → `get_shard_url(shard_id)`. Returning players go back to where they were; new characters land in their home room.
+The IC routing decision comes from the character's game state: `character.location or character.home` → room's `shard_id` → `get_shard_url(shard_id)`. Returning players go back to where they were; new characters land in their home room.
 
 ## Consumer settings cascade
 
@@ -85,7 +91,7 @@ settings_shard1.py  ─┘
 ```
 
 - **`settings.py`** — base Evennia config (`SERVERNAME`, etc.), loads `secret_settings.py`
-- **`settings_common_shard_config.py`** — settings shared across all sharded instances: `SHARD_URLS`, `INSTALLED_APPS += ["evennia_shards"]`
+- **`settings_common_shard_config.py`** — settings shared across all sharded instances: `ROUTER_URL`, `SHARD_URLS`, `INSTALLED_APPS += ["evennia_shards"]`
 - **`settings_<role>.py`** — per-instance: `SHARDS_ROLE`, `SHARD_ID`, port overrides
 
 Each instance starts with `evennia start --settings settings_router.py` (or `settings_shard0.py`, etc.). The cascade keeps the URL map in one place while allowing each instance to set its own role and ports.

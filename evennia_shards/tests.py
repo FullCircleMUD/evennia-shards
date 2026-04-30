@@ -16,6 +16,7 @@ from evennia_shards import (
     delete_ticket,
     get_message_timeout,
     get_role,
+    get_router_url,
     get_shard_id,
     get_shard_url,
     get_ticket,
@@ -78,15 +79,27 @@ class ShardUrlAccessorTests(BaseEvenniaTestCase):
 
     @override_settings(
         SHARD_URLS={
-            "router": "http://router.example.com",
-            "shard0": "http://shard0.example.com",
-            "shard1": "http://shard1.example.com",
+            "overworld": "http://overworld.example.com",
+            "dungeons": "http://dungeons.example.com",
+            "pvp_arena": "http://pvp.example.com",
         }
     )
-    def test_multiple_shards(self):
-        self.assertEqual(get_shard_url("router"), "http://router.example.com")
-        self.assertEqual(get_shard_url("shard0"), "http://shard0.example.com")
-        self.assertEqual(get_shard_url("shard1"), "http://shard1.example.com")
+    def test_multiple_shards_flexible_names(self):
+        self.assertEqual(get_shard_url("overworld"), "http://overworld.example.com")
+        self.assertEqual(get_shard_url("dungeons"), "http://dungeons.example.com")
+        self.assertEqual(get_shard_url("pvp_arena"), "http://pvp.example.com")
+
+
+class RouterUrlAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_router_url accessor."""
+
+    @override_settings(ROUTER_URL="http://router.example.com")
+    def test_returns_configured_url(self):
+        self.assertEqual(get_router_url(), "http://router.example.com")
+
+    def test_raises_value_error_when_not_configured(self):
+        with self.assertRaises(ValueError):
+            get_router_url()
 
 
 class MessageTimeoutAccessorTests(BaseEvenniaTestCase):
