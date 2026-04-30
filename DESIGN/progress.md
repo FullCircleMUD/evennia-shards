@@ -6,6 +6,17 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-30 — Ticket auth: protocol override PoC proven
+
+The WebSocket protocol override mechanism from [ticket-auth-flow.md](ticket-auth-flow.md) is wired and proven on the `bespoke` branch:
+
+- **`ShardWebSocketClient`** (`evennia_shards/protocols.py`): subclass of the consumer's configured `WEBSOCKET_PROTOCOL_CLASS` (not Evennia core directly — see "dynamic base class" below). Overrides `onOpen()` to intercept WebSocket connections. Currently sends a PoC message; next step is extracting `?ticket=<token>` from the URL.
+- **`AppConfig.ready()` wiring** (`evennia_shards/apps.py`): stashes the consumer's current `WEBSOCKET_PROTOCOL_CLASS` value, then overwrites it to point to `ShardWebSocketClient`. Gated on `get_role() != "monolith"` — monolith mode uses normal login exclusively.
+- **Dynamic base class**: `protocols.py` resolves the stashed original class via `class_from_module` at import time and subclasses *that*, preserving any consumer customisations to the WebSocket protocol. The library layers on top rather than replacing.
+- **Proven live**: demo game running as `shard` role displays `[evennia-shards] Protocol override active.` on WebSocket connect — before Evennia's own connection screen — with zero changes to the demo game's code.
+
+72 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for the full design and remaining work.
+
 ### 2026-04-29 — Cross-shard message bus: primitives + lifecycle land
 
 The bus from [cross-shard-message-bus.md](cross-shard-message-bus.md) is in place on the `bespoke` branch, end-to-end:

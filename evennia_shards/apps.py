@@ -12,6 +12,25 @@ class EvenniaShardsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self):
+        # Override the WebSocket protocol class so the library can
+        # intercept incoming connections for ticket-based auth.
+        # Gated on non-monolith: monolith uses normal login only.
+        # Stashes the consumer's current value so protocols.py can
+        # subclass it (preserving any consumer customisations).
+        from .config import get_role
+
+        if get_role() != "monolith":
+            from django.conf import settings
+
+            settings._SHARDS_ORIGINAL_WS_PROTOCOL = getattr(
+                settings,
+                "WEBSOCKET_PROTOCOL_CLASS",
+                "evennia.server.portal.webclient.WebSocketClient",
+            )
+            settings.WEBSOCKET_PROTOCOL_CLASS = (
+                "evennia_shards.protocols.ShardWebSocketClient"
+            )
+
         # Late-bind shard_id onto Evennia's ObjectDB so the ORM is aware
         # of the column the migration adds. Idempotent — guards against
         # double-installation in dev reload scenarios.
