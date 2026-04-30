@@ -16,6 +16,8 @@ from urllib.parse import parse_qs, urlparse
 from django.conf import settings
 from evennia.utils.utils import class_from_module
 
+from .config import get_role
+
 # Resolve the base class dynamically: whatever was configured before
 # our AppConfig.ready() overwrote the setting. Falls back to Evennia's
 # default if the stash is missing (defensive).
@@ -27,6 +29,8 @@ _BASE_WS_CLASS = class_from_module(
     )
 )
 
+_UPSTREAM_IPS = settings.UPSTREAM_IPS
+
 
 class ShardWebSocketClient(_BASE_WS_CLASS):
     """WebSocket protocol with ticket-based auth support.
@@ -35,18 +39,120 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
     (not Evennia core directly) so any existing customisations are
     preserved.
 
-    On connection, extracts a ``?ticket=<token>`` query parameter from
-    the WebSocket URL. If present, looks up the ticket in the database
-    and reports the result to the client.
+    Overrides ``onOpen()`` to inject ticket-based authentication between
+    ``init_session()`` and ``sessionhandler.connect()``. This is the only
+    way to get ``uid`` and ``logged_in`` set before the session state is
+    synced to the Server — see DESIGN/evennia-upgrade-checklist.md for
+    the full rationale.
     """
 
-    def onOpen(self):
-        """Called when the WebSocket connection is fully established."""
-        super().onOpen()
+    # -- onOpen override ------------------------------------------------
+    # Based on Evennia 6.0.0 WebSocketClient.onOpen().
+    # See DESIGN/evennia-upgrade-checklist.md for what to diff on upgrade.
 
+    def onOpen(self):
+        """Called when the WebSocket connection is fully established.
+
+        Two-phase flow:
+
+        Phase 1 (pre-session): extract and validate the ticket token.
+        On failure, send an error and close — no session is registered.
+        On success, stash account/character IDs for Phase 2.
+        If no token and role is shard, reject (shards are ticket-only).
+
+        Phase 2 (reproduced from Evennia 6.0.0): init the session, check
+        for browser-session or ticket auth, set protocol flags, and call
+        ``sessionhandler.connect()``.
+        """
+        # ── Phase 1: pre-session ticket validation ─────────────────
         token = self._extract_ticket_token()
+
         if token:
-            self._handle_ticket(token)
+            client_address = self._get_client_address()
+            valid, result = self._validate_ticket(token, client_address)
+            if not valid:
+                self._send_text(result)
+                self.sendClose(4001, result)
+                return
+            # Stash for Phase 2 — survives init_session() reset.
+            self._ticket_account_id = result["account_id"]
+            self._ticket_character_id = result["character_id"]
+        else:
+            # No token: role-dependent gating.
+            role = get_role()
+            if role == "shard":
+                msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
+                self._send_text(msg)
+                self.sendClose(4001, msg)
+                return
+            # Router (or any non-shard role): fall through to normal login.
+
+        # ── Phase 2: reproduced Evennia WebSocketClient.onOpen() ───
+        # Based on Evennia 6.0.0. See DESIGN/evennia-upgrade-checklist.md.
+        client_address = self._get_client_address()
+
+        self.init_session("websocket", client_address, self.factory.sessionhandler)
+
+        csession = self.get_client_session()  # sets self.csessid
+        csessid = self.csessid
+
+        # Auth injection: ticket auth takes priority, then browser session.
+        if hasattr(self, "_ticket_account_id"):
+            self.uid = self._ticket_account_id
+            self.logged_in = True
+        else:
+            # Existing Evennia browser-session auth (router path).
+            uid = csession and csession.get("webclient_authenticated_uid", None)
+            nonce = csession and csession.get("webclient_authenticated_nonce", 0)
+            if uid:
+                self.uid = uid
+                self.nonce = nonce
+                self.logged_in = True
+
+                for old_session in self.sessionhandler.sessions_from_csessid(csessid):
+                    if (
+                        hasattr(old_session, "websocket_close_code")
+                        and old_session.websocket_close_code != CLOSE_NORMAL
+                    ):
+                        self.sessid = old_session.sessid
+                        self.sessionhandler.disconnect(old_session)
+
+        browserstr = f":{self.browserstr}" if self.browserstr else ""
+        self.protocol_flags["CLIENTNAME"] = f"Evennia Webclient (websocket{browserstr})"
+        self.protocol_flags["UTF-8"] = True
+        self.protocol_flags["OOB"] = True
+        self.protocol_flags["TRUECOLOR"] = True
+        self.protocol_flags["XTERM256"] = True
+        self.protocol_flags["ANSI"] = True
+
+        # Watch for dead links.
+        self.transport.setTcpKeepAlive(1)
+        # Actually do the connection.
+        self.sessionhandler.connect(self)
+
+    # -- Helpers --------------------------------------------------------
+
+    def _get_client_address(self):
+        """Resolve the real client IP address, handling proxy headers.
+
+        Uses ``self.transport.client`` (available from autobahn before
+        ``onOpen()``) and ``self.http_headers`` for ``x-forwarded-for``
+        proxy resolution. Reproduces Evennia 6.0.0 WebSocketClient.onOpen()
+        lines 101-111.
+        """
+        client_address = self.transport.client
+        client_address = client_address[0] if client_address else None
+
+        if client_address in _UPSTREAM_IPS and "x-forwarded-for" in self.http_headers:
+            addresses = [x.strip() for x in self.http_headers["x-forwarded-for"].split(",")]
+            addresses.reverse()
+
+            for addr in addresses:
+                if addr not in _UPSTREAM_IPS:
+                    client_address = addr
+                    break
+
+        return client_address
 
     def _extract_ticket_token(self):
         """Extract the ticket token from the WebSocket URL query string.
@@ -64,46 +170,44 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
             return tokens[0]
         return None
 
-    def _handle_ticket(self, token):
-        """Validate a ticket and report the result to the client.
+    def _validate_ticket(self, token, client_address):
+        """Validate a ticket token and consume it on success.
 
-        Checks the token against the database, verifies the client IP
-        if the ticket has one (token-theft protection), consumes the
-        ticket (single-use), and sends the result to the client.
+        Returns ``(True, data_dict)`` on success or
+        ``(False, error_message)`` on failure. Consumes (deletes) the
+        ticket only on success — failed validations leave the ticket
+        intact.
         """
         from .tickets import delete_ticket, get_ticket
 
         found, data = get_ticket(token)
         if not found:
-            self.sendLine(json.dumps(
-                ["text", [
-                    f"[evennia-shards] Ticket not found or wrong shard: "
-                    f"token={token}"
-                ], {}]
-            ))
-            return
+            return False, (
+                f"[evennia-shards] Ticket not found or wrong shard: "
+                f"token={token}"
+            )
 
         # IP validation: reject if ticket is IP-pinned and the
         # connecting client's IP doesn't match.
         if data["client_ip"]:
-            client_ip = getattr(self, "address", None)
-            if client_ip != data["client_ip"]:
-                self.sendLine(json.dumps(
-                    ["text", [
-                        f"[evennia-shards] Ticket rejected: IP mismatch "
-                        f"(expected {data['client_ip']}, got {client_ip})"
-                    ], {}]
-                ))
-                return
+            if client_address != data["client_ip"]:
+                return False, (
+                    f"[evennia-shards] Ticket rejected: IP mismatch "
+                    f"(expected {data['client_ip']}, got {client_address})"
+                )
 
         # Consume the ticket (single-use).
         delete_ticket(token)
 
-        self.sendLine(json.dumps(
-            ["text", [
-                f"[evennia-shards] Ticket validated: "
-                f"account_id={data['account_id']}, "
-                f"character_id={data['character_id']}, "
-                f"to_shard={data['to_shard']}"
-            ], {}]
-        ))
+        return True, data
+
+    def _send_text(self, text):
+        """Send a text message to the client via the Evennia webclient protocol."""
+        self.sendLine(json.dumps(["text", [text], {}]))
+
+
+# CLOSE_NORMAL is used in the browser-session cleanup path (reproduced
+# from Evennia). Import it here so the reference in onOpen works.
+from autobahn.twisted.websocket import WebSocketServerProtocol  # noqa: E402
+
+CLOSE_NORMAL = WebSocketServerProtocol.CLOSE_STATUS_CODE_NORMAL

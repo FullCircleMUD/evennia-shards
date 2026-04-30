@@ -116,10 +116,15 @@ class CmdCreateTicketWithIp(BaseCommand):
     Create a test ticket with the session's real IP (should pass validation).
 
     Usage:
-      @create_ticket_with_ip
+      @create_ticket_with_ip [<shard_id>]
 
     Creates a ticket pinned to the current session's IP address.
     A WebSocket connection from the same IP should be accepted.
+
+    If <shard_id> is given, the ticket targets that shard instead of
+    the current instance's SHARD_ID. Useful for creating tickets that
+    will be consumed by a different instance (e.g. creating a ticket
+    on the router for use on shard0).
 
     TEMPORARY — added for the ticket-auth spike.
     """
@@ -134,7 +139,7 @@ class CmdCreateTicketWithIp(BaseCommand):
 
         account = self.account
         character = self.caller
-        shard_id = get_shard_id()
+        shard_id = self.args.strip() or get_shard_id()
         client_ip = self.session.address
 
         token = create_ticket(

@@ -39,6 +39,10 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 
 - **[ticket-auth-flow.md](ticket-auth-flow.md)** — The ticket-based authentication flow: how the router creates a ticket, redirects the client to a shard, and how the shard validates the token, authenticates the session, and puppets the character.
 
+### Operational
+
+- **[evennia-upgrade-checklist.md](evennia-upgrade-checklist.md)** — What to verify when upgrading the Evennia dependency. Documents each point where the library couples to Evennia internals, why the coupling exists, and what to diff.
+
 ### Decisions and refinements
 
 *(none yet)*

@@ -6,6 +6,33 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-04-30 — Ticket auth: auto-login spike proven end-to-end
+
+The ticket-based auto-login flow from [ticket-auth-flow.md](ticket-auth-flow.md) is validated end-to-end on the `bespoke` branch. A WebSocket connection arriving with `?ticket=<token>` is intercepted, validated, consumed, and the session is auto-logged-in before `sessionhandler.connect()` fires — so the Server sees `logged_in=True` and `uid` already set, triggering Evennia's built-in `portal_connect()` auto-login path.
+
+**What was proven** (live smoke test with `test_ticket_ws.py` and browser against the demo game):
+
+| Case | Mode | Result |
+|------|------|--------|
+| Valid ticket | Router | Auto-login (`["logged_in", ...]` received) |
+| Valid ticket | Shard | Auto-login (`["logged_in", ...]` received) |
+| Invalid/bogus token | Router | Rejected with error + close code 4001 |
+| Invalid/bogus token | Shard | Rejected with error + close code 4001 |
+| No token (browser) | Router | Normal login screen shown |
+| No token (browser) | Shard | Rejected ("this shard requires a ticket") |
+| Reused token | Both | Rejected (single-use enforced) |
+
+**Key implementation**: two-phase `onOpen()` override in `ShardWebSocketClient`:
+
+- **Phase 1** (pre-session): extract token from URL, validate ticket, abort on failure — no session registered, no login screen. Role gating: shards reject tokenless connections, routers allow them.
+- **Phase 2** (reproduced Evennia `onOpen()`): `init_session()` → inject `uid` + `logged_in` from ticket → `sessionhandler.connect()`. The injection point is between these two calls — the only clean seam (see [evennia-upgrade-checklist.md](evennia-upgrade-checklist.md) for rationale and rejected alternatives).
+
+**New helpers**: `_get_client_address()` (proxy-aware IP resolution), `_validate_ticket()` (pure validation, returns `(bool, data|error)`), `_extract_ticket_token()` (URL query parsing), `_send_text()` (Evennia JSON protocol wrapper).
+
+**New files**: `DESIGN/evennia-upgrade-checklist.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
+
+96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, client-side redirect).
+
 ### 2026-04-30 — Ticket auth: full validation spike proven
 
 The ticket-based auth flow from [ticket-auth-flow.md](ticket-auth-flow.md) is validated end-to-end on the `bespoke` branch. A WebSocket connection arriving with `?ticket=<token>` is intercepted, looked up by token PK, IP-validated, consumed (single-use), and the result reported to the client.

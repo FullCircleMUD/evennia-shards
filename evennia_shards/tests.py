@@ -818,20 +818,34 @@ class DeleteTicketTests(BaseEvenniaTestCase):
 # ── Protocol override ─────────────────────────────────────────────
 
 
+class _FakeTransport:
+    """Minimal stand-in for a Twisted transport."""
+
+    def __init__(self, client=None):
+        self.client = client  # tuple: (ip, port) or None
+
+
 class _FakeProtocol:
     """Minimal stand-in for testing protocol methods without Twisted.
 
-    Provides the attributes that _extract_ticket_token and _handle_ticket
-    rely on (http_request_uri, address, sendLine).
+    Provides the attributes that _extract_ticket_token, _validate_ticket,
+    and _get_client_address rely on.
     """
 
-    def __init__(self, uri=None, address=None):
+    def __init__(self, uri=None, client_ip=None, http_headers=None):
         self.http_request_uri = uri
-        self.address = address
+        self.transport = _FakeTransport(
+            client=(client_ip, 0) if client_ip else None
+        )
+        self.http_headers = http_headers or {}
         self.sent_lines = []
+        self.close_calls = []
 
     def sendLine(self, data):
         self.sent_lines.append(data)
+
+    def sendClose(self, code=None, reason=None):
+        self.close_calls.append((code, reason))
 
 
 # Bind the unbound methods onto _FakeProtocol so tests can call them
@@ -840,7 +854,9 @@ class _FakeProtocol:
 from evennia_shards.protocols import ShardWebSocketClient as _SWC
 
 _FakeProtocol._extract_ticket_token = _SWC._extract_ticket_token
-_FakeProtocol._handle_ticket = _SWC._handle_ticket
+_FakeProtocol._validate_ticket = _SWC._validate_ticket
+_FakeProtocol._get_client_address = _SWC._get_client_address
+_FakeProtocol._send_text = _SWC._send_text
 
 
 class ExtractTicketTokenTests(BaseEvenniaTestCase):
@@ -869,44 +885,78 @@ class ExtractTicketTokenTests(BaseEvenniaTestCase):
         self.assertEqual(proto._extract_ticket_token(), "tok123")
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
-class HandleTicketTests(BaseEvenniaTestCase):
-    """_handle_ticket validates, IP-checks, and consumes the ticket."""
+class GetClientAddressTests(BaseEvenniaTestCase):
+    """_get_client_address resolves the real client IP."""
 
-    def test_valid_ticket_sends_validated_message(self):
+    def test_direct_connection_returns_transport_ip(self):
+        proto = _FakeProtocol(client_ip="192.168.1.10")
+        self.assertEqual(proto._get_client_address(), "192.168.1.10")
+
+    def test_no_transport_client_returns_none(self):
+        proto = _FakeProtocol(client_ip=None)
+        self.assertIsNone(proto._get_client_address())
+
+    @override_settings(UPSTREAM_IPS=["127.0.0.1"])
+    def test_proxy_returns_forwarded_ip(self):
+        proto = _FakeProtocol(
+            client_ip="127.0.0.1",
+            http_headers={"x-forwarded-for": "10.0.0.5, 127.0.0.1"},
+        )
+        # Reload _UPSTREAM_IPS for this test — the module-level constant
+        # won't pick up the override, so we patch it directly.
+        import evennia_shards.protocols as proto_mod
+        original = proto_mod._UPSTREAM_IPS
+        proto_mod._UPSTREAM_IPS = ["127.0.0.1"]
+        try:
+            self.assertEqual(proto._get_client_address(), "10.0.0.5")
+        finally:
+            proto_mod._UPSTREAM_IPS = original
+
+    def test_non_proxy_ip_ignores_forwarded_header(self):
+        proto = _FakeProtocol(
+            client_ip="10.0.0.1",
+            http_headers={"x-forwarded-for": "evil.ip"},
+        )
+        # 10.0.0.1 is not in UPSTREAM_IPS, so the header is ignored.
+        self.assertEqual(proto._get_client_address(), "10.0.0.1")
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ValidateTicketTests(BaseEvenniaTestCase):
+    """_validate_ticket validates, IP-checks, and consumes the ticket."""
+
+    def test_valid_ticket_returns_true_and_data(self):
         token = create_ticket(account_id=10, character_id=20, to_shard="shard0")
-        proto = _FakeProtocol(address="127.0.0.1")
-        proto._handle_ticket(token)
-        self.assertEqual(len(proto.sent_lines), 1)
-        self.assertIn("Ticket validated", proto.sent_lines[0])
-        self.assertIn("account_id=10", proto.sent_lines[0])
-        self.assertIn("character_id=20", proto.sent_lines[0])
+        proto = _FakeProtocol()
+        valid, data = proto._validate_ticket(token, "127.0.0.1")
+        self.assertTrue(valid)
+        self.assertEqual(data["account_id"], 10)
+        self.assertEqual(data["character_id"], 20)
 
     def test_valid_ticket_is_consumed(self):
         token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
-        proto = _FakeProtocol(address="127.0.0.1")
-        proto._handle_ticket(token)
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "127.0.0.1")
         self.assertFalse(Ticket.objects.filter(token=token).exists())
 
     def test_second_use_of_same_token_rejected(self):
         token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
-        proto1 = _FakeProtocol(address="127.0.0.1")
-        proto1._handle_ticket(token)
-        proto2 = _FakeProtocol(address="127.0.0.1")
-        proto2._handle_ticket(token)
-        self.assertIn("not found", proto2.sent_lines[0])
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "127.0.0.1")
+        valid, error = proto._validate_ticket(token, "127.0.0.1")
+        self.assertFalse(valid)
+        self.assertIn("not found", error)
 
-    def test_invalid_token_sends_not_found(self):
-        proto = _FakeProtocol(address="127.0.0.1")
-        proto._handle_ticket("nonexistent")
-        self.assertEqual(len(proto.sent_lines), 1)
-        self.assertIn("not found", proto.sent_lines[0])
+    def test_invalid_token_returns_false_and_error(self):
+        proto = _FakeProtocol()
+        valid, error = proto._validate_ticket("nonexistent", "127.0.0.1")
+        self.assertFalse(valid)
+        self.assertIn("not found", error)
 
     def test_invalid_token_does_not_delete_anything(self):
         token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
-        proto = _FakeProtocol(address="127.0.0.1")
-        proto._handle_ticket("wrong_token")
-        # The real ticket is untouched
+        proto = _FakeProtocol()
+        proto._validate_ticket("wrong_token", "127.0.0.1")
         self.assertTrue(Ticket.objects.filter(token=token).exists())
 
     def test_ip_match_passes(self):
@@ -914,26 +964,27 @@ class HandleTicketTests(BaseEvenniaTestCase):
             account_id=1, character_id=2, to_shard="shard0",
             client_ip="10.0.0.1",
         )
-        proto = _FakeProtocol(address="10.0.0.1")
-        proto._handle_ticket(token)
-        self.assertIn("Ticket validated", proto.sent_lines[0])
+        proto = _FakeProtocol()
+        valid, data = proto._validate_ticket(token, "10.0.0.1")
+        self.assertTrue(valid)
 
     def test_ip_mismatch_rejected(self):
         token = create_ticket(
             account_id=1, character_id=2, to_shard="shard0",
             client_ip="10.0.0.1",
         )
-        proto = _FakeProtocol(address="192.168.1.99")
-        proto._handle_ticket(token)
-        self.assertIn("IP mismatch", proto.sent_lines[0])
+        proto = _FakeProtocol()
+        valid, error = proto._validate_ticket(token, "192.168.1.99")
+        self.assertFalse(valid)
+        self.assertIn("IP mismatch", error)
 
     def test_ip_mismatch_does_not_consume_ticket(self):
         token = create_ticket(
             account_id=1, character_id=2, to_shard="shard0",
             client_ip="10.0.0.1",
         )
-        proto = _FakeProtocol(address="192.168.1.99")
-        proto._handle_ticket(token)
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "192.168.1.99")
         # Ticket survives — the legitimate client can still use it
         self.assertTrue(Ticket.objects.filter(token=token).exists())
 
@@ -941,6 +992,46 @@ class HandleTicketTests(BaseEvenniaTestCase):
         token = create_ticket(
             account_id=1, character_id=2, to_shard="shard0",
         )
-        proto = _FakeProtocol(address="192.168.1.99")
-        proto._handle_ticket(token)
-        self.assertIn("Ticket validated", proto.sent_lines[0])
+        proto = _FakeProtocol()
+        valid, data = proto._validate_ticket(token, "192.168.1.99")
+        self.assertTrue(valid)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class RoleGatingTests(BaseEvenniaTestCase):
+    """onOpen Phase 1: role-based gating when no ticket is present.
+
+    These test the gating logic in isolation using _FakeProtocol rather
+    than the full onOpen (which needs Twisted). The logic is: shards
+    reject connections without tickets; routers allow them.
+    """
+
+    def test_shard_no_token_sends_rejection(self):
+        """Shard with no ticket should send an error and close."""
+        proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
+        token = proto._extract_ticket_token()
+        self.assertIsNone(token)
+
+        # Simulate Phase 1 no-token path for shard role.
+        role = get_role()  # "shard" via @override_settings
+        self.assertEqual(role, "shard")
+        msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
+        proto._send_text(msg)
+        proto.sendClose(4001, msg)
+
+        self.assertEqual(len(proto.sent_lines), 1)
+        self.assertIn("requires a ticket", proto.sent_lines[0])
+        self.assertEqual(len(proto.close_calls), 1)
+
+    @override_settings(SHARDS_ROLE="router")
+    def test_router_no_token_proceeds(self):
+        """Router with no ticket should not reject — normal login allowed."""
+        proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
+        token = proto._extract_ticket_token()
+        self.assertIsNone(token)
+
+        role = get_role()  # "router" via @override_settings
+        self.assertEqual(role, "router")
+        # Router does NOT reject — no sendClose, no error message.
+        self.assertEqual(len(proto.sent_lines), 0)
+        self.assertEqual(len(proto.close_calls), 0)

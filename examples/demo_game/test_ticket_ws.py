@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """WebSocket test client for the ticket-auth spike.
 
-Connects to the Evennia WebSocket with a ?ticket=<token> query parameter
-and prints whatever the server sends back, then disconnects.
+Connects to the Evennia WebSocket with a ticket token and prints whatever
+the server sends back, then disconnects.
 
 Usage:
     python test_ticket_ws.py <token> [ws_url]
 
-    token   - the ticket token from @create_ticket_* commands
+    token   - the ticket token (required)
     ws_url  - WebSocket URL (default: ws://localhost:4002/websocket)
 
 Examples:
