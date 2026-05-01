@@ -1285,6 +1285,49 @@ def _make_cmd(args="", role=ROLE_ROUTER, shard_id=ROLE_ROUTER, account=None,
 
 
 @override_settings(
+    SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
+    SHARD_URLS={"shard0": "http://localhost:4011"},
+)
+class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
+    """Direct tests for the _redirect_to_character_shard helper.
+
+    The helper is shared mechanism between the IC command path and the
+    at_post_login override path. Validation is the caller's job — these
+    tests assert only the side-effects the helper itself performs.
+    """
+
+    def test_redirect_creates_ticket_sets_last_puppet_and_sends_oob(self):
+        from evennia_shards.commands import _redirect_to_character_shard
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        session = _FakeSession(address="10.0.0.1")
+
+        url = _redirect_to_character_shard(account, session, char)
+
+        # _last_puppet set on the account.
+        self.assertIs(account.db._last_puppet, char)
+
+        # Exactly one ticket with the right fields.
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, 7)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+        self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+        # OOB shard_redirect sent on the session.
+        self.assertIn("shard_redirect", session.oob_messages)
+        oob_url = session.oob_messages["shard_redirect"][0][0]
+        self.assertIn("http://localhost:4011/webclient?ticket=", oob_url)
+        self.assertIn(ticket.token, oob_url)
+
+        # Returned URL matches the OOB URL.
+        self.assertEqual(url, oob_url)
+
+
+@override_settings(
     SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0",
     SHARD_URLS={"shard0": "http://localhost:4011"},
 )

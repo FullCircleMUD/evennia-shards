@@ -14,6 +14,36 @@ from .config import ROLE_SHARD, get_role, get_router_shard_id, get_router_url, g
 from .tickets import create_ticket
 
 
+def _redirect_to_character_shard(account, session, character) -> str:
+    """Set ``_last_puppet``, create a ticket, send ``shard_redirect`` OOB.
+
+    Pure mechanism shared between the IC command path and the
+    at_post_login override path. The caller is responsible for
+    validating ``character.shard_id`` before calling — this helper
+    assumes a usable shard id (not None, not the ``"*"`` sentinel,
+    and resolvable via ``get_shard_url``).
+
+    Returns the redirect URL.
+    """
+    shard_id = character.shard_id
+
+    # Set _last_puppet so the destination shard's auto-puppet picks up
+    # the correct character after ticket auth.
+    account.db._last_puppet = character
+
+    token = create_ticket(
+        account.id, character.id, shard_id, client_ip=session.address,
+    )
+    url = f"{get_shard_url(shard_id)}/webclient?ticket={token}"
+    session.msg(shard_redirect=[[url], {}])
+
+    logger.log_sec(
+        f"Shard redirect: (Caller: {account}, Target: {character}, "
+        f"Shard: {shard_id}, IP: {session.address})."
+    )
+    return url
+
+
 class ShardAwareCmdIC(CmdIC):
     """Shard-aware override of Evennia's ``ic`` command.
 
@@ -41,24 +71,8 @@ class ShardAwareCmdIC(CmdIC):
             self.msg("That character has no shard assignment.")
             return
 
-        account = self.account
-        session = self.session
-
-        # Set _last_puppet so the shard's auto-puppet picks up the
-        # correct character after ticket auth.
-        account.db._last_puppet = new_character
-
-        token = create_ticket(
-            account.id, new_character.id, shard_id, client_ip=session.address
-        )
-        url = f"{get_shard_url(shard_id)}/webclient?ticket={token}"
-        session.msg(shard_redirect=[[url], {}])
+        _redirect_to_character_shard(self.account, self.session, new_character)
         self.msg(f"Redirecting to {shard_id}...")
-
-        logger.log_sec(
-            f"Shard redirect: (Caller: {account}, Target: {new_character}, "
-            f"Shard: {shard_id}, IP: {session.address})."
-        )
 
     def _resolve_character(self):
         """Resolve the target character from command args.
