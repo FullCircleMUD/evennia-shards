@@ -108,11 +108,11 @@ The ticket-based auto-login flow from [ticket-auth-flow.md](ticket-auth-flow.md)
 **Key implementation**: two-phase `onOpen()` override in `ShardWebSocketClient`:
 
 - **Phase 1** (pre-session): extract token from URL, validate ticket, abort on failure — no session registered, no login screen. Role gating: shards reject tokenless connections, routers allow them.
-- **Phase 2** (reproduced Evennia `onOpen()`): `init_session()` → inject `uid` + `logged_in` from ticket → `sessionhandler.connect()`. The injection point is between these two calls — the only clean seam (see [evennia-upgrade-checklist.md](evennia-upgrade-checklist.md) for rationale and rejected alternatives).
+- **Phase 2** (reproduced Evennia `onOpen()`): `init_session()` → inject `uid` + `logged_in` from ticket → `sessionhandler.connect()`. The injection point is between these two calls — the only clean seam (see [library-integration-risks.md](library-integration-risks.md) for rationale and rejected alternatives).
 
 **New helpers**: `_get_client_address()` (proxy-aware IP resolution), `_validate_ticket()` (pure validation, returns `(bool, data|error)`), `_extract_ticket_token()` (URL query parsing), `_send_text()` (Evennia JSON protocol wrapper).
 
-**New files**: `DESIGN/evennia-upgrade-checklist.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
+**New files**: `DESIGN/library-integration-risks.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
 
 96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, client-side redirect). Note: the two-phase `onOpen()` was later refactored into a single-phase auth cascade — see the "Client redirect spike" milestone above.
 

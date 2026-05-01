@@ -41,7 +41,7 @@ Long-lived documents capturing the project's intent, architecture, and design ra
 
 ### Operational
 
-- **[evennia-upgrade-checklist.md](evennia-upgrade-checklist.md)** — What to verify when upgrading the Evennia dependency. Documents each point where the library couples to Evennia internals, why the coupling exists, and what to diff.
+- **[library-integration-risks.md](library-integration-risks.md)** — Where the library couples to Evennia internals, with each coupling described from two angles: what to diff on Evennia upgrade, and what consumer-side customisation would collide.
 
 ### Decisions and refinements
 
