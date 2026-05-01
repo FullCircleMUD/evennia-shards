@@ -28,3 +28,7 @@ ROUTER_URL = "http://localhost:4001"
 SHARD_URLS = {
     "shard0": "http://localhost:4001",
 }
+
+# Telnet disabled for all sharded instances — ticket-based auth is
+# websocket-only. Wiring telnet into the ticket system is future work.
+TELNET_ENABLED = False

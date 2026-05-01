@@ -17,3 +17,8 @@ from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 
 SHARDS_ROLE = "router"
 SHARD_ID = "router"
+
+# Localhost multi-instance testing: router uses default Evennia ports.
+WEBSERVER_PORTS = [(4001, 4005)]
+WEBSOCKET_CLIENT_PORT = 4002
+AMP_PORT = 4006
