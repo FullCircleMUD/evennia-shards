@@ -7,10 +7,10 @@ the ``evennia.commands.default.account`` module — the AccountCmdSet
 picks up our versions on cmdset rebuild.
 """
 
-from evennia.commands.default.account import CmdIC
+from evennia.commands.default.account import CmdIC, CmdOOC
 from evennia.utils import logger, search, utils
 
-from .config import get_role, get_shard_url
+from .config import get_role, get_router_shard_id, get_router_url, get_shard_url
 from .tickets import create_ticket
 
 
@@ -27,7 +27,7 @@ class ShardAwareCmdIC(CmdIC):
         role = get_role()
 
         if role == "shard":
-            self.msg("Return to the router to select a character.")
+            self.msg("Leave this character before trying to enter another one.")
             return
 
         # --- Router path: resolve character, then ticket + redirect ---
@@ -121,3 +121,54 @@ class ShardAwareCmdIC(CmdIC):
             return None
 
         return character_candidates[0]
+
+
+class ShardAwareCmdOOC(CmdOOC):
+    """Shard-aware override of Evennia's ``ooc`` command.
+
+    - **Shard**: creates a ticket and redirects the client to the router.
+      Always redirects — even if no puppet (error state), because a
+      player should never be OOC on a shard.
+    - **Router**: never injected (original ``CmdOOC`` stays).
+    - **Monolith**: never injected (original ``CmdOOC`` stays).
+
+    No explicit ``unpuppet_object()`` call is needed here. The redirect
+    triggers a full page navigation (``window.location.href``), which
+    closes the WebSocket connection. Evennia's disconnect handler
+    (``sessionhandler.disconnect()`` → ``account.unpuppet_object()``)
+    automatically releases the character on the shard when the
+    connection drops.
+    """
+
+    def func(self):
+        account = self.account
+        session = self.session
+
+        # Resolve the best character_id for the ticket.
+        old_char = account.get_puppet(session)
+        if old_char:
+            character_id = old_char.id
+        elif account.db._last_puppet:
+            character_id = account.db._last_puppet.id
+        else:
+            # Truly broken state — no puppet and no _last_puppet.
+            # Log a warning and use 0 as a sentinel; the router
+            # won't use character_id for OOC tickets anyway.
+            character_id = 0
+            logger.log_warn(
+                f"OOC redirect with no puppet and no _last_puppet "
+                f"(Account: {account}, IP: {session.address})."
+            )
+
+        token = create_ticket(
+            account.id, character_id, get_router_shard_id(),
+            client_ip=session.address,
+        )
+        url = f"{get_router_url()}/webclient?ticket={token}"
+        session.msg(shard_redirect=[[url], {}])
+        self.msg("Redirecting to router...")
+
+        logger.log_sec(
+            f"OOC redirect: (Caller: {account}, Character: {character_id}, "
+            f"IP: {session.address})."
+        )

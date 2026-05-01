@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-01 — OOC command override: shard→router redirect proven end-to-end
+
+`ShardAwareCmdOOC` completes the bidirectional ticket flow. A player IC on a shard types `ooc`, the shard creates a ticket targeting the router, and redirects the client back. The router ticket-auths the account back into OOC state. Full round-trip proven with live smoke test (router + shard0, localhost multi-instance).
+
+**What was proven**:
+
+| Step | Result |
+|------|--------|
+| `ooc` on shard (while IC) | Ticket created with `old_char.id`, `to_shard="router"` |
+| `shard_redirect` OOB sent | Browser navigates to router webclient with ticket |
+| Router ticket auth | Player is OOC on the router |
+| Full round-trip: router → IC → shard → OOC → router | Works end-to-end |
+
+**Implementation**:
+
+- `ShardAwareCmdOOC` (`evennia_shards/commands.py`): subclasses Evennia's `CmdOOC`, overrides `func()`. Character ID fallback chain: `old_char.id` → `_last_puppet.id` → `0` (sentinel with `log_warn`). Always redirects — even error states with no puppet.
+- `AppConfig.ready()` monkey-patch: replaces `CmdOOC` on `evennia.commands.default.account` module, gated on `get_role() == "shard"` only. Asymmetric with IC (which patches both router and shard) because vanilla OOC on the router is correct behaviour.
+- No explicit unpuppet: page navigation closes WebSocket, Evennia's disconnect handler releases the character automatically.
+
+127 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for the OOC command override design and remaining work (`at_post_login` override for auto-puppet = true).
+
 ### 2026-05-01 — Router shard ID: library mandate and accessor
 
 Added `get_router_shard_id()` accessor returning the hardcoded constant `"router"`. This is a library mandate — the router's `SHARD_ID` must be `"router"`, not configurable. Needed by shards to populate `to_shard` in OOC redirect tickets (and any future cross-shard ticket targeting the router).
@@ -30,7 +51,7 @@ The `AUTO_PUPPET_ON_LOGIN = False` path is complete. A player logs into the rout
 | `ic <character>` on router | Character resolved, `_last_puppet` set, ticket created |
 | `shard_redirect` OOB sent | Browser navigates to shard webclient with ticket |
 | Shard ticket auth + auto-puppet | Player is IC on the shard |
-| `ic` on shard | "Return to the router to select a character" |
+| `ic` on shard | "Leave this character before trying to enter another one." |
 
 **Implementation**:
 

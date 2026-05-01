@@ -1232,6 +1232,9 @@ class _FakeAccount:
     def characters(self):
         return self._characters
 
+    def get_puppet(self, session):
+        return session.puppet
+
     def search(self, searchdata, candidates=None, search_object=True, quiet=True):
         """Simple name-match search against candidates."""
         if candidates:
@@ -1290,13 +1293,13 @@ class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
         cmd = _make_cmd(args="Bob", role="shard", shard_id="shard0")
         cmd.func()
         self.assertEqual(len(cmd._messages), 1)
-        self.assertIn("Return to the router", cmd._messages[0])
+        self.assertIn("Leave this character", cmd._messages[0])
 
     def test_shard_rejects_ic_no_args(self):
         cmd = _make_cmd(args="", role="shard", shard_id="shard0")
         cmd.func()
         self.assertEqual(len(cmd._messages), 1)
-        self.assertIn("Return to the router", cmd._messages[0])
+        self.assertIn("Leave this character", cmd._messages[0])
 
 
 @override_settings(
@@ -1385,3 +1388,106 @@ class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
 
         ticket = Ticket.objects.first()
         self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+
+def _make_ooc_cmd(account=None, session=None, puppet=None):
+    """Build a ShardAwareCmdOOC instance wired up for testing."""
+    from evennia_shards.commands import ShardAwareCmdOOC
+
+    cmd = ShardAwareCmdOOC()
+    cmd.args = ""
+    cmd.raw_string = "ooc"
+    if session is None:
+        session = _FakeSession()
+    if puppet is not None:
+        session.puppet = puppet
+    cmd.session = session
+    if account is None:
+        account = _FakeAccount()
+    cmd.account = account
+    cmd.caller = account
+    cmd._messages = []
+
+    def _msg(text, **kwargs):
+        cmd._messages.append(text)
+
+    cmd.msg = _msg
+    return cmd
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    ROUTER_URL="http://localhost:4001",
+)
+class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
+    """OOC command on a shard creates a ticket and redirects to the router."""
+
+    def test_shard_with_puppet_creates_ticket_and_redirects(self):
+        """ooc on shard with puppet → ticket + shard_redirect OOB."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(puppet=char, session=session)
+        cmd.func()
+
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, cmd.account.id)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "router")
+
+        self.assertIn("shard_redirect", session.oob_messages)
+        redirect_args = session.oob_messages["shard_redirect"]
+        url = redirect_args[0][0]
+        self.assertIn("http://localhost:4001/webclient?ticket=", url)
+        self.assertIn(ticket.token, url)
+
+    def test_shard_no_puppet_with_last_puppet_redirects(self):
+        """ooc on shard, no puppet but _last_puppet set → uses _last_puppet.id."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(account=account, session=session)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.character_id, 42)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_shard_no_puppet_no_last_puppet_redirects_with_zero(self):
+        """Error state: no puppet, no _last_puppet → character_id=0, still redirects."""
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(session=session)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.character_id, 0)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_shard_ip_pinned_in_ticket(self):
+        """Ticket records the session's IP address."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession(address="10.0.0.1")
+        cmd = _make_ooc_cmd(puppet=char, session=session)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+    def test_shard_ticket_to_shard_is_router(self):
+        """Ticket's to_shard is always 'router'."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        cmd = _make_ooc_cmd(puppet=char)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.to_shard, "router")
+
+    def test_shard_redirect_message_sent(self):
+        """Player gets a 'Redirecting to router...' message."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        cmd = _make_ooc_cmd(puppet=char)
+        cmd.func()
+
+        self.assertTrue(any("Redirecting to router" in m for m in cmd._messages))

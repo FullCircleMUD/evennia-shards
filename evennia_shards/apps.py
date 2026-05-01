@@ -51,6 +51,11 @@ class EvenniaShardsConfig(AppConfig):
 
             _account_module.CmdIC = ShardAwareCmdIC
 
+            if get_role() == "shard":
+                from .commands import ShardAwareCmdOOC
+
+                _account_module.CmdOOC = ShardAwareCmdOOC
+
         # Late-bind shard_id onto Evennia's ObjectDB so the ORM is aware
         # of the column the migration adds. Idempotent — guards against
         # double-installation in dev reload scenarios.
