@@ -11,6 +11,16 @@ The library enforces two invariants:
 
 These together prevent cache poisoning, cross-shard data corruption, and silent state divergence.
 
+## Router exemption
+
+The router is exempt from all four chokepoints. It needs unrestricted access to ObjectDB because it is the coordinator for OOC operations that span shards:
+
+- **Reads**: deserializing `_last_puppet` to resolve which character (and which shard) to redirect to on login.
+- **Writes**: character creation (chargen) — the router creates characters and stamps them with the target shard's `shard_id`.
+- **Deletes**: character deletion is an OOC operation handled by the router.
+
+The isolation rule is: **shards are isolated from each other; the router is trusted**. In the chokepoint logic, the check becomes "am I a shard and is this object owned by a different shard?" rather than "is this object owned by a different shard?"
+
 ## The four chokepoints
 
 | # | Hook | Covers | Rule |

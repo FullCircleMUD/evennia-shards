@@ -747,6 +747,104 @@ class QsUpdateChokepointTests(BaseEvenniaTestCase):
         self.assertEqual(self._db_key(remote.pk), "u5_remote")
 
 
+# ── Router exemption ──────────────────────────────────────────────
+
+
+@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+class RouterFromDbExemptionTests(BaseEvenniaTestCase):
+    """Router is exempt from from_db — it can load objects from any shard."""
+
+    def test_router_loads_remote_shard_object(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="rf1", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, "shard0")
+        flush_cache()
+        # Would raise ShardIsolationError if role were "shard"
+        loaded = ObjectDB.objects.get(pk=pk)
+        self.assertEqual(loaded.shard_id, "shard0")
+
+    def test_router_loads_objects_from_multiple_shards(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj1 = ObjectDB.objects.create(db_key="rf2", db_typeclass_path=TYPECLASS)
+        obj2 = ObjectDB.objects.create(db_key="rf3", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(obj1.pk, "shard0")
+        _forge_db_shard(obj2.pk, "shard1")
+        flush_cache()
+        loaded1 = ObjectDB.objects.get(pk=obj1.pk)
+        loaded2 = ObjectDB.objects.get(pk=obj2.pk)
+        self.assertEqual(loaded1.shard_id, "shard0")
+        self.assertEqual(loaded2.shard_id, "shard1")
+
+
+@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+class RouterPreSaveExemptionTests(BaseEvenniaTestCase):
+    """Router is exempt from pre_save — it can create/modify objects for any shard."""
+
+    def test_router_saves_object_with_remote_shard_id(self):
+        obj = ObjectDB.objects.create(db_key="rs1", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "shard0"
+        obj.save()  # Would raise ShardIsolationError if role were "shard"
+        self.assertEqual(obj.shard_id, "shard0")
+
+    def test_router_auto_stamps_with_router_shard_id(self):
+        obj = ObjectDB.objects.create(db_key="rs2", db_typeclass_path=TYPECLASS)
+        # Auto-stamp still uses current SHARD_ID (router)
+        self.assertEqual(obj.shard_id, "router")
+
+
+@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+class RouterPreDeleteExemptionTests(BaseEvenniaTestCase):
+    """Router is exempt from pre_delete — it can delete objects from any shard."""
+
+    def test_router_deletes_remote_shard_object(self):
+        obj = ObjectDB.objects.create(db_key="rd1", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "shard0"
+        obj.save()
+        obj.delete()  # Would raise ShardIsolationError if role were "shard"
+        self.assertFalse(ObjectDB.objects.filter(db_key="rd1").exists())
+
+    def test_router_bulk_deletes_remote_shard_objects(self):
+        from evennia.utils.idmapper.models import flush_cache
+
+        obj = ObjectDB.objects.create(db_key="rd2", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        _forge_db_shard(pk, "shard1")
+        flush_cache()
+        ObjectDB.objects.filter(pk=pk).delete()
+        self.assertFalse(ObjectDB.objects.filter(pk=pk).exists())
+
+
+@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+class RouterQsUpdateExemptionTests(BaseEvenniaTestCase):
+    """Router is exempt from qs.update — it can bulk-update objects from any shard."""
+
+    def _db_key(self, pk):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT db_key FROM objects_objectdb WHERE id=%s", [pk])
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def test_router_bulk_updates_remote_shard_object(self):
+        obj = ObjectDB.objects.create(db_key="ru1", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(obj.pk, "shard1")
+        ObjectDB.objects.filter(pk=obj.pk).update(db_key="ru1_modified")
+        self.assertEqual(self._db_key(obj.pk), "ru1_modified")
+
+    def test_router_bulk_updates_mixed_shard_objects(self):
+        obj1 = ObjectDB.objects.create(db_key="ru2_a", db_typeclass_path=TYPECLASS)
+        obj2 = ObjectDB.objects.create(db_key="ru2_b", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(obj1.pk, "shard0")
+        _forge_db_shard(obj2.pk, "shard1")
+        ObjectDB.objects.filter(pk__in=[obj1.pk, obj2.pk]).update(db_key="ru2_modified")
+        self.assertEqual(self._db_key(obj1.pk), "ru2_modified")
+        self.assertEqual(self._db_key(obj2.pk), "ru2_modified")
+
+
 # ── Ticket primitives ──────────────────────────────────────────────
 
 

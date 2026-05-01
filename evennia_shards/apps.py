@@ -93,6 +93,11 @@ class EvenniaShardsConfig(AppConfig):
             original_from_db = ObjectDB.from_db.__func__
 
             def _shard_aware_from_db(cls, db, field_names, values):
+                from evennia_shards.config import get_role
+
+                if get_role() == "router":
+                    return original_from_db(cls, db, field_names, values)
+
                 field_names_list = list(field_names)
                 if "shard_id" in field_names_list:
                     idx = field_names_list.index("shard_id")
@@ -125,6 +130,12 @@ class EvenniaShardsConfig(AppConfig):
                 # Only enforce for ObjectDB-derived models in case this
                 # queryset class is shared with other Evennia models.
                 if not (isinstance(self.model, type) and issubclass(self.model, ObjectDB)):
+                    return original_update(self, **kwargs)
+
+                from evennia_shards.config import get_role
+
+                # Router is exempt from isolation checks.
+                if get_role() == "router":
                     return original_update(self, **kwargs)
 
                 from evennia_shards import get_shard_id
@@ -161,16 +172,24 @@ def _pre_save_chokepoint(sender, instance, **kwargs):
         return
 
     from evennia_shards import get_shard_id
-    from evennia_shards.errors import ShardIsolationError
+    from evennia_shards.config import get_role
 
     current = get_shard_id()
 
+    # Auto-stamp: new rows with no shard_id get the current shard's ID.
     if instance.shard_id is None:
         instance.shard_id = current
         return
 
+    # Router is exempt — it creates/modifies objects across all shards
+    # (chargen, chardelete, setting _last_puppet, etc.).
+    if get_role() == "router":
+        return
+
     if instance.shard_id == current or instance.shard_id == "*":
         return
+
+    from evennia_shards.errors import ShardIsolationError
 
     raise ShardIsolationError(
         f"pre_save refused: shard {current!r} cannot persist "
@@ -186,7 +205,11 @@ def _pre_delete_chokepoint(sender, instance, **kwargs):
         return
 
     from evennia_shards import get_shard_id
-    from evennia_shards.errors import ShardIsolationError
+    from evennia_shards.config import get_role
+
+    # Router is exempt — chardelete and other OOC operations span shards.
+    if get_role() == "router":
+        return
 
     current = get_shard_id()
 
@@ -195,6 +218,8 @@ def _pre_delete_chokepoint(sender, instance, **kwargs):
 
     if instance.shard_id == current:
         return
+
+    from evennia_shards.errors import ShardIsolationError
 
     raise ShardIsolationError(
         f"pre_delete refused: shard {current!r} cannot delete "
