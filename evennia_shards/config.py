@@ -12,6 +12,7 @@ current deployment role or shard id should call these.
 
 DEFAULT_ROLE = "monolith"
 DEFAULT_MESSAGE_TIMEOUT = 10
+ROUTER_SHARD_ID = "router"
 
 
 def get_role() -> str:
@@ -70,6 +71,17 @@ def get_shard_url(shard_id: str) -> str:
             "to base URLs in your Django settings."
         )
     return urls[shard_id]
+
+
+def get_router_shard_id() -> str:
+    """Return the router's shard ID.
+
+    This is a library mandate — the router's ``SHARD_ID`` must be
+    ``"router"``.  Not configurable.  The value is used by shards to
+    populate ``to_shard`` in OOC redirect tickets and by the router's
+    ``get_ticket()`` to match against its own ``get_shard_id()``.
+    """
+    return ROUTER_SHARD_ID
 
 
 def get_message_timeout(kind: str) -> int:

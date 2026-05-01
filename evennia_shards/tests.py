@@ -16,6 +16,7 @@ from evennia_shards import (
     delete_ticket,
     get_message_timeout,
     get_role,
+    get_router_shard_id,
     get_router_url,
     get_shard_id,
     get_shard_url,
@@ -102,6 +103,13 @@ class RouterUrlAccessorTests(BaseEvenniaTestCase):
     def test_raises_value_error_when_not_configured(self):
         with self.assertRaises(ValueError):
             get_router_url()
+
+
+class RouterShardIdAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_router_shard_id accessor."""
+
+    def test_returns_router(self):
+        self.assertEqual(get_router_shard_id(), "router")
 
 
 class MessageTimeoutAccessorTests(BaseEvenniaTestCase):

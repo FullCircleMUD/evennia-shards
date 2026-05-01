@@ -6,6 +6,19 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-01 — Router shard ID: library mandate and accessor
+
+Added `get_router_shard_id()` accessor returning the hardcoded constant `"router"`. This is a library mandate — the router's `SHARD_ID` must be `"router"`, not configurable. Needed by shards to populate `to_shard` in OOC redirect tickets (and any future cross-shard ticket targeting the router).
+
+**What landed:**
+
+- `ROUTER_SHARD_ID = "router"` constant and `get_router_shard_id()` accessor in `config.py`
+- Exported in `__init__.py` and `__all__`
+- `RouterShardIdAccessorTests` in `tests.py`
+- `ROUTER_SHARD_ID` documented in `shard-settings.md` settings table and usage example
+
+121 tests passing.
+
 ### 2026-05-01 — IC command override: router→shard redirect proven end-to-end
 
 The `AUTO_PUPPET_ON_LOGIN = False` path is complete. A player logs into the router OOC, types `ic <character>`, and the router resolves the character, creates a ticket, and redirects the client to the character's shard — where ticket auth + auto-puppet puts them IC. Proven with live smoke test (router + shard0, localhost multi-instance).

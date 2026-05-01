@@ -9,6 +9,7 @@ How the library's configuration items are declared, read, and defaulted.
 | `SHARDS_ROLE` | `str` | `"monolith"` | One of `"monolith"`, `"router"`, `"shard"`. Selects which role this Evennia process plays. |
 | `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Meaningful only when `SHARDS_ROLE == "shard"`. |
 | `ROUTER_URL` | `str \| None` | `None` | Webclient base URL for the router. Used by shards for OOC redirect. |
+| `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
 | `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Used by router for IC redirect. Shard IDs are flexible — name them to match your game world. |
 
 ## How they flow
@@ -44,12 +45,13 @@ The accessors live in [`evennia_shards/config.py`](../evennia_shards/config.py) 
 Code that needs shard configuration — library code *or* consumer game code — should call the accessors rather than reading `settings.*` directly:
 
 ```python
-from evennia_shards import get_role, get_shard_id, get_shard_url, get_router_url
+from evennia_shards import get_role, get_shard_id, get_shard_url, get_router_url, get_router_shard_id
 role = get_role()                  # "monolith" if undeclared
 shard = get_shard_id()             # None if undeclared
 url = get_shard_url("overworld")   # ValueError if SHARD_URLS not configured
                                    # KeyError if shard_id not in the dict
 router = get_router_url()          # ValueError if ROUTER_URL not configured
+router_id = get_router_shard_id()  # always "router" — library mandate
 ```
 
 A direct `settings.SHARDS_ROLE` read raises `AttributeError` whenever the consumer hasn't declared the setting — i.e. every monolith consumer. The accessors apply the documented defaults and are the single source of truth for fallback values, so any future change to a default lands in one place.
