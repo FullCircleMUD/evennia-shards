@@ -126,6 +126,21 @@ Each Evennia instance binds several ports. When running multiple instances on lo
 
 Additional shards increment by 10 again (4021/4022/4026, etc.). `AMP_PORT` is Evennia's internal Portal↔Server IPC — not player-facing, but still needs a unique port per instance. In production (separate hosts), port offsets are unnecessary.
 
+## Localhost multi-instance game directories
+
+Evennia uses PID files (`server.pid`, `portal.pid`) to track running processes. These live in `server/` inside the game directory. Running two instances from the same directory fails because the second sees the first's PID file.
+
+The demo examples solve this with symlinked game directories. `demo_shard0` is the "real" game directory containing all game code, settings, and the shared database. `demo_router` and `demo_shard1` are lightweight directories that symlink to `demo_shard0`'s code but have their own `server/` directory for PID files and logs.
+
+```
+examples/
+  demo_shard0/          <- real game dir (code, settings, shared DB)
+  demo_router/          <- symlinks to demo_shard0, own server/ for PIDs
+  demo_shard1/          <- symlinks to demo_shard0, own server/ for PIDs
+```
+
+All instances share the same database via a `DATABASES` override in `settings_common_shard_config.py` that uses `os.path.realpath(__file__)` to always resolve to `demo_shard0/server/evennia.db3`, regardless of symlinks. See `examples/README.md` for setup and usage instructions.
+
 ## What this design doesn't address
 
 - **Validation.** Nothing checks that `SHARDS_ROLE` is one of the three valid strings, or that `SHARD_ID` is set when role is `"shard"`. Validation will land with whatever code first depends on it. Pre-building it now would be forward-design.

@@ -18,8 +18,10 @@ from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 SHARDS_ROLE = "shard"
 SHARD_ID = "shard0"
 
-# Point this shard's home/start room at its own Limbo.
-# Replace with the actual PK of the room created for this shard.
+# For single-shard, Limbo #2 (created by Evennia's initial_setup) serves
+# as the shard's home room — no extra room creation needed. The pre_save
+# chokepoint auto-stamps it with SHARD_ID when initial_setup runs.
+# For multi-shard, replace with the PK of this shard's landing room.
 DEFAULT_HOME = "#2"
 START_LOCATION = "#2"
 

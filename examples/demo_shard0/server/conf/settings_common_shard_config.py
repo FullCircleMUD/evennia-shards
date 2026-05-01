@@ -12,7 +12,15 @@ Cascade:
                 -> secret_settings.py
 """
 
+import os
+
 from server.conf.settings import *  # noqa: F401, F403
+
+# Shared database: all instances (router, shard0, shard1, ...) use the same
+# DB file in demo_shard0/server/. os.path.realpath resolves symlinks so this
+# works regardless of which game directory we're running from.
+_CONF_DIR = os.path.dirname(os.path.realpath(__file__))
+DATABASES["default"]["NAME"] = os.path.join(_CONF_DIR, "..", "evennia.db3")
 
 # Add evennia_shards to all sharded instances.
 INSTALLED_APPS = list(INSTALLED_APPS) + ["evennia_shards"]
@@ -26,7 +34,7 @@ ROUTER_URL = "http://localhost:4001"
 # Shard IDs are flexible — name them to match your game world.
 # In production, set these via environment variables.
 SHARD_URLS = {
-    "shard0": "http://localhost:4001",
+    "shard0": "http://localhost:4011",
 }
 
 # Telnet disabled for all sharded instances — ticket-based auth is

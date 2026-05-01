@@ -72,6 +72,7 @@ class ShardUrlAccessorTests(BaseEvenniaTestCase):
         with self.assertRaises(KeyError):
             get_shard_url("shard99")
 
+    @override_settings(SHARD_URLS=None)
     def test_raises_value_error_when_not_configured(self):
         # No SHARD_URLS in settings at all (monolith case).
         with self.assertRaises(ValueError):
@@ -97,6 +98,7 @@ class RouterUrlAccessorTests(BaseEvenniaTestCase):
     def test_returns_configured_url(self):
         self.assertEqual(get_router_url(), "http://router.example.com")
 
+    @override_settings(ROUTER_URL=None)
     def test_raises_value_error_when_not_configured(self):
         with self.assertRaises(ValueError):
             get_router_url()
