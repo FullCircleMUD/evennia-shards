@@ -15,7 +15,11 @@ Cascade:
 
 from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 
-SHARDS_ROLE = "shard"
+from evennia_shards import ROLE_SHARD
+
+SHARDS_ROLE = ROLE_SHARD
+# SHARD_ID is consumer-chosen — descriptive names like "overworld" or
+# "underdark" are fine. Only SHARDS_ROLE comes from the library enum.
 SHARD_ID = "shard0"
 
 # Shards must auto-puppet — ticket auth logs the player in and Evennia's

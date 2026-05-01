@@ -10,7 +10,7 @@ picks up our versions on cmdset rebuild.
 from evennia.commands.default.account import CmdIC, CmdOOC
 from evennia.utils import logger, search, utils
 
-from .config import get_role, get_router_shard_id, get_router_url, get_shard_url
+from .config import ROLE_SHARD, get_role, get_router_shard_id, get_router_url, get_shard_url
 from .tickets import create_ticket
 
 
@@ -26,7 +26,7 @@ class ShardAwareCmdIC(CmdIC):
     def func(self):
         role = get_role()
 
-        if role == "shard":
+        if role == ROLE_SHARD:
             self.msg("Leave this character before trying to enter another one.")
             return
 

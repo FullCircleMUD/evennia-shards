@@ -10,9 +10,18 @@ Both library code and consumer game code that needs to introspect the
 current deployment role or shard id should call these.
 """
 
-DEFAULT_ROLE = "monolith"
+ROLE_MONOLITH = "monolith"
+ROLE_ROUTER = "router"
+ROLE_SHARD = "shard"
+
+DEFAULT_ROLE = ROLE_MONOLITH
 DEFAULT_MESSAGE_TIMEOUT = 10
-ROUTER_SHARD_ID = "router"
+
+# Library mandate: the router's SHARD_ID equals its role string. There is
+# exactly one router, so the singular role and singular shard_id collapse
+# to the same constant. Consumer router settings should derive SHARD_ID
+# from get_router_shard_id() rather than re-declaring the literal.
+ROUTER_SHARD_ID = ROLE_ROUTER
 
 
 def get_role() -> str:

@@ -15,8 +15,12 @@ Cascade:
 
 from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 
-SHARDS_ROLE = "router"
-SHARD_ID = "router"
+from evennia_shards import ROLE_ROUTER, get_router_shard_id
+
+SHARDS_ROLE = ROLE_ROUTER
+# Library mandate: the router's SHARD_ID equals its role string.
+# Derive from the accessor rather than re-declaring the literal.
+SHARD_ID = get_router_shard_id()
 
 # AUTO_PUPPET_ON_LOGIN is deliberately not set here — the router inherits
 # the consumer's setting from settings.py. The router intercepts the

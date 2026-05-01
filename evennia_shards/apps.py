@@ -17,9 +17,9 @@ class EvenniaShardsConfig(AppConfig):
         # Gated on non-monolith: monolith uses normal login only.
         # Stashes the consumer's current value so protocols.py can
         # subclass it (preserving any consumer customisations).
-        from .config import get_role
+        from .config import ROLE_MONOLITH, ROLE_SHARD, get_role
 
-        if get_role() != "monolith":
+        if get_role() != ROLE_MONOLITH:
             from django.conf import settings
 
             settings._SHARDS_ORIGINAL_WS_PROTOCOL = getattr(
@@ -51,7 +51,7 @@ class EvenniaShardsConfig(AppConfig):
 
             _account_module.CmdIC = ShardAwareCmdIC
 
-            if get_role() == "shard":
+            if get_role() == ROLE_SHARD:
                 from .commands import ShardAwareCmdOOC
 
                 _account_module.CmdOOC = ShardAwareCmdOOC
@@ -108,9 +108,9 @@ class EvenniaShardsConfig(AppConfig):
             original_from_db = ObjectDB.from_db.__func__
 
             def _shard_aware_from_db(cls, db, field_names, values):
-                from evennia_shards.config import get_role
+                from evennia_shards.config import ROLE_ROUTER, get_role
 
-                if get_role() == "router":
+                if get_role() == ROLE_ROUTER:
                     return original_from_db(cls, db, field_names, values)
 
                 field_names_list = list(field_names)
@@ -147,10 +147,10 @@ class EvenniaShardsConfig(AppConfig):
                 if not (isinstance(self.model, type) and issubclass(self.model, ObjectDB)):
                     return original_update(self, **kwargs)
 
-                from evennia_shards.config import get_role
+                from evennia_shards.config import ROLE_ROUTER, get_role
 
                 # Router is exempt from isolation checks.
-                if get_role() == "router":
+                if get_role() == ROLE_ROUTER:
                     return original_update(self, **kwargs)
 
                 from evennia_shards import get_shard_id
@@ -187,7 +187,7 @@ def _pre_save_chokepoint(sender, instance, **kwargs):
         return
 
     from evennia_shards import get_shard_id
-    from evennia_shards.config import get_role
+    from evennia_shards.config import ROLE_ROUTER, get_role
 
     current = get_shard_id()
 
@@ -198,7 +198,7 @@ def _pre_save_chokepoint(sender, instance, **kwargs):
 
     # Router is exempt — it creates/modifies objects across all shards
     # (chargen, chardelete, setting _last_puppet, etc.).
-    if get_role() == "router":
+    if get_role() == ROLE_ROUTER:
         return
 
     if instance.shard_id == current or instance.shard_id == "*":
@@ -220,10 +220,10 @@ def _pre_delete_chokepoint(sender, instance, **kwargs):
         return
 
     from evennia_shards import get_shard_id
-    from evennia_shards.config import get_role
+    from evennia_shards.config import ROLE_ROUTER, get_role
 
     # Router is exempt — chardelete and other OOC operations span shards.
-    if get_role() == "router":
+    if get_role() == ROLE_ROUTER:
         return
 
     current = get_shard_id()

@@ -7,6 +7,8 @@ from evennia.objects.models import ObjectDB
 from evennia.utils.test_resources import BaseEvenniaTestCase
 
 from evennia_shards import (
+    ROLE_ROUTER,
+    ROLE_SHARD,
     MessageBusError,
     MessageHandler,
     ShardIsolationError,
@@ -48,13 +50,13 @@ def _forge_db_shard(pk, shard_id):
 class ConfigAccessorTests(BaseEvenniaTestCase):
     """Tests for the get_role / get_shard_id accessors."""
 
-    @override_settings(SHARDS_ROLE="router")
+    @override_settings(SHARDS_ROLE=ROLE_ROUTER)
     def test_get_role_reflects_setting_router(self):
-        self.assertEqual(get_role(), "router")
+        self.assertEqual(get_role(), ROLE_ROUTER)
 
-    @override_settings(SHARDS_ROLE="shard")
+    @override_settings(SHARDS_ROLE=ROLE_SHARD)
     def test_get_role_reflects_setting_shard(self):
-        self.assertEqual(get_role(), "shard")
+        self.assertEqual(get_role(), ROLE_SHARD)
 
     @override_settings(SHARD_ID="some-shard")
     def test_get_shard_id_reflects_setting(self):
@@ -172,7 +174,7 @@ class MessageModelTests(BaseEvenniaTestCase):
         self.assertIsNone(msg.from_shard)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class SendMessageTests(BaseEvenniaTestCase):
     """send_message primitive: insert a message row."""
 
@@ -236,7 +238,7 @@ class SendMessageTests(BaseEvenniaTestCase):
         self.assertEqual(Message.objects.count(), before)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class PollMessagesTests(BaseEvenniaTestCase):
     """poll_messages primitive: read messages addressed to a shard."""
 
@@ -282,7 +284,7 @@ class PollMessagesTests(BaseEvenniaTestCase):
         self.assertIsNotNone(result.first())
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class DeleteMessageTests(BaseEvenniaTestCase):
     """delete_message primitive: remove a processed message row."""
 
@@ -305,7 +307,7 @@ class DeleteMessageTests(BaseEvenniaTestCase):
         self.assertEqual(poll_messages("shard1").count(), 0)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class MessageHandlerTests(BaseEvenniaTestCase):
     """The base MessageHandler dispatches library-shipped kinds."""
 
@@ -363,7 +365,7 @@ class MessageHandlerTests(BaseEvenniaTestCase):
         self.assertEqual(Message.objects.count(), before_count)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class ProcessInboxTests(BaseEvenniaTestCase):
     """process_inbox runs one polling cycle: poll, dispatch, delete on success."""
 
@@ -434,7 +436,7 @@ class ProcessInboxTests(BaseEvenniaTestCase):
         self.assertEqual(Message.objects.count(), 1)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class ProcessInboxTimeoutTests(BaseEvenniaTestCase):
     """Aged-out unhandled messages produce undeliverable_reply and are deleted."""
 
@@ -561,7 +563,7 @@ class AppSetupTests(BaseEvenniaTestCase):
         self.assertTrue(field.db_index)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class PreSaveChokepointTests(BaseEvenniaTestCase):
     """pre_save chokepoint: auto-stamp on None; refuse on remote shard_id."""
 
@@ -591,7 +593,7 @@ class PreSaveChokepointTests(BaseEvenniaTestCase):
         self.assertIn("shard1", msg)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class PreDeleteChokepointTests(BaseEvenniaTestCase):
     """pre_delete chokepoint: refuse delete of remote-shard rows.
 
@@ -638,7 +640,7 @@ class PreDeleteChokepointTests(BaseEvenniaTestCase):
             ObjectDB.objects.filter(pk=pk).delete()
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class FromDbChokepointTests(BaseEvenniaTestCase):
     """from_db chokepoint: refuse to instantiate rows owned by another shard.
 
@@ -697,7 +699,7 @@ class FromDbChokepointTests(BaseEvenniaTestCase):
         self.assertEqual(result, [{"shard_id": "shard1"}])
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class QsUpdateChokepointTests(BaseEvenniaTestCase):
     """qs.update chokepoint: refuse bulk update if any row in scope is remote.
 
@@ -758,7 +760,7 @@ class QsUpdateChokepointTests(BaseEvenniaTestCase):
 # ── Router exemption ──────────────────────────────────────────────
 
 
-@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+@override_settings(SHARD_ID=ROLE_ROUTER, SHARDS_ROLE=ROLE_ROUTER)
 class RouterFromDbExemptionTests(BaseEvenniaTestCase):
     """Router is exempt from from_db — it can load objects from any shard."""
 
@@ -787,7 +789,7 @@ class RouterFromDbExemptionTests(BaseEvenniaTestCase):
         self.assertEqual(loaded2.shard_id, "shard1")
 
 
-@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+@override_settings(SHARD_ID=ROLE_ROUTER, SHARDS_ROLE=ROLE_ROUTER)
 class RouterPreSaveExemptionTests(BaseEvenniaTestCase):
     """Router is exempt from pre_save — it can create/modify objects for any shard."""
 
@@ -800,10 +802,10 @@ class RouterPreSaveExemptionTests(BaseEvenniaTestCase):
     def test_router_auto_stamps_with_router_shard_id(self):
         obj = ObjectDB.objects.create(db_key="rs2", db_typeclass_path=TYPECLASS)
         # Auto-stamp still uses current SHARD_ID (router)
-        self.assertEqual(obj.shard_id, "router")
+        self.assertEqual(obj.shard_id, ROLE_ROUTER)
 
 
-@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+@override_settings(SHARD_ID=ROLE_ROUTER, SHARDS_ROLE=ROLE_ROUTER)
 class RouterPreDeleteExemptionTests(BaseEvenniaTestCase):
     """Router is exempt from pre_delete — it can delete objects from any shard."""
 
@@ -825,7 +827,7 @@ class RouterPreDeleteExemptionTests(BaseEvenniaTestCase):
         self.assertFalse(ObjectDB.objects.filter(pk=pk).exists())
 
 
-@override_settings(SHARD_ID="router", SHARDS_ROLE="router")
+@override_settings(SHARD_ID=ROLE_ROUTER, SHARDS_ROLE=ROLE_ROUTER)
 class RouterQsUpdateExemptionTests(BaseEvenniaTestCase):
     """Router is exempt from qs.update — it can bulk-update objects from any shard."""
 
@@ -867,7 +869,7 @@ class TicketModelTests(BaseEvenniaTestCase):
         self.assertTrue(field.primary_key)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class CreateTicketTests(BaseEvenniaTestCase):
     """create_ticket inserts a Ticket row and returns a token."""
 
@@ -902,7 +904,7 @@ class CreateTicketTests(BaseEvenniaTestCase):
         self.assertIsNone(ticket.client_ip)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class GetTicketTests(BaseEvenniaTestCase):
     """get_ticket looks up a ticket by token with shard check."""
 
@@ -946,7 +948,7 @@ class GetTicketTests(BaseEvenniaTestCase):
         self.assertTrue(Ticket.objects.filter(token=token).exists())
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class DeleteTicketTests(BaseEvenniaTestCase):
     """delete_ticket removes a ticket by token."""
 
@@ -1073,7 +1075,7 @@ class GetClientAddressTests(BaseEvenniaTestCase):
         self.assertEqual(proto._get_client_address(), "10.0.0.1")
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class ValidateTicketTests(BaseEvenniaTestCase):
     """_validate_ticket validates, IP-checks, and consumes the ticket."""
 
@@ -1149,7 +1151,7 @@ class ValidateTicketTests(BaseEvenniaTestCase):
         self.assertTrue(valid)
 
 
-@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class RoleGatingTests(BaseEvenniaTestCase):
     """onOpen Phase 1: role-based gating when no ticket is present.
 
@@ -1165,8 +1167,8 @@ class RoleGatingTests(BaseEvenniaTestCase):
         self.assertIsNone(token)
 
         # Simulate Phase 1 no-token path for shard role.
-        role = get_role()  # "shard" via @override_settings
-        self.assertEqual(role, "shard")
+        role = get_role()  # ROLE_SHARD via @override_settings
+        self.assertEqual(role, ROLE_SHARD)
         msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
         proto._send_text(msg)
         proto.sendClose(4001, msg)
@@ -1175,15 +1177,15 @@ class RoleGatingTests(BaseEvenniaTestCase):
         self.assertIn("requires a ticket", proto.sent_lines[0])
         self.assertEqual(len(proto.close_calls), 1)
 
-    @override_settings(SHARDS_ROLE="router")
+    @override_settings(SHARDS_ROLE=ROLE_ROUTER)
     def test_router_no_token_proceeds(self):
         """Router with no ticket should not reject — normal login allowed."""
         proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
         token = proto._extract_ticket_token()
         self.assertIsNone(token)
 
-        role = get_role()  # "router" via @override_settings
-        self.assertEqual(role, "router")
+        role = get_role()  # ROLE_ROUTER via @override_settings
+        self.assertEqual(role, ROLE_ROUTER)
         # Router does NOT reject — no sendClose, no error message.
         self.assertEqual(len(proto.sent_lines), 0)
         self.assertEqual(len(proto.close_calls), 0)
@@ -1260,7 +1262,7 @@ class _FakeCharacter:
         self.name = key
 
 
-def _make_cmd(args="", role="router", shard_id="router", account=None,
+def _make_cmd(args="", role=ROLE_ROUTER, shard_id=ROLE_ROUTER, account=None,
               session=None, characters=None):
     """Build a ShardAwareCmdIC instance wired up for testing."""
     from evennia_shards.commands import ShardAwareCmdIC
@@ -1283,27 +1285,27 @@ def _make_cmd(args="", role="router", shard_id="router", account=None,
 
 
 @override_settings(
-    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0",
     SHARD_URLS={"shard0": "http://localhost:4011"},
 )
 class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
     """IC command on a shard tells the player to return to the router."""
 
     def test_shard_rejects_ic(self):
-        cmd = _make_cmd(args="Bob", role="shard", shard_id="shard0")
+        cmd = _make_cmd(args="Bob", role=ROLE_SHARD, shard_id="shard0")
         cmd.func()
         self.assertEqual(len(cmd._messages), 1)
         self.assertIn("Leave this character", cmd._messages[0])
 
     def test_shard_rejects_ic_no_args(self):
-        cmd = _make_cmd(args="", role="shard", shard_id="shard0")
+        cmd = _make_cmd(args="", role=ROLE_SHARD, shard_id="shard0")
         cmd.func()
         self.assertEqual(len(cmd._messages), 1)
         self.assertIn("Leave this character", cmd._messages[0])
 
 
 @override_settings(
-    SHARDS_ROLE="router", SHARD_ID="router",
+    SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
     SHARD_URLS={"shard0": "http://localhost:4011"},
 )
 class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
@@ -1416,7 +1418,7 @@ def _make_ooc_cmd(account=None, session=None, puppet=None):
 
 
 @override_settings(
-    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0",
     ROUTER_URL="http://localhost:4001",
 )
 class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
@@ -1434,7 +1436,7 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         ticket = tickets[0]
         self.assertEqual(ticket.account_id, cmd.account.id)
         self.assertEqual(ticket.character_id, 42)
-        self.assertEqual(ticket.to_shard, "router")
+        self.assertEqual(ticket.to_shard, ROLE_ROUTER)
 
         self.assertIn("shard_redirect", session.oob_messages)
         redirect_args = session.oob_messages["shard_redirect"]
@@ -1482,7 +1484,7 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         cmd.func()
 
         ticket = Ticket.objects.first()
-        self.assertEqual(ticket.to_shard, "router")
+        self.assertEqual(ticket.to_shard, ROLE_ROUTER)
 
     def test_shard_redirect_message_sent(self):
         """Player gets a 'Redirecting to router...' message."""

@@ -6,8 +6,8 @@ How the library's configuration items are declared, read, and defaulted.
 
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
-| `SHARDS_ROLE` | `str` | `"monolith"` | One of `"monolith"`, `"router"`, `"shard"`. Selects which role this Evennia process plays. |
-| `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Meaningful only when `SHARDS_ROLE == "shard"`. |
+| `SHARDS_ROLE` | `str` | `ROLE_MONOLITH` | One of `ROLE_MONOLITH`, `ROLE_ROUTER`, `ROLE_SHARD` (string constants exported by the library: `"monolith"`, `"router"`, `"shard"`). Selects which role this Evennia process plays. |
+| `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Consumer-chosen — descriptive names like `"overworld"` or `"underdark"` are fine. Required when role is `ROLE_SHARD`. For `ROLE_ROUTER`, must equal `get_router_shard_id()` (library mandate). |
 | `ROUTER_URL` | `str \| None` | `None` | Webclient base URL for the router. Used by shards for OOC redirect. |
 | `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
 | `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Used by router for IC redirect. Shard IDs are flexible — name them to match your game world. |
@@ -19,10 +19,17 @@ The library does **not** ship a settings module. It does not write to Django's s
 1. **Consumer declares** (or doesn't declare) the settings in their `server/conf/settings.py`:
    ```python
    from evennia.settings_default import *
+   from evennia_shards import ROLE_ROUTER, ROLE_SHARD, get_router_shard_id
    # ...
-   SHARDS_ROLE = "router"   # only when not monolith
-   SHARD_ID = "world-east"  # only when role is "shard"
+   # Router instance:
+   SHARDS_ROLE = ROLE_ROUTER
+   SHARD_ID = get_router_shard_id()  # mandated to equal the role string
+
+   # Or shard instance:
+   SHARDS_ROLE = ROLE_SHARD
+   SHARD_ID = "world-east"           # consumer's choice
    ```
+   The `ROLE_*` constants are the single source of truth for the role enum — using them rather than bare literals means a future change to the strings is a one-line edit in `config.py`.
 2. **Django loads** that file as the canonical settings module (per Evennia's launcher pointing `DJANGO_SETTINGS_MODULE` at `server.conf.settings`).
 3. **Library code reads** through accessor functions that apply defaults:
    ```python

@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from django.conf import settings
 from evennia.utils.utils import class_from_module
 
-from .config import get_role
+from .config import ROLE_SHARD, get_role
 
 # Resolve the base class dynamically: whatever was configured before
 # our AppConfig.ready() overwrote the setting. Falls back to Evennia's
@@ -106,7 +106,7 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         else:
             # No session, no token — role-dependent gating.
             role = get_role()
-            if role == "shard":
+            if role == ROLE_SHARD:
                 msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
                 self._send_text(msg)
                 self.sendClose(4001, msg)
