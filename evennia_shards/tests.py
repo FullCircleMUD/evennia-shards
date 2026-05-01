@@ -1179,3 +1179,201 @@ class RoleGatingTests(BaseEvenniaTestCase):
         # Router does NOT reject — no sendClose, no error message.
         self.assertEqual(len(proto.sent_lines), 0)
         self.assertEqual(len(proto.close_calls), 0)
+
+
+# ---------------------------------------------------------------------------
+# ShardAwareCmdIC tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Minimal session stand-in for command tests."""
+
+    def __init__(self, address="127.0.0.1"):
+        self.address = address
+        self.puppet = None
+        self.oob_messages = {}
+
+    def msg(self, **kwargs):
+        self.oob_messages.update(kwargs)
+
+
+class _FakeAccount:
+    """Minimal account stand-in for command tests.
+
+    Provides db._last_puppet, characters, search(), locks, and id.
+    """
+
+    def __init__(self, pk=1, characters=None):
+        self._saved_attrs = {}
+        self.id = pk
+        self.pk = pk
+        self._characters = characters or []
+        self._last_puppet = None
+        self.db = self  # db.X delegates to self.X
+
+    @property
+    def _last_puppet(self):
+        return self._saved_attrs.get("_last_puppet")
+
+    @_last_puppet.setter
+    def _last_puppet(self, value):
+        self._saved_attrs["_last_puppet"] = value
+
+    @property
+    def characters(self):
+        return self._characters
+
+    def search(self, searchdata, candidates=None, search_object=True, quiet=True):
+        """Simple name-match search against candidates."""
+        if candidates:
+            return [c for c in candidates if c.key == searchdata]
+        return []
+
+    @property
+    def locks(self):
+        return self
+
+    def check_lockstring(self, account, lockstring):
+        return False  # non-Builder for simplicity
+
+
+class _FakeCharacter:
+    """Minimal character stand-in for command tests."""
+
+    def __init__(self, key, pk, shard_id="shard0"):
+        self.key = key
+        self.id = pk
+        self.pk = pk
+        self.shard_id = shard_id
+        self.name = key
+
+
+def _make_cmd(args="", role="router", shard_id="router", account=None,
+              session=None, characters=None):
+    """Build a ShardAwareCmdIC instance wired up for testing."""
+    from evennia_shards.commands import ShardAwareCmdIC
+
+    cmd = ShardAwareCmdIC()
+    cmd.args = args
+    cmd.raw_string = f"ic {args}"
+    cmd.session = session or _FakeSession()
+    if account is None:
+        account = _FakeAccount(characters=characters or [])
+    cmd.account = account
+    cmd.caller = account
+    cmd._messages = []
+
+    def _msg(text, **kwargs):
+        cmd._messages.append(text)
+
+    cmd.msg = _msg
+    return cmd
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "http://localhost:4011"},
+)
+class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
+    """IC command on a shard tells the player to return to the router."""
+
+    def test_shard_rejects_ic(self):
+        cmd = _make_cmd(args="Bob", role="shard", shard_id="shard0")
+        cmd.func()
+        self.assertEqual(len(cmd._messages), 1)
+        self.assertIn("Return to the router", cmd._messages[0])
+
+    def test_shard_rejects_ic_no_args(self):
+        cmd = _make_cmd(args="", role="shard", shard_id="shard0")
+        cmd.func()
+        self.assertEqual(len(cmd._messages), 1)
+        self.assertIn("Return to the router", cmd._messages[0])
+
+
+@override_settings(
+    SHARDS_ROLE="router", SHARD_ID="router",
+    SHARD_URLS={"shard0": "http://localhost:4011"},
+)
+class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
+    """IC command on the router creates a ticket and redirects."""
+
+    def test_router_creates_ticket_and_redirects(self):
+        """ic <name> on router → ticket + shard_redirect OOB."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        cmd = _make_cmd(args="Bob", characters=[char], session=session)
+        cmd.func()
+
+        # Should have created a ticket.
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, cmd.account.id)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+
+        # Should have sent shard_redirect OOB.
+        self.assertIn("shard_redirect", session.oob_messages)
+        redirect_args = session.oob_messages["shard_redirect"]
+        url = redirect_args[0][0]
+        self.assertIn("http://localhost:4011/webclient?ticket=", url)
+        self.assertIn(ticket.token, url)
+
+    def test_router_sets_last_puppet(self):
+        """Router sets _last_puppet on the account before redirecting."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        cmd = _make_cmd(args="Bob", account=account)
+        cmd.func()
+        self.assertIs(account.db._last_puppet, char)
+
+    def test_router_no_args_uses_last_puppet(self):
+        """ic with no args uses _last_puppet if set."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        account.db._last_puppet = char
+        session = _FakeSession()
+        cmd = _make_cmd(args="", account=account, session=session)
+        cmd.func()
+
+        # Should redirect (ticket created).
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_router_no_args_no_last_puppet_shows_usage(self):
+        """ic with no args and no _last_puppet shows usage."""
+        cmd = _make_cmd(args="")
+        cmd.func()
+        self.assertTrue(any("Usage:" in m for m in cmd._messages))
+
+    def test_router_character_no_shard_id_gives_error(self):
+        """Character with no shard assignment shows error."""
+        char = _FakeCharacter("Bob", pk=42, shard_id=None)
+        cmd = _make_cmd(args="Bob", characters=[char])
+        cmd.func()
+        self.assertTrue(any("no shard assignment" in m for m in cmd._messages))
+
+    def test_router_character_global_shard_gives_error(self):
+        """Character with shard_id='*' shows error."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="*")
+        cmd = _make_cmd(args="Bob", characters=[char])
+        cmd.func()
+        self.assertTrue(any("no shard assignment" in m for m in cmd._messages))
+
+    def test_router_character_not_found(self):
+        """ic <unknown> shows error."""
+        cmd = _make_cmd(args="Nobody", characters=[])
+        cmd.func()
+        self.assertTrue(any("not a valid character" in m for m in cmd._messages))
+
+    def test_router_ip_pinned_in_ticket(self):
+        """Ticket records the session's IP address."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession(address="10.0.0.1")
+        cmd = _make_cmd(args="Bob", characters=[char], session=session)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.client_ip, "10.0.0.1")

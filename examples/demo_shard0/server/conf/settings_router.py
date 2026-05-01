@@ -22,6 +22,9 @@ SHARD_ID = "router"
 # the consumer's setting from settings.py. The router intercepts the
 # auto-puppet flow and converts it to a ticket redirect to the correct
 # shard, so both True and False work correctly.
+#
+# For testing the manual character selection path, uncomment:
+AUTO_PUPPET_ON_LOGIN = False
 
 # Localhost multi-instance testing: router uses default Evennia ports.
 WEBSERVER_PORTS = [(4001, 4005)]

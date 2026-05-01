@@ -41,6 +41,16 @@ class EvenniaShardsConfig(AppConfig):
                     _middleware_path
                 ]
 
+            # Replace CmdIC with shard-aware version that redirects on
+            # routers and blocks on shards. The AccountCmdSet references
+            # account.CmdIC via module attribute, so patching the module
+            # makes the cmdset pick up our version on rebuild.
+            from evennia.commands.default import account as _account_module
+
+            from .commands import ShardAwareCmdIC
+
+            _account_module.CmdIC = ShardAwareCmdIC
+
         # Late-bind shard_id onto Evennia's ObjectDB so the ORM is aware
         # of the column the migration adds. Idempotent — guards against
         # double-installation in dev reload scenarios.

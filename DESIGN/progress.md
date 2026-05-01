@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-01 — IC command override: router→shard redirect proven end-to-end
+
+The `AUTO_PUPPET_ON_LOGIN = False` path is complete. A player logs into the router OOC, types `ic <character>`, and the router resolves the character, creates a ticket, and redirects the client to the character's shard — where ticket auth + auto-puppet puts them IC. Proven with live smoke test (router + shard0, localhost multi-instance).
+
+**What was proven**:
+
+| Step | Result |
+|------|--------|
+| `ic <character>` on router | Character resolved, `_last_puppet` set, ticket created |
+| `shard_redirect` OOB sent | Browser navigates to shard webclient with ticket |
+| Shard ticket auth + auto-puppet | Player is IC on the shard |
+| `ic` on shard | "Return to the router to select a character" |
+
+**Implementation**:
+
+- `ShardAwareCmdIC` (`evennia_shards/commands.py`): subclasses Evennia's `CmdIC`, overrides `func()` with role-gated behaviour. Character resolution logic extracted into `_resolve_character()` (copied from parent — can't call `super().func()` since it calls `puppet_object()`).
+- `AppConfig.ready()` monkey-patch: replaces `CmdIC` on `evennia.commands.default.account` module. Same injection pattern as WebSocket protocol and middleware overrides.
+- Router exemption from shard isolation chokepoints (implemented in previous session) is load-bearing — the router must load characters from any shard to resolve them.
+
+120 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (`at_post_login` override for auto-puppet = true, OOC command override).
+
 ### 2026-04-30 — Client redirect spike proven end-to-end
 
 The client-side redirect mechanism from [ticket-auth-flow.md](ticket-auth-flow.md) is validated on the `bespoke` branch. An OOB `shard_redirect` message triggers a full page navigation to the target instance's webclient with a ticket token. The target instance's middleware injects the token into the WebSocket connection, and the auth cascade logs the player in.

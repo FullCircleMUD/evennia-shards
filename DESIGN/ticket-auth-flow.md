@@ -107,8 +107,17 @@ The library must not force `AUTO_PUPPET_ON_LOGIN = False` — both modes must wo
 
 **Accounts are AccountDB** (not ObjectDB), so no chokepoint applies — shards load accounts freely during ticket auth.
 
+## IC command override
+
+`ShardAwareCmdIC` (in `evennia_shards/commands.py`) replaces Evennia's `CmdIC` via monkey-patch in `AppConfig.ready()`. Injected when `get_role() != "monolith"`.
+
+- **Router** (`AUTO_PUPPET_ON_LOGIN = False` path): resolves the character using the same logic as Evennia's `CmdIC` (playable characters search, Builder+ global search, `_last_puppet` fallback). Instead of calling `puppet_object()`, it sets `account.db._last_puppet` to the chosen character, creates a ticket via `create_ticket()`, and sends a `shard_redirect` OOB to the client. The shard then ticket-auths, auto-puppets via `_last_puppet`, and the player is IC.
+- **Shard**: tells the player "Return to the router to select a character." IC always goes through the router — no same-shard shortcut.
+- **Monolith**: original `CmdIC` stays; the override is never injected.
+
+The injection uses the same pattern as the WebSocket protocol and middleware overrides: patch the module attribute (`evennia.commands.default.account.CmdIC`) so the `AccountCmdSet` picks up the replacement on cmdset rebuild.
+
 ## Not yet implemented
 
-- Router-side `at_post_login` override (read `_last_puppet` → ticket → redirect instead of local puppet)
-- IC command override (on all instances, gated by role — redirects on router, normal on shard)
+- Router-side `at_post_login` override (read `_last_puppet` → ticket → redirect instead of local puppet — the `AUTO_PUPPET_ON_LOGIN = True` path)
 - OOC command override (on all instances, gated by role — normal on router, redirects on shard)
