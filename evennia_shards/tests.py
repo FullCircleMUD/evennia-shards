@@ -1203,24 +1203,41 @@ class _FakeSession:
         self.address = address
         self.puppet = None
         self.oob_messages = {}
+        self.flag_updates = {}
 
     def msg(self, **kwargs):
         self.oob_messages.update(kwargs)
 
+    def update_flags(self, **flags):
+        self.flag_updates.update(flags)
+
+
+class _FakeAttributes:
+    """Stand-in for AccountDB.attributes — just a record-only get."""
+
+    def __init__(self, store=None):
+        self._store = dict(store or {})
+
+    def get(self, name, default=None):
+        return self._store.get(name, default)
+
 
 class _FakeAccount:
-    """Minimal account stand-in for command tests.
+    """Minimal account stand-in for command and hook tests."""
 
-    Provides db._last_puppet, characters, search(), locks, and id.
-    """
-
-    def __init__(self, pk=1, characters=None):
+    def __init__(self, pk=1, characters=None, key="Player1"):
         self._saved_attrs = {}
         self.id = pk
         self.pk = pk
+        self.key = key
         self._characters = characters or []
         self._last_puppet = None
         self.db = self  # db.X delegates to self.X
+        self.attributes = _FakeAttributes()
+        # Recorders for hook-side-effect assertions.
+        self.account_messages = []
+        self.connect_channel_messages = []
+        self.at_look_calls = []
 
     @property
     def _last_puppet(self):
@@ -1249,6 +1266,17 @@ class _FakeAccount:
 
     def check_lockstring(self, account, lockstring):
         return False  # non-Builder for simplicity
+
+    def msg(self, text=None, session=None, **kwargs):
+        if text is not None:
+            self.account_messages.append(text)
+
+    def _send_to_connect_channel(self, message):
+        self.connect_channel_messages.append(message)
+
+    def at_look(self, target=None, session=None, **kwargs):
+        self.at_look_calls.append({"target": target, "session": session})
+        return "OOC menu"
 
 
 class _FakeCharacter:
@@ -1536,3 +1564,107 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         cmd.func()
 
         self.assertTrue(any("Redirecting to router" in m for m in cmd._messages))
+
+    def test_shard_clears_last_puppet_to_break_router_redirect_loop(self):
+        """ooc clears _last_puppet so the router's at_post_login does not
+        immediately redirect the player back to the shard they just left.
+
+        Diverges from vanilla CmdOOC (which sets _last_puppet=old_char). See
+        DESIGN/ticket-auth-flow.md for rationale.
+        """
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char  # vanilla state going in
+        cmd = _make_ooc_cmd(puppet=char, account=account)
+        cmd.func()
+
+        self.assertIsNone(account.db._last_puppet)
+
+
+# ---------------------------------------------------------------------------
+# at_post_login override (router-side AUTO_PUPPET_ON_LOGIN = True path)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
+    SHARD_URLS={"shard0": "http://localhost:4011"},
+)
+class AtPostLoginRouterTests(BaseEvenniaTestCase):
+    """Direct tests for shard_aware_at_post_login on routers.
+
+    The override replaces Evennia's at_post_login on routers, intercepting
+    the AUTO_PUPPET_ON_LOGIN=True branch and converting it to a ticket
+    redirect (or, on fallback, the OOC menu).
+    """
+
+    def test_valid_last_puppet_redirects_and_runs_prelude(self):
+        """_last_puppet on a real shard → redirect, prelude side-effects fire."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        session = _FakeSession(address="10.0.0.1")
+
+        shard_aware_at_post_login(account, session=session)
+
+        # Prelude side-effects ran.
+        self.assertEqual(session.oob_messages.get("logged_in"), {})
+        self.assertEqual(len(account.connect_channel_messages), 1)
+        self.assertIn("connected", account.connect_channel_messages[0])
+
+        # Redirect happened: ticket created and shard_redirect OOB sent.
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, 7)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+        self.assertIn("shard_redirect", session.oob_messages)
+
+        # Fallback path did NOT run.
+        self.assertEqual(account.at_look_calls, [])
+
+    def test_no_last_puppet_falls_through_to_ooc_menu_silently(self):
+        """_last_puppet=None → OOC menu, no warning, no ticket."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        account = _FakeAccount(pk=7)
+        session = _FakeSession()
+
+        with self.assertNoLogs("evennia", level="WARNING"):
+            shard_aware_at_post_login(account, session=session)
+
+        # Prelude still ran.
+        self.assertEqual(session.oob_messages.get("logged_in"), {})
+
+        # No ticket, no shard_redirect OOB.
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+
+        # OOC menu rendered.
+        self.assertEqual(len(account.at_look_calls), 1)
+        self.assertEqual(account.account_messages, ["OOC menu"])
+
+    def test_unusable_shard_id_warns_and_falls_through(self):
+        """_last_puppet set with broken shard_id → warning + OOC menu."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        for bad_shard_id in (None, "*", "unknown_shard"):
+            with self.subTest(shard_id=bad_shard_id):
+                Ticket.objects.all().delete()
+                char = _FakeCharacter("Bob", pk=42, shard_id=bad_shard_id)
+                account = _FakeAccount(pk=7)
+                account.db._last_puppet = char
+                session = _FakeSession()
+
+                # Evennia's logger writes via a separate logger setup; we
+                # don't assert on the warning log directly (would couple
+                # the test to Evennia's logger config). Instead we assert
+                # the redirect did NOT happen and the OOC menu DID.
+                shard_aware_at_post_login(account, session=session)
+
+                self.assertEqual(Ticket.objects.count(), 0)
+                self.assertNotIn("shard_redirect", session.oob_messages)
+                self.assertEqual(len(account.at_look_calls), 1)

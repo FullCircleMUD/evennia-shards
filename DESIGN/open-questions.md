@@ -6,6 +6,18 @@ This is not a place for speculation or invented problems — only questions that
 
 ## Open
 
+### Auto-puppet on login under `MULTISESSION_MODE` 2 or 3 (Evennia upstream limitation)
+
+Evennia's `_last_puppet` is a single account-scoped Attribute. Under `MULTISESSION_MODE = 2` or `3`, an account can have multiple simultaneous puppets across sessions, and a single attribute can't represent "which puppet belongs to which session for reconnect." Evennia itself documents this in [`settings_default.py:766`](../../venv/Lib/site-packages/evennia/settings_default.py): *"This will only work if the session/puppet combination can be determined (usually `MULTISESSION_MODE 0` or `1`)."*
+
+The conceptual fix is per-session puppet memory — e.g. `account.db._last_puppets = {session_key: char_id, ...}` keyed by something durable, cleared per-session on OOC. That's an Evennia-level change (the session-puppet mapping lives in `AccountDB`/`puppet_object`, not in this library).
+
+**Library posture:** `evennia-shards` inherits the limitation. AUTO_PUPPET on routers works under modes 0 and 1; modes 2/3 are documented-broken to the same degree as vanilla Evennia. This is the same "labour-intensive divergence" carve-out we apply to telnet support — explicit deferral, not silent gap.
+
+If Evennia upstream ever ships per-session puppet memory, the library's `at_post_login` override should adopt it transparently and this entry can fold into the design docs.
+
+Originally surfaced 2026-05-01 while designing the `AUTO_PUPPET_ON_LOGIN = True` path on the router.
+
 ### Player-facing experience walkthrough (protocol/UX detail)
 
 The detailed player-facing walkthrough — exact behaviour on `@ic`, `@ooc`, gateway traversal, web client redirect handling — has not been designed. Specifics depend on decisions we have not yet made:

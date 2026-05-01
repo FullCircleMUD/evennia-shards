@@ -17,7 +17,7 @@ class EvenniaShardsConfig(AppConfig):
         # Gated on non-monolith: monolith uses normal login only.
         # Stashes the consumer's current value so protocols.py can
         # subclass it (preserving any consumer customisations).
-        from .config import ROLE_MONOLITH, ROLE_SHARD, get_role
+        from .config import ROLE_MONOLITH, ROLE_ROUTER, ROLE_SHARD, get_role
 
         if get_role() != ROLE_MONOLITH:
             from django.conf import settings
@@ -55,6 +55,21 @@ class EvenniaShardsConfig(AppConfig):
                 from .commands import ShardAwareCmdOOC
 
                 _account_module.CmdOOC = ShardAwareCmdOOC
+
+            # Replace DefaultAccount.at_post_login on routers with the
+            # shard-aware override that intercepts auto-puppet and
+            # converts it to a ticket+redirect to the character's
+            # owning shard. Router-only: monolith uses vanilla Evennia,
+            # and shards rely on Evennia's default auto-puppet path
+            # running after ticket-auth has populated _last_puppet.
+            # See DESIGN/library-integration-risks.md for upgrade and
+            # consumer-override risks.
+            if get_role() == ROLE_ROUTER:
+                from evennia.accounts.accounts import DefaultAccount
+
+                from .hooks import shard_aware_at_post_login
+
+                DefaultAccount.at_post_login = shard_aware_at_post_login
 
         # Late-bind shard_id onto Evennia's ObjectDB so the ORM is aware
         # of the column the migration adds. Idempotent — guards against

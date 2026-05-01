@@ -123,12 +123,25 @@ The injection uses the same pattern as the WebSocket protocol and middleware ove
 
 - **Shard**: creates a ticket targeting the router (`to_shard = get_router_shard_id()`, always `"router"`) and sends a `shard_redirect` OOB to redirect the client back to the router's webclient. Always redirects — even if no puppet (error state), because a player should never be OOC on a shard.
 - **Character ID in ticket**: `old_char.id` (current puppet) → `account.db._last_puppet.id` (fallback) → `0` (sentinel for truly broken state, with `logger.log_warn`).
+- **`_last_puppet` is cleared** before the ticket is created. This is a deliberate divergence from vanilla `CmdOOC`, which sets `_last_puppet = old_char` so a subsequent bare `ic` re-enters that character. We diverge because under sharding the router has an `at_post_login` override that auto-redirects to whatever shard `_last_puppet` lives on. If `_last_puppet` were preserved across the OOC redirect, the router's auto-puppet path would immediately bounce the player back to the shard they just left — an infinite loop. Clearing it lets the router fall through to the OOC menu (since `_is_redirectable_character(None) == False`). The trade-off: after `ooc`, a bare `ic` no longer re-enters the previous character; the player must type `ic <name>`.
 - **No explicit unpuppet**: the redirect triggers a full page navigation (`window.location.href`), which closes the WebSocket connection. Evennia's disconnect handler (`sessionhandler.disconnect()` → `account.unpuppet_object()`) automatically releases the character on the shard when the connection drops.
 - **Router**: vanilla `CmdOOC` stays — normal unpuppet, player stays on the router OOC.
 - **Monolith**: vanilla `CmdOOC` stays; the override is never injected.
 
 The asymmetry with IC (which patches both router and shard) is intentional: IC on a shard without the override would attempt a local puppet, which would either hit chokepoints or cause confusion. OOC on a router is harmless — the vanilla command does exactly what's needed (unpuppet, show OOC menu).
 
-## Not yet implemented
+## Auto-puppet on login (`AUTO_PUPPET_ON_LOGIN = True`)
 
-- Router-side `at_post_login` override (read `_last_puppet` → ticket → redirect instead of local puppet — the `AUTO_PUPPET_ON_LOGIN = True` path)
+Evennia's default `AUTO_PUPPET_ON_LOGIN = True` calls `account.puppet_object(session, self.db._last_puppet)` from inside `at_post_login`. On a router that's broken — see [library-integration-risks.md](library-integration-risks.md#defaultaccountat_post_login-override) for why.
+
+The library replaces `DefaultAccount.at_post_login` on routers with `shard_aware_at_post_login` (in `evennia_shards/hooks.py`). The replacement reproduces Evennia's prelude verbatim (protocol flags, `logged_in` OOB, connect-channel msg), then dispatches three ways:
+
+| `_last_puppet` state | Outcome |
+|---|---|
+| set with usable `shard_id` (in `SHARD_URLS`, not `"*"`) | `_redirect_to_character_shard(...)` — ticket created, OOB `shard_redirect` sent, player navigates to the correct shard. |
+| set but `shard_id` is `None` / `"*"` / not in `SHARD_URLS` | Warning logged, OOC character-select menu rendered. Login does not fail. |
+| `None` (normal first login) | OOC menu rendered silently. |
+
+`_is_redirectable_character()` is the predicate that distinguishes the first two rows. The redirect itself reuses the same `_redirect_to_character_shard()` helper that `ShardAwareCmdIC` uses, so both router-side entry points (manual `ic <char>` and login-time auto-puppet) share one code path.
+
+The override is router-only. Monolith uses vanilla Evennia. Shards keep vanilla `at_post_login` because that's the auto-puppet path that puts a player IC after ticket-auth has populated `_last_puppet`.

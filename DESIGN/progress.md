@@ -6,6 +6,26 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-01 — `AUTO_PUPPET_ON_LOGIN = True` path: router `at_post_login` override
+
+Closes the auth/redirect feature: both `AUTO_PUPPET_ON_LOGIN = True` and `False` paths now work on the router. With auto-puppet=True, login itself triggers the redirect; with False, the player goes through the OOC menu and types `ic <char>`.
+
+`shard_aware_at_post_login` (in [evennia_shards/hooks.py](../evennia_shards/hooks.py), new module) replaces `DefaultAccount.at_post_login` on routers via monkey-patch in `AppConfig.ready()`. The override reproduces Evennia 6.0.0's prelude verbatim, then dispatches three ways via the `_is_redirectable_character()` predicate:
+
+| `_last_puppet` state | Outcome |
+|---|---|
+| set with usable `shard_id` | redirect via `_redirect_to_character_shard(...)` (the helper extracted in commit `946bc2e`, now reused by both the IC command and the login hook) |
+| set with broken `shard_id` (`None`, `"*"`, not in `SHARD_URLS`) | log warning, render OOC menu — login does not fail |
+| `None` | render OOC menu silently |
+
+Install gating: inline `if get_role() == ROLE_ROUTER:` in `AppConfig.ready()`, alongside the existing CmdIC/CmdOOC patches. Shards keep vanilla `at_post_login` — that's their auto-puppet path after ticket-auth.
+
+New coupling section added to [library-integration-risks.md](library-integration-risks.md#defaultaccountat_post_login-override) covering Evennia upgrade and consumer override risks.
+
+`ShardAwareCmdOOC` was extended to clear `account.db._last_puppet` before creating the ticket. Without this, a player on a shard typing `ooc` would land on the router, the router's `at_post_login` would see `_last_puppet` still set, and the player would be auto-redirected straight back to the shard — an infinite loop. The clearing diverges from vanilla `CmdOOC` (which sets `_last_puppet = old_char`); rationale documented in [ticket-auth-flow.md](ticket-auth-flow.md#ooc-command-override). A multi-puppet edge case (modes 2/3) is captured in [open-questions.md](open-questions.md) as an Evennia upstream limitation that the library inherits.
+
+132 tests passing (128 prior + 3 in `AtPostLoginRouterTests` + 1 canary on `_last_puppet` clearing in `ShardAwareCmdOOCShardTests`). Live smoke test pending on Mac.
+
 ### 2026-05-01 — OOC command override: shard→router redirect proven end-to-end
 
 `ShardAwareCmdOOC` completes the bidirectional ticket flow. A player IC on a shard types `ooc`, the shard creates a ticket targeting the router, and redirects the client back. The router ticket-auths the account back into OOC state. Full round-trip proven with live smoke test (router + shard0, localhost multi-instance).
