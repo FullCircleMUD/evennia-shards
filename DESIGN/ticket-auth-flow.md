@@ -101,9 +101,9 @@ Evennia's `AUTO_PUPPET_ON_LOGIN` (default `True`) calls `self.puppet_object(sess
 
 The library must not force `AUTO_PUPPET_ON_LOGIN = False` — both modes must work.
 
-**Router**: exempt from all chokepoints (see [shard-isolation.md](shard-isolation.md)), so it can freely deserialize `_last_puppet`, load characters from any shard, and perform chargen/chardelete. On login with `AUTO_PUPPET_ON_LOGIN = True`, the router reads `_last_puppet`, determines the character's shard, sets `_last_puppet` to the selected character, creates a ticket, and redirects. The router never actually puppets — it delegates that to the shard.
+**Router**: exempt from all chokepoints (see [shard-isolation.md](shard-isolation.md)), so it can freely deserialize `_last_puppet`, load characters from any shard, and perform chargen/chardelete. On login with `AUTO_PUPPET_ON_LOGIN = True`, the router reads `_last_puppet`, determines the character's shard, creates a ticket, and redirects. When the player selects a different character (via IC command or character selection), the router overwrites `_last_puppet` with the chosen character before redirecting — so `_last_puppet` is not always strictly the "last puppeted" character; it's the character the router has chosen for the next shard session. The router never actually puppets — it delegates that to the shard.
 
-**Shard**: receives the player via ticket auth. `at_post_login` fires and auto-puppet reads `_last_puppet` — the character is on this shard, so `from_db` passes. Standard Evennia puppeting, no interception needed. The ticket's `character_id` and `_last_puppet` agree because the router set `_last_puppet` before redirecting.
+**Shard**: receives the player via ticket auth. `at_post_login` fires and auto-puppet reads `_last_puppet` — the character is on this shard, so `from_db` passes. Standard Evennia puppeting, no interception needed. The ticket's `character_id` and `_last_puppet` agree because the router set `_last_puppet` before redirecting. Shards explicitly set `AUTO_PUPPET_ON_LOGIN = True` in their per-instance settings to ensure ticket auth always triggers puppeting.
 
 **Accounts are AccountDB** (not ObjectDB), so no chokepoint applies — shards load accounts freely during ticket auth.
 

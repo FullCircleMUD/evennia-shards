@@ -18,6 +18,12 @@ from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 SHARDS_ROLE = "shard"
 SHARD_ID = "shard0"
 
+# Shards must auto-puppet — ticket auth logs the player in and Evennia's
+# at_post_login reads _last_puppet to puppet the correct character.
+# The router sets _last_puppet to the chosen character before redirecting,
+# so it may not be the literal last-puppeted character.
+AUTO_PUPPET_ON_LOGIN = True
+
 # For single-shard, Limbo #2 (created by Evennia's initial_setup) serves
 # as the shard's home room — no extra room creation needed. The pre_save
 # chokepoint auto-stamps it with SHARD_ID when initial_setup runs.

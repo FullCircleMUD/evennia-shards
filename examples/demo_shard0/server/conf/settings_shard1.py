@@ -18,6 +18,12 @@ from server.conf.settings_common_shard_config import *  # noqa: F401, F403
 SHARDS_ROLE = "shard"
 SHARD_ID = "shard1"
 
+# Shards must auto-puppet — ticket auth logs the player in and Evennia's
+# at_post_login reads _last_puppet to puppet the correct character.
+# The router sets _last_puppet to the chosen character before redirecting,
+# so it may not be the literal last-puppeted character.
+AUTO_PUPPET_ON_LOGIN = True
+
 # Replace with the PK of this shard's landing room.
 DEFAULT_HOME = "#3"
 START_LOCATION = "#3"
