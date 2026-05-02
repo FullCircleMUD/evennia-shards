@@ -43,16 +43,6 @@ If the gateway-room mandate is dropped, the previous consumer constraints around
 
 Open pending resolution of the previous question.
 
-### Manager composition: `django-multitenant` + Evennia idmapper
-
-Research on 2026-04-29 identified `django-multitenant` as off-the-shelf prior art for the row-tagging + auto-filtering manager pattern. Evennia's `SharedMemoryManager` (idmapper) is itself a custom Django manager subclass that overrides `get_queryset()`. Both libraries solve different problems through the same integration point. Composition is "mechanical but not free" per the research.
-
-Open until prototyped: whether multiple inheritance / mixin composition produces a manager that filters by shard *and* caches by `(shard_id, pk)` correctly, in all the query paths Evennia uses. Most likely friction point in the whole adoption story; worth a small spike before any library work depends on it.
-
-### `django-multitenant` on plain Postgres
-
-`django-multitenant` was originally built for Citus (Postgres distributed sharding extension). The library claims to work on plain Postgres, but worth verifying — there may be assumed extensions, query optimisations, or behaviours that differ. Open until checked empirically.
-
 ### Dbref scoping across shards
 
 Evennia treats `#42` as a globally meaningful, user-facing identifier (in command syntax, search, lock strings, exit destinations). With shared tables across shards, `#42` is no longer unambiguous. Options raised on 2026-04-29:

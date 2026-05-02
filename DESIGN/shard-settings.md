@@ -1,13 +1,16 @@
 # Shard settings
 
-How the library's two configuration items (`SHARDS_ROLE` and `SHARD_ID`) are declared, read, and defaulted.
+How the library's configuration items are declared, read, and defaulted.
 
-## The two settings
+## Settings
 
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
-| `SHARDS_ROLE` | `str` | `"monolith"` | One of `"monolith"`, `"router"`, `"shard"`. Selects which role this Evennia process plays. |
-| `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Meaningful only when `SHARDS_ROLE == "shard"`. |
+| `SHARDS_ROLE` | `str` | `ROLE_MONOLITH` | One of `ROLE_MONOLITH`, `ROLE_ROUTER`, `ROLE_SHARD` (string constants exported by the library: `"monolith"`, `"router"`, `"shard"`). Selects which role this Evennia process plays. |
+| `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Consumer-chosen — descriptive names like `"overworld"` or `"underdark"` are fine. Required when role is `ROLE_SHARD`. For `ROLE_ROUTER`, must equal `get_router_shard_id()` (library mandate). |
+| `ROUTER_URL` | `str \| None` | `None` | Webclient base URL for the router. Used by shards for OOC redirect. |
+| `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
+| `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Used by router for IC redirect. Shard IDs are flexible — name them to match your game world. |
 
 ## How they flow
 
@@ -16,10 +19,17 @@ The library does **not** ship a settings module. It does not write to Django's s
 1. **Consumer declares** (or doesn't declare) the settings in their `server/conf/settings.py`:
    ```python
    from evennia.settings_default import *
+   from evennia_shards import ROLE_ROUTER, ROLE_SHARD, get_router_shard_id
    # ...
-   SHARDS_ROLE = "router"   # only when not monolith
-   SHARD_ID = "world-east"  # only when role is "shard"
+   # Router instance:
+   SHARDS_ROLE = ROLE_ROUTER
+   SHARD_ID = get_router_shard_id()  # mandated to equal the role string
+
+   # Or shard instance:
+   SHARDS_ROLE = ROLE_SHARD
+   SHARD_ID = "world-east"           # consumer's choice
    ```
+   The `ROLE_*` constants are the single source of truth for the role enum — using them rather than bare literals means a future change to the strings is a one-line edit in `config.py`.
 2. **Django loads** that file as the canonical settings module (per Evennia's launcher pointing `DJANGO_SETTINGS_MODULE` at `server.conf.settings`).
 3. **Library code reads** through accessor functions that apply defaults:
    ```python
@@ -39,12 +49,16 @@ The accessors live in [`evennia_shards/config.py`](../evennia_shards/config.py) 
 
 ## Reading the settings
 
-Code that needs the current role or shard id — library code *or* consumer game code — should call the accessors rather than reading `settings.SHARDS_ROLE` directly:
+Code that needs shard configuration — library code *or* consumer game code — should call the accessors rather than reading `settings.*` directly:
 
 ```python
-from evennia_shards import get_role, get_shard_id
-role = get_role()
-shard = get_shard_id()
+from evennia_shards import get_role, get_shard_id, get_shard_url, get_router_url, get_router_shard_id
+role = get_role()                  # "monolith" if undeclared
+shard = get_shard_id()             # None if undeclared
+url = get_shard_url("overworld")   # ValueError if SHARD_URLS not configured
+                                   # KeyError if shard_id not in the dict
+router = get_router_url()          # ValueError if ROUTER_URL not configured
+router_id = get_router_shard_id()  # always "router" — library mandate
 ```
 
 A direct `settings.SHARDS_ROLE` read raises `AttributeError` whenever the consumer hasn't declared the setting — i.e. every monolith consumer. The accessors apply the documented defaults and are the single source of truth for fallback values, so any future change to a default lands in one place.
@@ -55,7 +69,87 @@ The primary caller is library code (it reads the role to decide what to register
 
 The library also adds a `shard_id` column to `ObjectDB` (and likely other partitioned models in future) that tags each row with its owning shard. Most rows hold a specific shard identifier (e.g. `"shard0"`); the sentinel value `"*"` denotes a row owned by *all* shards — used for system-wide entities like global scripts that must run on every shard process. Global rows are instantiated independently on each shard, so any mutable per-instance state does not coordinate across shards without explicit cross-shard messaging.
 
+## URL settings and redirect routing
+
+The router and shards have separate URL settings, reflecting their different roles in the redirect flow:
+
+- **`ROUTER_URL`** — single string. Shards use `get_router_url()` to build OOC redirect URLs (sending players back to the router).
+- **`SHARD_URLS`** — dict mapping shard IDs to URLs. The router uses `get_shard_url(shard_id)` to build IC redirect URLs (sending players to a shard).
+
+```python
+ROUTER_URL = "http://router.example.com"
+SHARD_URLS = {
+    "overworld": "http://overworld.example.com",
+    "dungeons": "http://dungeons.example.com",
+    "pvp_arena": "http://pvp.example.com:5001",
+}
+```
+
+Shard IDs are flexible — name them to match your game world. Each instance's `SHARD_ID` must match a key in `SHARD_URLS`. In production, URLs are typically set via environment variables.
+
+The IC routing decision comes from the character's game state: `character.location or character.home` → room's `shard_id` → `get_shard_url(shard_id)`. Returning players go back to where they were; new characters land in their home room.
+
+## Per-shard home room
+
+Each shard needs its own home room — the fallback location for characters and the spawn point for new ones. Evennia already has `DEFAULT_HOME` and `START_LOCATION` (both default to `"#2"`, the Limbo room created during initial setup). Shards override these in their per-instance settings file to point at a shard-specific room.
+
+```python
+# settings_shard0.py
+DEFAULT_HOME = "#2"       # or whatever PK the shard's home room has
+START_LOCATION = "#2"
+```
+
+The library does **not** create these rooms or manage their PKs. The consumer creates them however suits their deployment — initial setup hook, build commands, migration script — and records the PK in settings. This works for both greenfield (new game) and brownfield (existing game adding shards) deployments.
+
+A shard only needs to know its **own** home room. The IC routing flow (`character.location or character.home` → room's `shard_id` → `get_shard_url()`) sends players to the right shard URL; the destination shard places the character based on the character's own location/home already stored in the DB.
+
+## Consumer settings cascade
+
+The library does not prescribe a settings layout, but the demo game uses a three-level cascade that separates per-instance config from shared shard config:
+
+```
+settings_router.py  ─┐
+settings_shard0.py  ─┤── imports ── settings_common_shard_config.py ── imports ── settings.py
+settings_shard1.py  ─┘
+```
+
+- **`settings.py`** — base Evennia config (`SERVERNAME`, etc.), loads `secret_settings.py`
+- **`settings_common_shard_config.py`** — settings shared across all sharded instances: `ROUTER_URL`, `SHARD_URLS`, `INSTALLED_APPS += ["evennia_shards"]`, `TELNET_ENABLED = False`
+- **`settings_<role>.py`** — per-instance: `SHARDS_ROLE`, `SHARD_ID`, `DEFAULT_HOME`/`START_LOCATION`, port overrides (`WEBSERVER_PORTS`, `WEBSOCKET_CLIENT_PORT`, `AMP_PORT`)
+
+Each instance starts with `evennia start --settings settings_router.py` (or `settings_shard0.py`, etc.). The cascade keeps the URL map in one place while allowing each instance to set its own role and ports.
+
+## Telnet
+
+Telnet is disabled for all sharded instances (`TELNET_ENABLED = False` in the common config). The ticket-based auth flow is websocket-only — telnet has no mechanism to carry a ticket token (no URL, no query parameters). Wiring telnet into the ticket system is future work.
+
+## Localhost multi-instance ports
+
+Each Evennia instance binds several ports. When running multiple instances on localhost for testing, each needs its own set to avoid collisions. The demo game offsets shard ports by 10 from the router's defaults:
+
+| Port | Router | Shard0 |
+|---|---|---|
+| `WEBSERVER_PORTS` | `(4001, 4005)` | `(4011, 4015)` |
+| `WEBSOCKET_CLIENT_PORT` | `4002` | `4012` |
+| `AMP_PORT` | `4006` | `4016` |
+
+Additional shards increment by 10 again (4021/4022/4026, etc.). `AMP_PORT` is Evennia's internal Portal↔Server IPC — not player-facing, but still needs a unique port per instance. In production (separate hosts), port offsets are unnecessary.
+
+## Localhost multi-instance game directories
+
+Evennia uses PID files (`server.pid`, `portal.pid`) to track running processes. These live in `server/` inside the game directory. Running two instances from the same directory fails because the second sees the first's PID file.
+
+The demo examples solve this with symlinked game directories. `demo_shard0` is the "real" game directory containing all game code, settings, and the shared database. `demo_router` and `demo_shard1` are lightweight directories that symlink to `demo_shard0`'s code but have their own `server/` directory for PID files and logs.
+
+```
+examples/
+  demo_shard0/          <- real game dir (code, settings, shared DB)
+  demo_router/          <- symlinks to demo_shard0, own server/ for PIDs
+  demo_shard1/          <- symlinks to demo_shard0, own server/ for PIDs
+```
+
+All instances share the same database via a `DATABASES` override in `settings_common_shard_config.py` that uses `os.path.realpath(__file__)` to always resolve to `demo_shard0/server/evennia.db3`, regardless of symlinks. See `examples/README.md` for setup and usage instructions.
+
 ## What this design doesn't address
 
 - **Validation.** Nothing checks that `SHARDS_ROLE` is one of the three valid strings, or that `SHARD_ID` is set when role is `"shard"`. Validation will land with whatever code first depends on it. Pre-building it now would be forward-design.
-- **Other settings.** This document covers only `SHARDS_ROLE` and `SHARD_ID`. Future settings (router URL, shard registry, ticket secret, etc.) will follow the same pattern but aren't designed yet.

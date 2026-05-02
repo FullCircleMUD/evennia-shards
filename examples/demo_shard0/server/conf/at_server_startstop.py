@@ -30,7 +30,15 @@ def at_server_start():
     This is called every time the server starts up, regardless of
     how it was shut down.
     """
-    pass
+    # Start the cross-shard message bus polling loop when not in monolith
+    # mode. The library's base MessageHandler handles `ping` /
+    # `ping_received` out of the box; pass a subclass to add custom kinds.
+    # TEMPORARY (spike) — once consumer integration is documented, this
+    # may move to a library-provided helper.
+    from evennia_shards import get_role, start_message_bus
+
+    if get_role() != "monolith":
+        start_message_bus()
 
 
 def at_server_stop():
