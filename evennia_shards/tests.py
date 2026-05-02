@@ -787,6 +787,206 @@ class ShardWritesAllowedForTests(BaseEvenniaTestCase):
                 ObjectDB.objects.filter(pk__in=[a.pk, b.pk]).update(db_key="x")
 
 
+@override_settings(
+    SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
+    SHARD_URLS={
+        "shard0": "http://localhost:4011",
+        "shard1": "http://localhost:4021",
+    },
+)
+class CrossShardMoveToTests(BaseEvenniaTestCase):
+    """Spike 1: ``cross_shard_move_to`` for a single object.
+
+    Asserts the primitive's contract — validation, atomic DB writes
+    via the bypass, idmapper eviction, per-session redirect — without
+    standing up real Evennia session/account infrastructure. Sessions
+    and account are stubbed via the existing fakes; the DB layer is
+    real.
+    """
+
+    def _make_target_room(self, target_shard="shard1"):
+        room = ObjectDB.objects.create(db_key="target_room", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(room.pk, target_shard)
+        return room
+
+    def _make_char(self, n_sessions=0):
+        """Create a real ObjectDB row, stub a fake session handler onto it.
+
+        Each fake session carries a reference to a shared fake account
+        on its ``.account`` attribute — that's how the primitive
+        retrieves the account for the redirect (matching Evennia's
+        ``ServerSession.account``).
+        """
+        char = ObjectDB.objects.create(db_key="char", db_typeclass_path=TYPECLASS)
+        fake_account = _FakeAccount(pk=42)
+        fake_sessions = []
+        for i in range(n_sessions):
+            sess = _FakeSession(address=f"10.0.0.{i + 1}")
+            sess.account = fake_account
+            fake_sessions.append(sess)
+        # ObjectDB has a `@lazy_property` for sessions plus a custom
+        # __setattr__ that refuses direct assignment. Write into the
+        # instance dict to shadow the lazy_property descriptor for
+        # this instance only, without involving the typeclass's
+        # attribute-write machinery.
+        char.__dict__["sessions"] = _FakeSessionHandler(fake_sessions)
+        return char, fake_account, fake_sessions
+
+    def test_move_no_sessions_succeeds(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        result = cross_shard_move_to(char, "shard1", target.pk)
+
+        # Row updated.
+        persisted = list(
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", "db_location_id")
+        )[0]
+        self.assertEqual(persisted, ("shard1", target.pk))
+
+        # Result.
+        self.assertEqual(result.objects_moved, 1)
+        self.assertEqual(result.sessions_redirected, 0)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_move_with_one_session_redirects(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, sessions = self._make_char(n_sessions=1)
+        target = self._make_target_room()
+
+        result = cross_shard_move_to(char, "shard1", target.pk)
+
+        self.assertEqual(result.sessions_redirected, 1)
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertIn("shard_redirect", sessions[0].oob_messages)
+        # Ticket points at the destination shard.
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.to_shard, "shard1")
+        self.assertEqual(ticket.character_id, char.pk)
+
+    def test_move_with_multiple_sessions_redirects_each(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, sessions = self._make_char(n_sessions=3)
+        target = self._make_target_room()
+
+        result = cross_shard_move_to(char, "shard1", target.pk)
+
+        self.assertEqual(result.sessions_redirected, 3)
+        self.assertEqual(Ticket.objects.count(), 3)
+        for sess in sessions:
+            self.assertIn("shard_redirect", sess.oob_messages)
+
+    def test_target_shard_not_configured_raises(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        with self.assertRaises(ShardIsolationError) as ctx:
+            cross_shard_move_to(char, "nonexistent_shard", target.pk)
+        self.assertIn("nonexistent_shard", str(ctx.exception))
+
+        # Row unchanged: still on shard0.
+        persisted = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)
+            .first()
+        )
+        self.assertEqual(persisted, "shard0")
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_target_location_does_not_exist_raises(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, _ = self._make_char(n_sessions=0)
+
+        with self.assertRaises(ShardIsolationError) as ctx:
+            cross_shard_move_to(char, "shard1", 999999)
+        self.assertIn("999999", str(ctx.exception))
+
+    def test_target_location_on_wrong_shard_raises(self):
+        from evennia_shards import cross_shard_move_to
+
+        char, _, _ = self._make_char(n_sessions=0)
+        # Local room (auto-stamped to current shard, "shard0") used as
+        # target while target_shard="shard1" → mismatch.
+        local_room = ObjectDB.objects.create(db_key="local_room", db_typeclass_path=TYPECLASS)
+
+        with self.assertRaises(ShardIsolationError) as ctx:
+            cross_shard_move_to(char, "shard1", local_room.pk)
+        msg = str(ctx.exception)
+        self.assertIn("shard0", msg)
+        self.assertIn("shard1", msg)
+
+    def test_atomic_rollback_on_save_failure(self):
+        """If the save inside the atomic block raises, the DB rolls back.
+
+        Verifies that the in-memory shard_id mutation does not leak
+        into a persisted row on save failure, and that the redirect
+        path is not reached.
+        """
+        from unittest.mock import patch
+        from evennia_shards import cross_shard_move_to
+
+        char, _, sessions = self._make_char(n_sessions=1)
+        target = self._make_target_room()
+
+        # Patch obj.save to raise. Have to attach to the instance via
+        # __setattr__ since Django's save lives on the class.
+        def failing_save(*args, **kwargs):
+            raise RuntimeError("simulated DB failure")
+        object.__setattr__(char, "save", failing_save)
+
+        with self.assertRaises(RuntimeError):
+            cross_shard_move_to(char, "shard1", target.pk)
+
+        # Row unchanged — rollback worked.
+        persisted = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", "db_location_id")
+            .first()
+        )
+        self.assertEqual(persisted[0], "shard0")
+        # No ticket created, no shard_redirect sent.
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", sessions[0].oob_messages)
+
+    def test_session_redirect_failure_captured_in_result(self):
+        """Per-session redirect failure → captured in result.failures, move still committed."""
+        from evennia_shards import cross_shard_move_to
+
+        char, _, sessions = self._make_char(n_sessions=2)
+        target = self._make_target_room()
+
+        # Make the second session's msg() raise.
+        def raising_msg(**kwargs):
+            raise RuntimeError("simulated network failure")
+        sessions[1].msg = raising_msg
+
+        result = cross_shard_move_to(char, "shard1", target.pk)
+
+        # Move itself committed (DB updated).
+        persisted = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)
+            .first()
+        )
+        self.assertEqual(persisted, "shard1")
+
+        # First redirected, second failed.
+        self.assertEqual(result.sessions_redirected, 1)
+        self.assertEqual(len(result.failures), 1)
+        failed_session, failed_exc = result.failures[0]
+        self.assertIs(failed_session, sessions[1])
+        self.assertIsInstance(failed_exc, RuntimeError)
+
+
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class PreDeleteChokepointTests(BaseEvenniaTestCase):
     """pre_delete chokepoint: refuse delete of remote-shard rows.
@@ -1455,6 +1655,23 @@ class _FakeAttributes:
 
     def get(self, name, default=None):
         return self._store.get(name, default)
+
+
+class _FakeSessionHandler:
+    """Stand-in for Evennia's per-character SessionHandler.
+
+    Provides .all() / .count() so cross_shard_move_to can iterate
+    sessions without standing up a real Evennia sessionhandler.
+    """
+
+    def __init__(self, sessions=()):
+        self._sessions = list(sessions)
+
+    def all(self):
+        return list(self._sessions)
+
+    def count(self):
+        return len(self._sessions)
 
 
 class _FakeAccount:

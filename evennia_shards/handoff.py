@@ -1,22 +1,196 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Cross-shard handoff primitives.
 
-This module is the home for the library's cross-shard handoff
-mechanism — the operations that move a logical session (and, in
-future spikes, an object's row identity and idmapper presence)
-from one shard process to another.
+The library's cross-shard handoff mechanism — operations that move a
+row's identity (``shard_id``, location) from one shard process to
+another, evict it from the source's idmapper, and redirect any
+puppeting sessions to the destination shard.
 
-Currently houses the session-redirect helper used by all
-router-side entry points that need to "send the player's WebSocket
-session to a different shard." Future Phase 2 work — the
-``cross_shard_move_to`` primitive and the ``shard_writes_allowed_for``
-chokepoint bypass — will land alongside it here.
+Houses two public primitives:
+
+- :func:`cross_shard_move_to` — composes the full handoff for an
+  object (single-object scope in the current spike): validate, atomic
+  DB writes (inside :func:`shard_writes_allowed_for`), idmapper
+  eviction, per-session ticket+redirect.
+- :func:`_redirect_to_character_shard` — the per-session redirect
+  used by the move primitive, the ``ic`` command, and the
+  ``at_post_login`` override.
+
+The chokepoint-bypass primitive that the move composes with lives in
+:mod:`evennia_shards.isolation`.
 """
 
+from collections import namedtuple
+
+from django.db import transaction
 from evennia.utils import logger
 
 from .config import get_shard_url
+from .errors import ShardIsolationError
+from .isolation import shard_writes_allowed_for
 from .tickets import create_ticket
+
+
+MoveResult = namedtuple(
+    "MoveResult",
+    ["objects_moved", "sessions_redirected", "failures"],
+)
+"""Outcome of a :func:`cross_shard_move_to` call.
+
+- ``objects_moved`` (int): number of rows whose ``shard_id`` was
+  updated to the new shard. Spike 1: always 1 on success.
+- ``sessions_redirected`` (int): number of puppeting sessions for
+  which a ticket was created and a ``shard_redirect`` OOB was sent.
+- ``failures`` (list[tuple]): per-session failure entries —
+  ``(session, exception)`` pairs for redirects that raised. The move
+  itself committed; these are post-commit recoverable failures
+  (network OOB couldn't be sent, etc.). Player can reconnect.
+"""
+
+
+def cross_shard_move_to(obj, target_shard, target_location_pk):
+    """Move ``obj`` to ``target_shard``, into the room at ``target_location_pk``.
+
+    Spike 1 scope: single object, **no recursion through
+    ``obj.contents``**. Caller is responsible for ensuring ``obj`` has
+    no contents (or is comfortable with contents being orphaned in
+    source-shard rows). Recursion lands as a separate spike.
+
+    Steps:
+
+    1. Validate ``target_shard`` is in ``SHARD_URLS``.
+    2. Validate ``target_location_pk`` exists and is on
+       ``target_shard`` (or is the global ``"*"`` sentinel).
+    3. Atomic DB writes + idmapper eviction inside one
+       ``transaction.atomic()`` block (with ``shard_writes_allowed_for``
+       lifting the chokepoints for ``obj``): update ``obj.shard_id``
+       and ``obj.db_location_id``, save, evict from this process's
+       idmapper. The eviction is inside the atomic block so a failure
+       there rolls back the DB write too. On any exception, a defensive
+       second eviction runs in the ``except`` branch — the in-memory
+       ``obj.shard_id`` was mutated before save, so even with a
+       rolled-back DB the cached instance is stale and shouldn't be
+       served from the idmapper afterwards.
+    4. For each session puppeting ``obj``: create a ticket and send
+       ``shard_redirect`` OOB. Per-session failures are captured in
+       the returned :class:`MoveResult` and do not roll back the move.
+
+    Args:
+        obj: an ``ObjectDB`` instance (typically a Character) on this
+            shard, to be moved to ``target_shard``.
+        target_shard: the destination shard's ``SHARD_ID``. Must be a
+            key in ``SHARD_URLS``.
+        target_location_pk: pk of the destination room (or container)
+            on the target shard. Must exist; must have ``shard_id ==
+            target_shard`` or ``shard_id == "*"``.
+
+    Returns:
+        :class:`MoveResult` with counts and per-session failures.
+
+    Raises:
+        ShardIsolationError: if ``target_shard`` isn't configured, if
+            ``target_location_pk`` doesn't exist, or if it's on a
+            shard other than ``target_shard`` (and not global).
+    """
+    from evennia.objects.models import ObjectDB
+
+    # 1. Validate target shard.
+    try:
+        get_shard_url(target_shard)
+    except (KeyError, ValueError) as exc:
+        raise ShardIsolationError(
+            f"cross_shard_move_to: target_shard {target_shard!r} is not "
+            f"configured (not present in SHARD_URLS)"
+        ) from exc
+
+    # 2. Validate target location exists and is on the target shard.
+    target_rows = list(
+        ObjectDB.objects.filter(pk=target_location_pk)
+        .values_list("shard_id", flat=True)[:1]
+    )
+    if not target_rows:
+        raise ShardIsolationError(
+            f"cross_shard_move_to: target_location_pk {target_location_pk!r} "
+            f"does not exist"
+        )
+    location_shard = target_rows[0]
+    if location_shard != target_shard and location_shard != "*":
+        raise ShardIsolationError(
+            f"cross_shard_move_to: target_location_pk {target_location_pk!r} "
+            f"is on shard {location_shard!r}, not {target_shard!r}"
+        )
+
+    # 3. Atomic DB writes + idmapper eviction. shard_writes_allowed_for
+    # lifts the chokepoints for obj; transaction.atomic ensures the
+    # row update is all-or-nothing. flush_from_cache lives inside the
+    # atomic block so an eviction failure (vanishingly rare — it's a
+    # dict pop) rolls back the DB write too.
+    #
+    # On any exception inside the block, the except branch evicts
+    # again defensively. The in-memory obj.shard_id was mutated to
+    # the new shard before save() ran, so even with a rolled-back DB
+    # the cached instance is stale relative to the row; eviction
+    # ensures any future idmapper access reloads from the (rolled-back)
+    # DB rather than serving the stale Python object.
+    try:
+        with transaction.atomic(), shard_writes_allowed_for(obj):
+            obj.shard_id = target_shard
+            obj.db_location_id = target_location_pk
+            # Suppress Evennia's post-save contents-cache update for
+            # this save. Without this, at_db_location_postsave fires
+            # after save and dereferences self.db_location, which
+            # loads the target room — and the target row lives on
+            # target_shard, so from_db refuses (correctly: the move's
+            # source process should not be instantiating a remote
+            # row). Same flag Evennia itself uses for analogous
+            # location-change paths (see ObjectDB.location setter in
+            # evennia/objects/models.py).
+            obj._safe_contents_update = True
+            try:
+                obj.save()
+            finally:
+                # Remove the flag whether save succeeded or raised, so
+                # nothing downstream sees it lingering.
+                try:
+                    del obj._safe_contents_update
+                except AttributeError:
+                    pass
+            obj.flush_from_cache(force=True)
+    except Exception:
+        try:
+            obj.flush_from_cache(force=True)
+        except Exception:
+            pass
+        raise
+
+    # 4. Per-session redirect. Reached only if the atomic block above
+    # committed cleanly — any exception there re-raises and skips this
+    # block (the control flow is the guarantee; no flag needed).
+    # Per-session failures are captured but don't roll back the move,
+    # and the player can ticket-auth on next reconnect regardless.
+    redirected = 0
+    failures = []
+    for session in obj.sessions.all():
+        try:
+            # session.account is the authenticated account on the
+            # session — canonical source for the ticket's account_id
+            # and the _last_puppet write. Doesn't depend on the
+            # character's FK being readable (it may be momentarily
+            # awkward to read post-eviction).
+            _redirect_to_character_shard(session.account, session, obj)
+            redirected += 1
+        except Exception as exc:
+            logger.log_warn(
+                f"cross_shard_move_to: redirect failed for session "
+                f"{session!r} on obj pk={obj.pk}: {exc}"
+            )
+            failures.append((session, exc))
+
+    return MoveResult(
+        objects_moved=1,
+        sessions_redirected=redirected,
+        failures=failures,
+    )
 
 
 def _redirect_to_character_shard(account, session, character) -> str:

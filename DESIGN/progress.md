@@ -6,6 +6,26 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-02 — `cross_shard_move_to` spike 1: single-object move (unit-tested)
+
+The first slice of the cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Spike 1 scope: move a single `ObjectDB`-derived row across shards, no recursion through `obj.contents`, with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
+
+The primitive composes:
+
+1. Validate `target_shard` is configured and `target_location_pk` exists on it.
+2. Atomic DB writes + idmapper eviction inside one `transaction.atomic()` block. Save and `flush_from_cache` are inside the bypass; on any exception, a defensive second eviction runs in the `except` branch so a rolled-back move doesn't leave the in-memory `obj` (whose `shard_id` was already mutated) lingering in the idmapper.
+3. Per-session redirect via `_redirect_to_character_shard(session.account, session, obj)`. Uses the session's authenticated account (via `session.account`, not the character's FK) — more accurate semantically and decoupled from the character's `db_account` FK descriptor. Per-session failures captured in the returned `MoveResult`; the move itself doesn't roll back.
+
+Three findings worth recording for future work:
+
+- **`session.account`, not `obj.account`.** The session is the canonical source of "the account doing the move" — independent of the character's FK and consistent across multisession modes.
+- **`_safe_contents_update` flag suppresses Evennia's post-save contents-cache update**, which would otherwise dereference `self.db_location` (the target room on the remote shard) and trip the `from_db` chokepoint. Same flag Evennia itself uses for analogous location-change paths.
+- **Test setup uses `obj.__dict__["sessions"] = ...`** to shadow the lazy_property descriptor without going through Evennia's protective `__setattr__`. Real `ObjectDB` for the chokepoint-exercising parts; fake session handler for the redirect-counting parts.
+
+156 tests passing (148 prior + 8 new in `CrossShardMoveToTests`): no-sessions, one-session, multi-session, target-shard-not-configured, target-location-doesn't-exist, target-location-on-wrong-shard, atomic-rollback-on-save-failure, session-redirect-failure-captured.
+
+**Deferred to subsequent spikes:** recursion through `obj.contents` (spike 3), generalisation to non-character objects (spike 2 — same machinery, no session redirect needed), live smoke testing with real router+shard processes, contrib-layer typeclasses (`CrossShardExit`, `CrossShardCmdTeleport`).
+
 ### 2026-05-02 — Shard isolation refactor + `shard_writes_allowed_for` bypass primitive
 
 The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_move_to` will be built on.
@@ -241,7 +261,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 **Beyond the four-chokepoint spike** (Phase 2 / out of scope here):
 
-- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Bypass primitive landed 2026-05-02 — see milestone above. Cross-shard handoff (`cross_shard_move_to`) is the next planned spike.*
+- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_move_to spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
 - Backfill migration for legacy NULL rows.
 - ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 

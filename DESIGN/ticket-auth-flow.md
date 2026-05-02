@@ -146,7 +146,7 @@ The library replaces `DefaultAccount.at_post_login` on routers with `shard_aware
 
 The override honours the consumer's `AUTO_PUPPET_ON_LOGIN` setting as the first decision: if the consumer has disabled auto-puppet, the library applies *none* of its redirect logic and renders the OOC menu — same observable outcome as vanilla. The library's redirect machinery only activates when `AUTO_PUPPET_ON_LOGIN = True`.
 
-`_is_redirectable_character()` is the predicate that distinguishes the redirect-eligible row from the broken-state row when AUTO_PUPPET is True. The redirect itself reuses the same `_redirect_to_character_shard()` helper (in `evennia_shards/handoff.py`) that `ShardAwareCmdIC` uses, so both router-side entry points (manual `ic <char>` and login-time auto-puppet) share one code path. The helper is the library's single mechanism for "send a player session to a character's owning shard"; the upcoming Phase 2 `cross_shard_move_to` primitive will build on the same helper.
+`_is_redirectable_character()` is the predicate that distinguishes the redirect-eligible row from the broken-state row when AUTO_PUPPET is True. The redirect itself reuses the same `_redirect_to_character_shard()` helper (in `evennia_shards/handoff.py`) that `ShardAwareCmdIC` uses, so both router-side entry points (manual `ic <char>` and login-time auto-puppet) share one code path. The helper is the library's single mechanism for "send a player session to a character's owning shard"; the `cross_shard_move_to` primitive (also in `handoff.py`) uses it for per-session redirect after a programmatic handoff.
 
 ### The `SHARDS_TICKET_AUTHED` protocol flag
 
