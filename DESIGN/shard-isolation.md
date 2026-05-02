@@ -58,3 +58,21 @@ The general framing: the library prevents **cache poisoning, cross-shard data co
 - **No surprising consumer-side behaviour change.** Normal Evennia code — `obj.save()`, `obj.delete()`, `Character.objects.get(pk=42)`, FK lookups — works exactly as before in monolith and works correctly-scoped in shard mode.
 - **Targeted enforcement.** Each chokepoint solves one specific concern without affecting unrelated behaviour. Aggregates and reads of single rows on the current shard pay zero overhead.
 - **Clear failure mode.** Invariant violations raise visibly rather than silently producing wrong data — easy to find and fix during development.
+
+## Decision: bespoke chokepoints vs `django-multitenant`
+
+Two approaches were on the table:
+
+- **Bespoke chokepoints** *(this document)* — four narrow Django-native hooks (`from_db`, `pre_save`, `pre_delete`, `QuerySet.update`) plus a `shard_id` column. No external dependency.
+- **`django-multitenant`** — off-the-shelf library providing `tenant_id` row-tagging + auto-filtering manager. Conceptually the same row-based partitioning shape; differs in *how* isolation is enforced (filter all queries to scope vs. raise on out-of-scope access).
+
+Both were prototyped in parallel (the bespoke approach on this branch, `django-multitenant` on its own branch). After the bespoke spike landed end-to-end with all four chokepoints + tests + the cross-shard message bus on top, the `django-multitenant` branch was discontinued without merging. The reasons:
+
+- **Clean composition with Evennia's idmapper.** Evennia's `SharedMemoryManager` is a custom Django manager that overrides `get_queryset()`. `django-multitenant`'s auto-filtering also works by manager composition through the same seam — running both required a layered manager whose interaction with the idmapper's `(class, pk)` cache would have needed careful prototyping. The chokepoint approach uses Django-native extension points (`from_db`, signals, queryset method patch) that don't touch the manager, so the idmapper composition question doesn't arise.
+- **Loud failures, not silent filtering.** A chokepoint that catches a leak raises with a stack trace pointing at the calling code. An auto-filtering manager simply hides the wrong-shard rows — wrong data scoped away, but the underlying bug (code that shouldn't be looking at remote rows) becomes invisible. For a library positioning itself as an extension to Evennia, the loud failure mode is the safer default during development.
+- **No external runtime dependency.** `django-multitenant` was originally built for Citus (Postgres distributed sharding extension); it claims plain-Postgres support but that was an open question on the comparison branch. The bespoke approach has zero new dependencies — it's just library code wired through Django/Evennia primitives the consumer is already using.
+- **Minimal blast radius.** The chokepoint surface is four hook registrations plus one column. It is straightforward to read, reason about, and remove. `django-multitenant` integration would have meant taking on a third-party library's release cadence, model, and edge cases as part of the library's own contract.
+
+Aggregate / `.values()` / `.values_list()` behaviour was *not* a deciding factor — both approaches can express scoped or unscoped aggregates by placing or omitting a `WHERE` clause, so it doesn't differentiate them meaningfully.
+
+The `django-multitenant` branch and the open questions tied to it (manager composition with the idmapper, plain-Postgres compatibility) are no longer being explored; both are resolved by this decision in the sense that they no longer block any choice we need to make.

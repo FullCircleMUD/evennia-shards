@@ -22,7 +22,7 @@ A possible fourth, deferred:
 
 Research on 2026-04-29 surfaced existing Django ecosystem libraries relevant to our partitioning machinery. The picture as of end of that day:
 
-- **`django-multitenant`** *(candidate, not committed)* — shared-schema, `tenant_id` column, auto-filtering manager. Conceptually the same shape we want for "every world-object row carries `shard_id`." Process-scoped active shard (we set it once at boot from `SHARDS_ROLE` / `SHARD_ID`) is even simpler than the request-scoped tenant the library was built for. Composition with Evennia's `SharedMemoryManager` (the idmapper) is the most likely friction point — see [open-questions.md](open-questions.md).
+- **No external partitioning library.** `django-multitenant` was evaluated as off-the-shelf prior art for `tenant_id`-style row tagging and auto-filtering. After parallel prototyping it was not adopted — the bespoke four-chokepoint approach won on idmapper-composition simplicity, loud-failure semantics, and zero new runtime dependencies. See [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant) for the decision in detail.
 - **No external messaging dependency.** Earlier thinking considered `channels_redis` for the cross-shard message bus. A subsequent conversation reframed the bus as a Postgres `messages` table with polling — see [cross-shard-message-bus.md](cross-shard-message-bus.md). Removing Redis from the picture means one less ops dependency; the only infrastructure required by the library is Postgres, which Evennia already requires.
 
 ## Mandate: TBD pending review

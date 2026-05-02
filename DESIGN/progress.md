@@ -207,7 +207,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 - Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).
 - Backfill migration for legacy NULL rows.
-- Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.
+- ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 
 ### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
 
