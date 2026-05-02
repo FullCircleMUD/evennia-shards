@@ -24,7 +24,9 @@ New coupling section added to [library-integration-risks.md](library-integration
 
 `ShardAwareCmdOOC` was extended to clear `account.db._last_puppet` before creating the ticket. Without this, a player on a shard typing `ooc` would land on the router, the router's `at_post_login` would see `_last_puppet` still set, and the player would be auto-redirected straight back to the shard — an infinite loop. The clearing diverges from vanilla `CmdOOC` (which sets `_last_puppet = old_char`); rationale documented in [ticket-auth-flow.md](ticket-auth-flow.md#ooc-command-override). A multi-puppet edge case (modes 2/3) is captured in [open-questions.md](open-questions.md) as an Evennia upstream limitation that the library inherits.
 
-132 tests passing (128 prior + 3 in `AtPostLoginRouterTests` + 1 canary on `_last_puppet` clearing in `ShardAwareCmdOOCShardTests`). Live smoke test pending on Mac.
+**Post-smoke-test correction (same day):** the `_last_puppet = None` clearing approach failed live testing. Cross-process Attribute writes don't propagate fast enough — the router reads the stale value (or its idmapper / AttributeHandler serves a cached one), redirects back to the shard, and the shard's vanilla `at_post_login` then sees `None` (clear has caught up) and dies with `"The Character does not exist."` Replaced with a per-session `_ticket_authed` flag set in `ShardWebSocketClient.onOpen()` based on URL presence of `?ticket=`. The router's `at_post_login` checks the flag before consulting `_last_puppet` — any session whose URL carried a ticket is, by construction, an OOC-return target and gets the OOC menu without auto-redirect. `_last_puppet` is left vanilla; the `_last_puppet = None` mutation in `ShardAwareCmdOOC` was reverted, replaced by a canary asserting we *don't* mutate it. Aligns with the two-audiences principle (minimum divergence from Evennia).
+
+137 tests passing (128 prior + 3 in `AtPostLoginRouterTests` + 1 ticket-flag test in `AtPostLoginRouterTests` + 4 in `TicketAuthedFlagTests` + 1 canary on `ShardAwareCmdOOCShardTests`). Live smoke test pending on Mac.
 
 ### 2026-05-01 — OOC command override: shard→router redirect proven end-to-end
 

@@ -1039,6 +1039,39 @@ class ExtractTicketTokenTests(BaseEvenniaTestCase):
         self.assertEqual(proto._extract_ticket_token(), "tok123")
 
 
+class TicketAuthedFlagTests(BaseEvenniaTestCase):
+    """ShardWebSocketClient.onOpen sets self._ticket_authed = bool(token).
+
+    This flag is the OOC-return signal read by the router's at_post_login
+    override (see hooks.py and DESIGN/ticket-auth-flow.md). It captures
+    URL presence of ?ticket=, not validation outcome — so a refresh while
+    at the OOC menu (URL still has the stale ticket, browser session
+    reused) keeps the flag set.
+
+    onOpen requires Twisted to run end-to-end, so these tests assert the
+    contract on the substituent: given a URL, the value derived from
+    bool(_extract_ticket_token()) matches what the flag will be.
+    """
+
+    def test_flag_truthy_when_url_contains_ticket(self):
+        proto = _FakeProtocol(uri="/websocket?ticket=abc123")
+        self.assertTrue(bool(proto._extract_ticket_token()))
+
+    def test_flag_falsy_when_url_has_no_ticket(self):
+        proto = _FakeProtocol(uri="/websocket")
+        self.assertFalse(bool(proto._extract_ticket_token()))
+
+    def test_flag_falsy_when_no_uri(self):
+        proto = _FakeProtocol(uri=None)
+        self.assertFalse(bool(proto._extract_ticket_token()))
+
+    def test_flag_truthy_for_stale_or_consumed_ticket(self):
+        # Validation outcome is irrelevant — only URL presence matters.
+        # A stale token in the URL on a refresh still flags the session.
+        proto = _FakeProtocol(uri="/websocket?ticket=already-consumed-token")
+        self.assertTrue(bool(proto._extract_ticket_token()))
+
+
 class GetClientAddressTests(BaseEvenniaTestCase):
     """_get_client_address resolves the real client IP."""
 
@@ -1565,20 +1598,22 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
 
         self.assertTrue(any("Redirecting to router" in m for m in cmd._messages))
 
-    def test_shard_clears_last_puppet_to_break_router_redirect_loop(self):
-        """ooc clears _last_puppet so the router's at_post_login does not
-        immediately redirect the player back to the shard they just left.
+    def test_shard_does_not_mutate_last_puppet(self):
+        """ooc must NOT touch _last_puppet — vanilla Evennia semantics.
 
-        Diverges from vanilla CmdOOC (which sets _last_puppet=old_char). See
-        DESIGN/ticket-auth-flow.md for rationale.
+        The OOC redirect loop is broken by the per-session _ticket_authed
+        flag set in protocols.onOpen() and read by the router's
+        at_post_login override, not by mutating _last_puppet. Any change
+        here that adds account.db._last_puppet = ... mutation should be
+        deliberate and re-evaluated against the loop-prevention strategy.
         """
         char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
         account = _FakeAccount()
-        account.db._last_puppet = char  # vanilla state going in
+        account.db._last_puppet = char
         cmd = _make_ooc_cmd(puppet=char, account=account)
         cmd.func()
 
-        self.assertIsNone(account.db._last_puppet)
+        self.assertIs(account.db._last_puppet, char)
 
 
 # ---------------------------------------------------------------------------
@@ -1668,3 +1703,29 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
                 self.assertEqual(Ticket.objects.count(), 0)
                 self.assertNotIn("shard_redirect", session.oob_messages)
                 self.assertEqual(len(account.at_look_calls), 1)
+
+    def test_ticket_authed_session_skips_auto_redirect(self):
+        """Session flagged as ticket-authed → OOC menu, no redirect.
+
+        The flag is set by ShardWebSocketClient.onOpen() when the WS URL
+        contains ?ticket=. Indicates the session was just redirected from
+        a shard. The router must not auto-redirect it back — that would
+        be the infinite shard↔router loop. Even with a fully redirectable
+        _last_puppet set, ticket-authed sessions land at the OOC menu.
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char  # would normally trigger redirect
+        session = _FakeSession()
+        session._ticket_authed = True
+
+        shard_aware_at_post_login(account, session=session)
+
+        # No ticket created, no shard_redirect OOB sent.
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+
+        # OOC menu rendered.
+        self.assertEqual(len(account.at_look_calls), 1)

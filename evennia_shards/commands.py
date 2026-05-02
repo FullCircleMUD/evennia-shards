@@ -174,12 +174,6 @@ class ShardAwareCmdOOC(CmdOOC):
                 f"(Account: {account}, IP: {session.address})."
             )
 
-        # Clear _last_puppet so the router's at_post_login override does
-        # not auto-redirect this account back to the shard it just left.
-        # Diverges from vanilla CmdOOC (which sets _last_puppet=old_char) —
-        # see DESIGN/ticket-auth-flow.md for the rationale.
-        account.db._last_puppet = None
-
         token = create_ticket(
             account.id, character_id, get_router_shard_id(),
             client_ip=session.address,

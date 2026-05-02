@@ -68,6 +68,16 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         # Extract ticket token from URL (if any) but don't validate yet.
         token = self._extract_ticket_token()
 
+        # Flag this session as having arrived via a URL containing a ticket
+        # parameter, regardless of whether validation succeeds. Used by the
+        # router's at_post_login override as the OOC-return signal — any
+        # session with this flag was, by construction, the target of a
+        # library-issued shard→router redirect. Captures URL presence (not
+        # validation outcome) so a page refresh while at the OOC menu —
+        # where the stale token in the URL won't re-validate but the
+        # browser session is reused — still flags the session correctly.
+        self._ticket_authed = bool(token)
+
         # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
         # Based on Evennia 6.0.0. See DESIGN/library-integration-risks.md.
         client_address = self._get_client_address()

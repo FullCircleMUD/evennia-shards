@@ -73,6 +73,17 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     self._send_to_connect_channel(f"|G{self.key} connected|n")
     # ── End reproduced prelude ────────────────────────────────────────
 
+    # OOC-return signal: any session whose URL carried ?ticket= was, by
+    # construction, the target of a library-issued shard→router redirect.
+    # The flag is set by ShardWebSocketClient.onOpen() based on URL
+    # presence (not validation outcome). When set, render the OOC menu
+    # without consulting _last_puppet — auto-redirecting would create
+    # an infinite shard↔router loop. Leaves _last_puppet vanilla-managed
+    # by Evennia.
+    if session is not None and getattr(session, "_ticket_authed", False):
+        self.msg(self.at_look(target=self.characters, session=session), session=session)
+        return
+
     last_puppet = self.db._last_puppet
 
     if _is_redirectable_character(last_puppet):
