@@ -83,23 +83,6 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
-    # DEBUG (smoke-test aid; remove once verified live).
-    # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
-    _flags = getattr(session, "protocol_flags", {}) if session is not None else {}
-    _debug_flag = _flags.get("SHARDS_TICKET_AUTHED", False) if _flags else None
-    _session_id = id(session) if session is not None else None
-    self.msg(
-        f"|w[evennia-shards debug]|n SHARDS_TICKET_AUTHED = {_debug_flag}",
-        session=session,
-    )
-    logger.log_info(
-        f"at_post_login: SHARDS_TICKET_AUTHED = {_debug_flag} "
-        f"(account={self}, session_id={_session_id:#x})"
-        if _session_id is not None
-        else f"at_post_login: SHARDS_TICKET_AUTHED = {_debug_flag} "
-        f"(account={self}, session=None)"
-    )
-
     # OOC-return signal: a session whose URL carried ?ticket= was, by
     # construction, the target of a library-issued redirect to this
     # process. On the router that is the OOC-return case from a shard;

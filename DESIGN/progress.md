@@ -6,6 +6,25 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-02 — `AUTO_PUPPET_ON_LOGIN = True` path: live smoke-test green
+
+The router-side `at_post_login` override (landed 2026-05-01) verified end-to-end with live smoke testing under both auto-puppet modes. Two corrections were applied during the smoke test cycle:
+
+1. **Portal/Server AMP sync.** First-cut implementation stored the OOC-return signal as a direct attribute (`self._ticket_authed`) on the WebSocket protocol instance. Live testing showed the flag was set on the Portal-side object but read as `False` on the Server side — Python object ids differed between set and read. Cause: Evennia's Portal and Server are separate processes; only attributes listed in `settings.SESSION_SYNC_ATTRS` survive the AMP crossing, and arbitrary attributes don't. Fix: store the flag in `protocol_flags["SHARDS_TICKET_AUTHED"]` instead — `protocol_flags` is in the synced set (it carries `OOB`, `XTERM256`, etc.), so the value reaches the Server intact.
+
+2. **Honour `AUTO_PUPPET_ON_LOGIN = False`.** Smoke testing under `AUTO_PUPPET_ON_LOGIN = False` showed the override was *still* auto-redirecting — vanilla Evennia would render the OOC menu unconditionally in that case. The override was forcing True-shaped behaviour regardless of the consumer's setting (a divergence from Evennia and a violation of the two-audiences principle). Fix: short-circuit at the top of the override after the prelude — when `AUTO_PUPPET_ON_LOGIN` is `False`, render the OOC menu and return without applying any of the library's redirect logic.
+
+After both fixes, both modes work as expected:
+
+| `AUTO_PUPPET_ON_LOGIN` | Behaviour |
+|---|---|
+| `False` | OOC menu always rendered; library redirect machinery dormant. Vanilla parity. |
+| `True` | Auto-puppet path produces a redirect to the character's owning shard; OOC return from a shard lands at the router's OOC menu (no loop). |
+
+Debug instrumentation added during diagnosis (`SHARDS-DEBUG-TICKET-FLAG` markers in `protocols.py` and `hooks.py`) has been removed. **138 tests passing** (137 prior + 1 new `test_auto_puppet_disabled_renders_ooc_menu_unconditionally`).
+
+Phase 1 of the original PoC plan (router + 1 shard, both auto-puppet modes) is now functionally complete and verified live. Phase 2 (cross-shard handoff, gateway primitives, character movement between shards) is the next milestone.
+
 ### 2026-05-01 — `AUTO_PUPPET_ON_LOGIN = True` path: router `at_post_login` override
 
 Closes the auth/redirect feature: both `AUTO_PUPPET_ON_LOGIN = True` and `False` paths now work on the router. With auto-puppet=True, login itself triggers the redirect; with False, the player goes through the OOC menu and types `ic <char>`.
@@ -26,7 +45,7 @@ New coupling section added to [library-integration-risks.md](library-integration
 
 **Post-smoke-test correction (same day):** the `_last_puppet = None` clearing approach failed live testing. Cross-process Attribute writes don't propagate fast enough — the router reads the stale value (or its idmapper / AttributeHandler serves a cached one), redirects back to the shard, and the shard's vanilla `at_post_login` then sees `None` (clear has caught up) and dies with `"The Character does not exist."` Replaced with a per-session signal set in `ShardWebSocketClient.onOpen()` based on URL presence of `?ticket=`, stored in `protocol_flags["SHARDS_TICKET_AUTHED"]` (initially attempted as a direct attribute `self._ticket_authed`, but the Portal/Server AMP sync drops attributes not listed in `SESSION_SYNC_ATTRS` — only `protocol_flags` survives the crossing). The router's `at_post_login` checks the flag before consulting `_last_puppet` — any session whose URL carried a ticket is, by construction, an OOC-return target and gets the OOC menu without auto-redirect. `_last_puppet` is left vanilla; the `_last_puppet = None` mutation in `ShardAwareCmdOOC` was reverted, replaced by a canary asserting we *don't* mutate it. Aligns with the two-audiences principle (minimum divergence from Evennia).
 
-137 tests passing (128 prior + 3 in `AtPostLoginRouterTests` + 1 ticket-flag test in `AtPostLoginRouterTests` + 4 in `TicketAuthedFlagTests` + 1 canary on `ShardAwareCmdOOCShardTests`). Live smoke test pending on Mac.
+137 tests passing (128 prior + 3 in `AtPostLoginRouterTests` + 1 ticket-flag test in `AtPostLoginRouterTests` + 4 in `TicketAuthedFlagTests` + 1 canary on `ShardAwareCmdOOCShardTests`). Live smoke test pending.
 
 ### 2026-05-01 — OOC command override: shard→router redirect proven end-to-end
 

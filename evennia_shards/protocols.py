@@ -150,16 +150,6 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         # kind of session-level metadata.
         self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)
 
-        # DEBUG (smoke-test aid; remove once verified live).
-        # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
-        from evennia.utils import logger as _logger
-        _logger.log_info(
-            f"onOpen: protocol_flags['SHARDS_TICKET_AUTHED'] = "
-            f"{self.protocol_flags['SHARDS_TICKET_AUTHED']} "
-            f"(token={token!r}, uri={getattr(self, 'http_request_uri', None)!r}, "
-            f"id={id(self):#x})"
-        )
-
         # Watch for dead links.
         self.transport.setTcpKeepAlive(1)
         # Actually do the connection.
