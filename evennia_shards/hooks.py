@@ -28,6 +28,11 @@ def _is_redirectable_character(character) -> bool:
     """
     if character is None:
         return False
+    # Router process may hold a stale row in the idmapper if another
+    # process moved this character (e.g. cross_shard_move_to updates
+    # shard_id and db_location_id together). Refresh from DB before
+    # reading so redirect decisions use the live values.
+    character.refresh_from_db()
     shard_id = getattr(character, "shard_id", None)
     if not shard_id or shard_id == "*":
         return False

@@ -1881,6 +1881,11 @@ class _FakeCharacter:
         self.shard_id = shard_id
         self.name = key
 
+    def refresh_from_db(self, fields=None):
+        # No-op for tests; production code calls this on the router to
+        # pick up cross-process shard_id/db_location_id updates.
+        pass
+
 
 def _make_cmd(args="", role=ROLE_ROUTER, shard_id=ROLE_ROUTER, account=None,
               session=None, characters=None):

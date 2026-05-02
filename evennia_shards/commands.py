@@ -46,6 +46,12 @@ class ShardAwareCmdIC(CmdIC):
         if new_character is None:
             return  # error messages already sent
 
+        # Router process may hold a stale row in the idmapper if another
+        # process moved this character (e.g. cross_shard_move_to updates
+        # shard_id and db_location_id together). Refresh from DB before
+        # reading so the redirect target reflects current ownership.
+        new_character.refresh_from_db()
+
         shard_id = new_character.shard_id
         if not shard_id or shard_id == "*":
             self.msg("That character has no shard assignment.")
