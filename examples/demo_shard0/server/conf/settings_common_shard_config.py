@@ -35,6 +35,7 @@ ROUTER_URL = "http://localhost:4001"
 # In production, set these via environment variables.
 SHARD_URLS = {
     "shard0": "http://localhost:4011",
+    "shard1": "http://localhost:4021",
 }
 
 # Telnet disabled for all sharded instances — ticket-based auth is
