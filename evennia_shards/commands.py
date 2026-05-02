@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Shard-aware command overrides.
+"""Shard-aware command overrides and library-shipped admin commands.
 
-These replace Evennia's built-in commands when the library is active
-(non-monolith). Injected by ``AppConfig.ready()`` via monkey-patch on
-the ``evennia.commands.default.account`` module — the AccountCmdSet
-picks up our versions on cmdset rebuild.
+Two flavours of commands live here:
+
+- **Replacements** — ``ShardAwareCmdIC`` / ``ShardAwareCmdOOC`` swap
+  in for Evennia's built-in commands of the same name. Injected via
+  module-attribute monkey-patch in ``AppConfig.ready()``; the
+  ``AccountCmdSet`` picks them up on cmdset rebuild.
+
+- **Permanent superuser commands** — ``CmdShardCheck`` /
+  ``CmdCrossShardDig`` are new admin commands shipped by the library
+  for sharded deployments (Shard Management category, Developer
+  lock). Injected by patching ``CharacterCmdSet.at_cmdset_creation``
+  in ``AppConfig.ready()``.
 """
 
+from evennia.commands.command import Command as BaseCommand
 from evennia.commands.default.account import CmdIC, CmdOOC
 from evennia.utils import logger, search, utils
 
@@ -156,4 +165,132 @@ class ShardAwareCmdOOC(CmdOOC):
         logger.log_sec(
             f"OOC redirect: (Caller: {account}, Character: {character_id}, "
             f"IP: {session.address})."
+        )
+
+
+# =============================================================================
+# Permanent admin commands — shipped with the library, auto-installed into
+# CharacterCmdSet by AppConfig.ready() when get_role() != ROLE_MONOLITH.
+# Available as superuser commands on every sharded deployment.
+# =============================================================================
+
+
+class CmdShardCheck(BaseCommand):
+    """
+    Inspect an object's underlying ObjectDB row for the shard_id column.
+
+    Usage:
+      @shard_check <target>
+
+    Reports whether the column exists on the model, and its value if so.
+    Tries the ORM first; falls back to a raw SQL probe so we still get a
+    result if the column is in the database but the Python model isn't
+    aware of it.
+    """
+
+    key = "@shard_check"
+    locks = "cmd:perm(Developer)"
+    help_category = "Shard Management"
+
+    def func(self):
+        if not self.args.strip():
+            self.caller.msg("Usage: @shard_check <target>")
+            return
+
+        target = self.caller.search(self.args.strip())
+        if not target:
+            return
+
+        from evennia.objects.models import ObjectDB
+
+        # ORM-level check: is shard_id a known field on ObjectDB?
+        field_names = {f.name for f in ObjectDB._meta.get_fields()}
+        if "shard_id" in field_names:
+            row = ObjectDB.objects.get(id=target.id)
+            self.caller.msg(
+                f"ORM: ObjectDB row #{target.id} has shard_id field; "
+                f"value = {row.shard_id!r}"
+            )
+        else:
+            self.caller.msg(
+                f"ORM: ObjectDB has no shard_id field "
+                f"(EvenniaShardsConfig.ready() may not have run)."
+            )
+
+        # Database-level check: does the column exist in the table?
+        from django.db import connection
+
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT shard_id FROM objects_objectdb WHERE id = %s",
+                [target.id],
+            )
+            try:
+                row = cur.fetchone()
+                self.caller.msg(
+                    f"DB:  raw SELECT shard_id WHERE id={target.id} returned {row!r}"
+                )
+            except Exception as e:  # noqa: BLE001
+                self.caller.msg(f"DB:  raw SELECT failed: {e!r}")
+
+
+class CmdCrossShardDig(BaseCommand):
+    """
+    Dig a room on a target shard.
+
+    Usage:
+      cross_shard_dig <shard_id> <room_name>
+
+    Creates a new DefaultRoom and stamps it with the target shard's
+    shard_id, so the row is owned by that shard from creation. Used
+    to bootstrap a starting room on a freshly-added shard (you can't
+    log in to the new shard without one) and as a general utility for
+    cross-shard world-building from an existing shard.
+
+    The room has no location (it's a root room — same as Limbo).
+    Reports the new room's dbref so it can be used as a target for
+    cross_shard_move_to or referenced from settings.
+    """
+
+    key = "cross_shard_dig"
+    locks = "cmd:perm(Developer)"
+    help_category = "Shard Management"
+
+    def func(self):
+        from evennia.utils.create import create_object
+
+        from .config import get_shard_url
+        from .isolation import shard_writes_allowed_for
+
+        args = self.args.strip().split(None, 1)
+        if len(args) < 2:
+            self.caller.msg("Usage: cross_shard_dig <shard_id> <room_name>")
+            return
+        target_shard, room_name = args[0], args[1]
+
+        # Validate target_shard is configured.
+        try:
+            get_shard_url(target_shard)
+        except (KeyError, ValueError):
+            self.caller.msg(
+                f"|rTarget shard {target_shard!r} is not configured "
+                f"(not in SHARD_URLS).|n"
+            )
+            return
+
+        # Create the room locally (auto-stamps to current shard).
+        room = create_object(
+            "evennia.objects.objects.DefaultRoom",
+            key=room_name,
+        )
+
+        # Re-stamp to target shard via the bypass primitive.
+        with shard_writes_allowed_for(room):
+            room.shard_id = target_shard
+            room.save()
+            room.flush_from_cache(force=True)
+
+        self.caller.msg(
+            f"|wDug |c{room_name}|n on shard {target_shard!r}: "
+            f"|w#{room.pk}|n"
         )

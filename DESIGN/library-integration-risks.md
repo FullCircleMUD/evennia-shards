@@ -12,7 +12,7 @@ Each coupling section follows the same template:
 - **Risk on Evennia upgrade** — what to diff in the new Evennia version.
 - **Risk in consumer override** — what consumer-side customisation would collide, and the recommended pattern.
 
-This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`. Other library couplings (CmdIC/CmdOOC patches, ObjectDB.from_db, pre_save/pre_delete signals, QuerySet.update, WEBSOCKET_PROTOCOL_CLASS rewiring, middleware injection) will be backfilled as we revisit them.
+This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (CmdIC/CmdOOC patches, ObjectDB.from_db, pre_save/pre_delete signals, QuerySet.update, WEBSOCKET_PROTOCOL_CLASS rewiring, middleware injection) will be backfilled as we revisit them.
 
 ## WebSocketClient.onOpen() override
 
@@ -75,3 +75,29 @@ How to check: diff upstream `DefaultAccount.at_post_login` against the snapshot 
 A consumer that subclasses `DefaultAccount` and overrides `at_post_login` without calling `super().at_post_login(...)` will bypass our patch — the consumer's body runs instead, and auto-puppet on the router goes back to its broken default. Recommended pattern: any consumer override of `at_post_login` must call `super().at_post_login(session=session, **kwargs)` (or accept that auto-puppet redirect will not run on their accounts).
 
 A consumer that *doesn't* override `at_post_login` is safe by Python MRO — `account.at_post_login(...)` resolves to our patched `DefaultAccount.at_post_login` automatically.
+
+## `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation` override
+
+**What we patch / extend:** `evennia._init` (the function in `evennia/__init__.py` that populates Evennia's lazy top-level exports — `Command`, `CmdSet`, etc.) is wrapped from `AppConfig.ready()` to install a follow-on patch on `evennia.commands.default.cmdset_character.CharacterCmdSet.at_cmdset_creation`. The follow-on patch adds the library's permanent admin commands (`CmdShardCheck`, `CmdCrossShardDig`) after the parent populates the default cmdset. Library code: `evennia_shards/apps.py` (the wrap installation) and `evennia_shards/commands.py` (the commands themselves). Based on Evennia 6.0.0.
+
+**Why:**
+
+The library ships permanent superuser commands ("Shard Management" category) that should appear on every sharded deployment with no consumer-side cmdset wiring required. Evennia's standard cmdset-extension point is `CharacterCmdSet.at_cmdset_creation`: subclass and call `self.add(...)` after `super()`. The library does the equivalent via monkey-patch so consumers get the commands without editing `default_cmdsets.py`.
+
+The `evennia._init()` wrap is the indirection that makes this safe. Importing `cmdset_character` at `AppConfig.ready()` time eagerly pulls the chain `cmdset_character → building → prototypes/menus → evmenu`, and `evmenu.py` does `from evennia import Command` at module level. At `ready()` time `evennia.Command` is still `None` (the lazy-init pattern in `evennia/__init__.py`), so `class CmdEvMenuNode(Command):` fails with `TypeError: NoneType takes no arguments`. Real-runtime entry points (`server.py`, `portal.py`, `evennia_launcher`) call `django.setup()` *before* `evennia._init()`, so any `ready()`-time import of `cmdset_character` would trip this in production too — not just in tests. Wrapping `_init` instead defers the import until the lazy exports are populated.
+
+**Risk on Evennia upgrade:**
+
+- Changes to `evennia._init`'s signature or call order — the wrap calls `_original_init(*args, **kwargs)` and assumes the original returns normally before the lazy exports are populated.
+- Changes to `CharacterCmdSet.at_cmdset_creation`'s contract — our wrap calls the original first then `self.add()`s our commands.
+- If Evennia ever populates top-level exports at module-load time (no more `_init` indirection), the whole wrap is unnecessary; remove it.
+
+How to check: diff `evennia/__init__.py`'s `_init` and the lazy-export block; diff `cmdset_character.CharacterCmdSet.at_cmdset_creation`. The `AdminCommandAutoInstallTests.test_character_cmdset_contains_library_commands` test is the canary on this patch firing as expected.
+
+**Risk in consumer override:**
+
+A consumer that subclasses `CharacterCmdSet` and calls `super().at_cmdset_creation()` inherits the library's command additions transparently — standard Evennia pattern, works as expected. A consumer that subclasses but **doesn't** call `super()` skips both the default cmdset population *and* the library's additions. Recommended pattern: always call `super().at_cmdset_creation()` first.
+
+A consumer that points `CMDSET_CHARACTER` at a class that doesn't derive from `evennia.commands.default.cmdset_character.CharacterCmdSet` won't get the library commands. They'd need to manually add them (`from evennia_shards.commands import CmdShardCheck, CmdCrossShardDig`) — the library exposes them as part of its public command surface for exactly that case.
+
+The test runner depends on this wrap behaving — `runtests.py` calls `evennia._init()` explicitly so the deferred patch installation runs in time for tests. Real-runtime startup paths already call `evennia._init()` after `django.setup()`, so no additional integration is needed there.

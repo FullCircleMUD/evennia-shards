@@ -787,6 +787,146 @@ class ShardWritesAllowedForTests(BaseEvenniaTestCase):
                 ObjectDB.objects.filter(pk__in=[a.pk, b.pk]).update(db_key="x")
 
 
+class _FakeCaller:
+    """Minimal caller stand-in for admin command tests.
+
+    Captures ``msg(...)`` calls and resolves ``search(...)`` to a
+    pre-set target object (or ``None``). Doesn't try to mimic the
+    full Object/Account surface — admin commands generally only need
+    these two.
+    """
+
+    def __init__(self, search_returns=None):
+        self.messages = []
+        self.search_returns = search_returns
+
+    def search(self, searchdata):
+        return self.search_returns
+
+    def msg(self, text=None, **kwargs):
+        if text is not None:
+            self.messages.append(text)
+
+
+@override_settings(
+    SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
+    SHARD_URLS={
+        "shard0": "http://localhost:4011",
+        "shard1": "http://localhost:4021",
+    },
+)
+class CmdShardCheckTests(BaseEvenniaTestCase):
+    """``CmdShardCheck`` reports an object's shard_id (ORM + raw SQL)."""
+
+    def _make_cmd(self, args="", search_returns=None):
+        from evennia_shards.commands import CmdShardCheck
+
+        cmd = CmdShardCheck()
+        cmd.args = args
+        cmd.caller = _FakeCaller(search_returns=search_returns)
+        return cmd
+
+    def test_no_args_shows_usage(self):
+        cmd = self._make_cmd("")
+        cmd.func()
+        self.assertEqual(len(cmd.caller.messages), 1)
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_unknown_target_returns_silently(self):
+        # search() returning None means "not found" — Evennia has
+        # already messaged the caller. Command should add nothing.
+        cmd = self._make_cmd("ghost", search_returns=None)
+        cmd.func()
+        self.assertEqual(cmd.caller.messages, [])
+
+    def test_reports_shard_id_for_target(self):
+        # Real ObjectDB row, auto-stamped to current shard.
+        target = ObjectDB.objects.create(db_key="x", db_typeclass_path=TYPECLASS)
+        cmd = self._make_cmd("x", search_returns=target)
+        cmd.func()
+
+        # Both ORM and raw-SQL probes report the value, so 2 messages.
+        joined = "\n".join(cmd.caller.messages)
+        self.assertIn("ORM:", joined)
+        self.assertIn("DB:", joined)
+        self.assertIn("shard0", joined)
+
+
+@override_settings(
+    SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
+    SHARD_URLS={
+        "shard0": "http://localhost:4011",
+        "shard1": "http://localhost:4021",
+    },
+)
+class CmdCrossShardDigTests(BaseEvenniaTestCase):
+    """``CmdCrossShardDig`` creates a room stamped with a target shard's id."""
+
+    def _make_cmd(self, args=""):
+        from evennia_shards.commands import CmdCrossShardDig
+
+        cmd = CmdCrossShardDig()
+        cmd.args = args
+        cmd.caller = _FakeCaller()
+        return cmd
+
+    def test_no_args_shows_usage(self):
+        cmd = self._make_cmd("")
+        cmd.func()
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_one_arg_shows_usage(self):
+        # Need both shard_id and room_name.
+        cmd = self._make_cmd("shard1")
+        cmd.func()
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_unknown_shard_id_reports_error_no_room_created(self):
+        before = ObjectDB.objects.count()
+        cmd = self._make_cmd("nonexistent_shard MyRoom")
+        cmd.func()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("nonexistent_shard", msg)
+        self.assertIn("not configured", msg)
+        # Validation precedes creation: row count unchanged.
+        self.assertEqual(ObjectDB.objects.count(), before)
+
+    def test_creates_room_stamped_to_target_shard(self):
+        cmd = self._make_cmd("shard1 TargetLimbo")
+        cmd.func()
+
+        # The new room exists in DB with shard_id="shard1" and no location.
+        rows = list(
+            ObjectDB.objects.filter(db_key="TargetLimbo")
+            .values_list("shard_id", "db_location_id")
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0], ("shard1", None))
+
+        # Success message includes the target shard and the new dbref.
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("TargetLimbo", msg)
+        self.assertIn("shard1", msg)
+
+
+class AdminCommandAutoInstallTests(BaseEvenniaTestCase):
+    """Library admin commands auto-install into ``CharacterCmdSet``.
+
+    The install happens via a wrapper around ``evennia._init`` registered
+    in ``AppConfig.ready()``. The test runner calls ``evennia._init()``
+    explicitly, so by the time tests run the patch is in place.
+    """
+
+    def test_character_cmdset_contains_library_commands(self):
+        from evennia.commands.default.cmdset_character import CharacterCmdSet
+
+        cmdset = CharacterCmdSet()
+        cmdset.at_cmdset_creation()
+        keys = {cmd.key for cmd in cmdset.commands}
+        self.assertIn("@shard_check", keys)
+        self.assertIn("cross_shard_dig", keys)
+
+
 @override_settings(
     SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
     SHARD_URLS={

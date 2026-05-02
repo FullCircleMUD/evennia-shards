@@ -70,6 +70,55 @@ class EvenniaShardsConfig(AppConfig):
 
                 DefaultAccount.at_post_login = shard_aware_at_post_login
 
+            # Auto-install permanent library admin commands into
+            # CharacterCmdSet. We can't import cmdset_character here:
+            # its transitive imports (building → prototypes/menus →
+            # evmenu) reference ``evennia.Command``, which is still
+            # None until ``evennia._init()`` runs. Real-runtime
+            # entry points (server.py, portal.py) call ``_init()``
+            # AFTER ``django.setup()``, so our ``ready()`` is too
+            # early. Wrap ``evennia._init`` instead — when it runs,
+            # the lazy exports are populated and the cmdset_character
+            # import chain works. See DESIGN/library-integration-risks.md.
+            import evennia
+
+            if not getattr(evennia, "_evennia_shards_init_wrapped", False):
+                _original_init = evennia._init
+
+                def _shards_wrapped_init(*args, **kwargs):
+                    _original_init(*args, **kwargs)
+                    from evennia.commands.default.cmdset_character import (
+                        CharacterCmdSet,
+                    )
+
+                    if getattr(
+                        CharacterCmdSet,
+                        "_evennia_shards_cmdset_patched",
+                        False,
+                    ):
+                        return
+                    _original_at_cmdset_creation = (
+                        CharacterCmdSet.at_cmdset_creation
+                    )
+
+                    def _shard_aware_at_cmdset_creation(self):
+                        _original_at_cmdset_creation(self)
+                        from .commands import (
+                            CmdCrossShardDig,
+                            CmdShardCheck,
+                        )
+
+                        self.add(CmdShardCheck())
+                        self.add(CmdCrossShardDig())
+
+                    CharacterCmdSet.at_cmdset_creation = (
+                        _shard_aware_at_cmdset_creation
+                    )
+                    CharacterCmdSet._evennia_shards_cmdset_patched = True
+
+                evennia._init = _shards_wrapped_init
+                evennia._evennia_shards_init_wrapped = True
+
         # Install the shard isolation chokepoints + bypass machinery.
         # See evennia_shards/isolation.py and DESIGN/shard-isolation.md.
         from .isolation import install_chokepoints
