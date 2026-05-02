@@ -1678,9 +1678,9 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
         self.assertEqual(Ticket.objects.count(), 0)
         self.assertNotIn("shard_redirect", session.oob_messages)
 
-        # OOC menu rendered.
+        # OOC menu rendered (debug message also emitted; assert membership).
         self.assertEqual(len(account.at_look_calls), 1)
-        self.assertEqual(account.account_messages, ["OOC menu"])
+        self.assertIn("OOC menu", account.account_messages)
 
     def test_unusable_shard_id_warns_and_falls_through(self):
         """_last_puppet set with broken shard_id → warning + OOC menu."""

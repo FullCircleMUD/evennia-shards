@@ -73,6 +73,19 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     self._send_to_connect_channel(f"|G{self.key} connected|n")
     # ── End reproduced prelude ────────────────────────────────────────
 
+    # DEBUG (smoke-test aid; remove once verified live).
+    # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
+    _debug_flag = (
+        getattr(session, "_ticket_authed", False) if session is not None else None
+    )
+    self.msg(
+        f"|w[evennia-shards debug]|n session._ticket_authed = {_debug_flag}",
+        session=session,
+    )
+    logger.log_info(
+        f"at_post_login: session._ticket_authed = {_debug_flag} (account={self})"
+    )
+
     # OOC-return signal: any session whose URL carried ?ticket= was, by
     # construction, the target of a library-issued shard→router redirect.
     # The flag is set by ShardWebSocketClient.onOpen() based on URL
