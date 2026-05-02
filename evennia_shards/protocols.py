@@ -78,6 +78,15 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         # browser session is reused — still flags the session correctly.
         self._ticket_authed = bool(token)
 
+        # DEBUG (smoke-test aid; remove once verified live).
+        # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
+        from evennia.utils import logger as _logger
+        _logger.log_info(
+            f"onOpen: set self._ticket_authed = {self._ticket_authed} "
+            f"(token={token!r}, uri={getattr(self, 'http_request_uri', None)!r}, "
+            f"id={id(self):#x})"
+        )
+
         # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
         # Based on Evennia 6.0.0. See DESIGN/library-integration-risks.md.
         client_address = self._get_client_address()

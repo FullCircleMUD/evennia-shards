@@ -78,12 +78,17 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     _debug_flag = (
         getattr(session, "_ticket_authed", False) if session is not None else None
     )
+    _session_id = id(session) if session is not None else None
     self.msg(
         f"|w[evennia-shards debug]|n session._ticket_authed = {_debug_flag}",
         session=session,
     )
     logger.log_info(
-        f"at_post_login: session._ticket_authed = {_debug_flag} (account={self})"
+        f"at_post_login: session._ticket_authed = {_debug_flag} "
+        f"(account={self}, session_id={_session_id:#x})"
+        if _session_id is not None
+        else f"at_post_login: session._ticket_authed = {_debug_flag} "
+        f"(account={self}, session=None)"
     )
 
     # OOC-return signal: any session whose URL carried ?ticket= was, by
