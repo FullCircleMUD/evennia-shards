@@ -10,38 +10,9 @@ picks up our versions on cmdset rebuild.
 from evennia.commands.default.account import CmdIC, CmdOOC
 from evennia.utils import logger, search, utils
 
-from .config import ROLE_SHARD, get_role, get_router_shard_id, get_router_url, get_shard_url
+from .config import ROLE_SHARD, get_role, get_router_shard_id, get_router_url
+from .handoff import _redirect_to_character_shard
 from .tickets import create_ticket
-
-
-def _redirect_to_character_shard(account, session, character) -> str:
-    """Set ``_last_puppet``, create a ticket, send ``shard_redirect`` OOB.
-
-    Pure mechanism shared between the IC command path and the
-    at_post_login override path. The caller is responsible for
-    validating ``character.shard_id`` before calling — this helper
-    assumes a usable shard id (not None, not the ``"*"`` sentinel,
-    and resolvable via ``get_shard_url``).
-
-    Returns the redirect URL.
-    """
-    shard_id = character.shard_id
-
-    # Set _last_puppet so the destination shard's auto-puppet picks up
-    # the correct character after ticket auth.
-    account.db._last_puppet = character
-
-    token = create_ticket(
-        account.id, character.id, shard_id, client_ip=session.address,
-    )
-    url = f"{get_shard_url(shard_id)}/webclient?ticket={token}"
-    session.msg(shard_redirect=[[url], {}])
-
-    logger.log_sec(
-        f"Shard redirect: (Caller: {account}, Target: {character}, "
-        f"Shard: {shard_id}, IP: {session.address})."
-    )
-    return url
 
 
 class ShardAwareCmdIC(CmdIC):

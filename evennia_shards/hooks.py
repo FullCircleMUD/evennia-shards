@@ -15,7 +15,7 @@ Currently houses one override:
 
 from evennia.utils import logger
 
-from .commands import _redirect_to_character_shard
+from .handoff import _redirect_to_character_shard
 from .config import get_shard_url
 
 

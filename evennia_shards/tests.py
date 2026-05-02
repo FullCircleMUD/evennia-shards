@@ -1366,7 +1366,7 @@ class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
     """
 
     def test_redirect_creates_ticket_sets_last_puppet_and_sends_oob(self):
-        from evennia_shards.commands import _redirect_to_character_shard
+        from evennia_shards.handoff import _redirect_to_character_shard
 
         char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
         account = _FakeAccount(pk=7)
