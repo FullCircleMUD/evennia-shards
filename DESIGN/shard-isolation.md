@@ -2,6 +2,8 @@
 
 How the library enforces the partition between shards at the Django/Evennia level — what stops one shard's process from accidentally reading, instantiating, or writing to another shard's rows.
 
+The mechanism has two halves: **chokepoints** that catch accidental cross-shard access loudly, and a scoped **bypass** primitive (`shard_writes_allowed_for`) that legitimate cross-shard operations use to opt out. Both live in [`evennia_shards/isolation.py`](../evennia_shards/isolation.py) and share thread-local state, so the enforcement and the opt-in coordinate without cross-module plumbing.
+
 ## Invariants
 
 The library enforces two invariants:
@@ -30,7 +32,7 @@ The isolation rule is: **shards are isolated from each other; the router is trus
 | 3 | **`pre_delete` signal handler on `ObjectDB`** | Both `instance.delete()` and `qs.delete()` — Django fires `pre_delete` per affected row, even for queryset bulk deletes (it has to, for cascade handling). | Refuses if `instance.shard_id != current_shard`. |
 | 4 | **`QuerySet.update()` override** *(in a thin custom QuerySet on the `ObjectDB` manager)* | Queryset bulk updates — the one write operation Django does **not** fire signals for. | Refuses if the queryset would touch any row whose `shard_id` is neither current nor `"*"`. Loud failure, consistent with the other three chokepoints. |
 
-Plus, for ownership handoff (future): `instance.flush_from_cache()` — Evennia's idmapper exposes this; the handoff protocol will call it on the source shard after writing the new ownership.
+Plus, for ownership handoff: `instance.flush_from_cache()` — Evennia's idmapper exposes this; the handoff protocol calls it on the source shard after writing the new ownership. The legitimate writes themselves go through the bypass primitive described below.
 
 ## Why this set is sufficient
 
@@ -58,6 +60,35 @@ The general framing: the library prevents **cache poisoning, cross-shard data co
 - **No surprising consumer-side behaviour change.** Normal Evennia code — `obj.save()`, `obj.delete()`, `Character.objects.get(pk=42)`, FK lookups — works exactly as before in monolith and works correctly-scoped in shard mode.
 - **Targeted enforcement.** Each chokepoint solves one specific concern without affecting unrelated behaviour. Aggregates and reads of single rows on the current shard pay zero overhead.
 - **Clear failure mode.** Invariant violations raise visibly rather than silently producing wrong data — easy to find and fix during development.
+
+## Bypass: `shard_writes_allowed_for`
+
+The chokepoints catch the >99% of accidental cross-shard access that is the *bug* case. The library also ships a scoped opt-in for the rare *legitimate* cross-shard operations — ownership handoff, recovery tooling, data migrations — that need to write across the partition deliberately:
+
+```python
+from evennia_shards import shard_writes_allowed_for
+
+with shard_writes_allowed_for(character):
+    character.shard_id = "shard1"
+    character.location_id = remote_room_pk
+    character.save()
+# back outside — chokepoints active again
+```
+
+Inside the `with` block, all four chokepoints skip enforcement for the listed objects. Caller takes responsibility for the integrity of the writes performed inside.
+
+**How it tracks identity.** Two thread-local sets, populated by entering the bypass and torn down on exit:
+
+- `id(instance)` — used by `pre_save` and `pre_delete`, which receive the model instance directly. Works for both saved and unsaved rows (a freshly-created object has no pk yet but always has a Python id).
+- `(concrete_model, pk)` — used by `from_db` (which receives `cls` + raw row values) and `QuerySet.update` (which queries affected pks via `values_list`). Keys are stored under the *concrete* model class via `_meta.concrete_model`, so a bypass entered with a typeclass instance (a Django proxy of `ObjectDB`) matches a `from_db` call where `cls` is `ObjectDB` itself.
+
+**Scoping.** The `with` block's exit removes only the entries this call added. Nesting is safe — an outer bypass keeps its objects authorised when an inner bypass exits. On exception, cleanup still runs (the contextmanager's `finally`).
+
+**What it doesn't do.** It is *not* a "disable shard isolation globally" switch. The bypass set is keyed per-object; objects not listed remain protected, even inside the `with` block. There is no "allow all writes" mode, deliberately — the bypass should be sharp and targeted.
+
+**Composing with `transaction.atomic()`.** For multi-write operations like `cross_shard_move_to`, callers will typically combine the bypass with `transaction.atomic()` so that the writes either all commit or all roll back. The two primitives compose freely; the bypass doesn't impose any transaction semantics of its own.
+
+For ownership handoff specifically, idmapper eviction (`instance.flush_from_cache()`) is the third moving part — eviction happens after the DB writes commit, so the source process doesn't keep stale instances after ownership has transferred. The forthcoming `cross_shard_move_to` primitive composes the three (bypass + atomic + flush) into a single operation.
 
 ## Decision: bespoke chokepoints vs `django-multitenant`
 

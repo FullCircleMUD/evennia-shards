@@ -594,6 +594,200 @@ class PreSaveChokepointTests(BaseEvenniaTestCase):
 
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
+class ShardWritesAllowedForTests(BaseEvenniaTestCase):
+    """``shard_writes_allowed_for`` lifts the chokepoints, scoped to a block.
+
+    The bypass primitive is the explicit, named opt-in for legitimate
+    cross-shard operations (handoff, recovery, data migrations). Caller
+    takes responsibility for integrity inside the block.
+
+    Currently scoped to ``pre_save`` and ``pre_delete`` (the
+    instance-receiving chokepoints). ``from_db`` and ``QuerySet.update``
+    bypass support is deferred until a real caller needs it.
+    """
+
+    def test_bypass_allows_remote_shard_save(self):
+        """Inside the bypass, save with a remote shard_id succeeds."""
+        from evennia_shards import shard_writes_allowed_for
+
+        obj = ObjectDB.objects.create(db_key="b1", db_typeclass_path=TYPECLASS)
+        obj.shard_id = "shard1"
+        with shard_writes_allowed_for(obj):
+            obj.save()  # would raise without the bypass
+
+        # Verify via values_list (which bypasses from_db by design)
+        # so we read the persisted row from a remote-shard perspective
+        # without depending on the from_db bypass for this assertion.
+        persisted = ObjectDB.objects.filter(pk=obj.pk).values_list("shard_id", flat=True).first()
+        self.assertEqual(persisted, "shard1")
+
+    def test_bypass_is_scoped_to_with_block(self):
+        """After the with-block exits, chokepoints are active again."""
+        from evennia_shards import shard_writes_allowed_for
+
+        obj = ObjectDB.objects.create(db_key="b2", db_typeclass_path=TYPECLASS)
+        with shard_writes_allowed_for(obj):
+            obj.shard_id = "shard1"
+            obj.save()
+
+        # Outside the with: a fresh remote-shard write must raise.
+        obj.shard_id = "shard2"
+        with self.assertRaises(ShardIsolationError):
+            obj.save()
+
+    def test_bypass_does_not_auto_stamp_explicit_shard_id(self):
+        """An explicit shard_id inside the bypass is preserved (not re-stamped)."""
+        from evennia_shards import shard_writes_allowed_for
+
+        obj = ObjectDB.objects.create(db_key="b3", db_typeclass_path=TYPECLASS)
+        # Pre-stamped to "shard0" by the auto-stamp path on create.
+        obj.shard_id = "shard1"
+        with shard_writes_allowed_for(obj):
+            obj.save()
+        persisted = ObjectDB.objects.filter(pk=obj.pk).values_list("shard_id", flat=True).first()
+        self.assertEqual(persisted, "shard1")
+
+    def test_bypass_allows_remote_shard_delete(self):
+        """Inside the bypass, deleting a row with remote shard_id succeeds."""
+        from evennia_shards import shard_writes_allowed_for
+
+        obj = ObjectDB.objects.create(db_key="b4", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        # Forge a remote shard_id directly in DB (bypassing chokepoints
+        # via raw SQL) so the in-memory instance still claims it.
+        _forge_db_shard(pk, "shard1")
+        obj.shard_id = "shard1"
+
+        with shard_writes_allowed_for(obj):
+            obj.delete()  # would raise without the bypass
+
+        self.assertFalse(ObjectDB.objects.filter(pk=pk).exists())
+
+    def test_bypass_only_covers_listed_objects(self):
+        """An object not in the bypass list is still protected inside the block."""
+        from evennia_shards import shard_writes_allowed_for
+
+        a = ObjectDB.objects.create(db_key="b5a", db_typeclass_path=TYPECLASS)
+        b = ObjectDB.objects.create(db_key="b5b", db_typeclass_path=TYPECLASS)
+
+        a.shard_id = "shard1"
+        b.shard_id = "shard1"
+
+        with shard_writes_allowed_for(a):
+            a.save()  # allowed
+            with self.assertRaises(ShardIsolationError):
+                b.save()  # not in the bypass set — still refused
+
+    def test_nested_bypass_outer_remains_active(self):
+        """Inner ``with`` exit doesn't remove outer's bypass."""
+        from evennia_shards import shard_writes_allowed_for
+
+        a = ObjectDB.objects.create(db_key="b6a", db_typeclass_path=TYPECLASS)
+        b = ObjectDB.objects.create(db_key="b6b", db_typeclass_path=TYPECLASS)
+
+        a.shard_id = "shard1"
+        b.shard_id = "shard1"
+
+        with shard_writes_allowed_for(a):
+            with shard_writes_allowed_for(b):
+                b.save()
+            # Inner exited: b is no longer bypassed, but a still is.
+            a.save()  # outer bypass still active for a
+
+        # Outer exited: a is no longer bypassed.
+        a.shard_id = "shard2"
+        with self.assertRaises(ShardIsolationError):
+            a.save()
+
+    def test_bypass_cleaned_up_on_exception(self):
+        """If the with-block raises, the bypass is still removed on exit."""
+        from evennia_shards import shard_writes_allowed_for
+        from evennia_shards.isolation import _bypass_id_set
+
+        obj = ObjectDB.objects.create(db_key="b7", db_typeclass_path=TYPECLASS)
+        try:
+            with shard_writes_allowed_for(obj):
+                self.assertIn(id(obj), _bypass_id_set())
+                raise RuntimeError("simulated failure")
+        except RuntimeError:
+            pass
+
+        self.assertNotIn(id(obj), _bypass_id_set())
+
+    def test_bypass_allows_from_db_for_remote_shard_row(self):
+        """Inside the bypass, from_db can construct a remote-shard row.
+
+        Without the bypass, the from_db chokepoint refuses to construct
+        an ObjectDB instance from a row whose shard_id is owned by
+        another shard. With the bypass active for that pk, the
+        construction succeeds.
+
+        Note: Evennia's idmapper caches by pk; fresh ``objects.get`` on
+        a cached pk returns the cached instance without going through
+        ``from_db``. Tests for the from_db chokepoint must evict from
+        cache first so the next read actually constructs from DB.
+        """
+        from evennia_shards import shard_writes_allowed_for
+
+        obj = ObjectDB.objects.create(db_key="b8", db_typeclass_path=TYPECLASS)
+        pk = obj.pk
+        # Make the row remote-owned via raw SQL (bypasses chokepoints).
+        _forge_db_shard(pk, "shard1")
+        # Evict from idmapper so next get() goes through from_db.
+        obj.flush_from_cache(force=True)
+
+        # Outside any bypass: from_db refuses.
+        with self.assertRaises(ShardIsolationError):
+            ObjectDB.objects.get(pk=pk)
+
+        # Inside the bypass for this pk: from_db succeeds.
+        with shard_writes_allowed_for(obj):
+            reloaded = ObjectDB.objects.get(pk=pk)
+        self.assertEqual(reloaded.pk, pk)
+
+    def test_bypass_allows_qs_update_on_remote_rows(self):
+        """qs.update on bypassed rows succeeds; non-bypassed rows still raise."""
+        from evennia_shards import shard_writes_allowed_for
+
+        # Two objects, both forged to shard1.
+        a = ObjectDB.objects.create(db_key="b9a", db_typeclass_path=TYPECLASS)
+        b = ObjectDB.objects.create(db_key="b9b", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(a.pk, "shard1")
+        _forge_db_shard(b.pk, "shard1")
+        a.shard_id = "shard1"
+        b.shard_id = "shard1"
+
+        # Bulk update on both without bypass: refused.
+        with self.assertRaises(ShardIsolationError):
+            ObjectDB.objects.filter(pk__in=[a.pk, b.pk]).update(db_key="updated")
+
+        # Bypass both: update succeeds.
+        with shard_writes_allowed_for(a, b):
+            ObjectDB.objects.filter(pk__in=[a.pk, b.pk]).update(db_key="updated_via_bypass")
+
+        # Verify the rows were updated.
+        keys = list(
+            ObjectDB.objects.filter(pk__in=[a.pk, b.pk])
+            .values_list("db_key", flat=True)
+        )
+        self.assertEqual(keys, ["updated_via_bypass", "updated_via_bypass"])
+
+    def test_bypass_qs_update_partial_still_raises(self):
+        """qs.update raises if any affected row is not bypassed."""
+        from evennia_shards import shard_writes_allowed_for
+
+        a = ObjectDB.objects.create(db_key="b10a", db_typeclass_path=TYPECLASS)
+        b = ObjectDB.objects.create(db_key="b10b", db_typeclass_path=TYPECLASS)
+        _forge_db_shard(a.pk, "shard1")
+        _forge_db_shard(b.pk, "shard1")
+
+        # Bypass only `a`. b is also remote-owned but not in the bypass.
+        with shard_writes_allowed_for(a):
+            with self.assertRaises(ShardIsolationError):
+                ObjectDB.objects.filter(pk__in=[a.pk, b.pk]).update(db_key="x")
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class PreDeleteChokepointTests(BaseEvenniaTestCase):
     """pre_delete chokepoint: refuse delete of remote-shard rows.
 

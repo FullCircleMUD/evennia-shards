@@ -6,6 +6,23 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-02 — Shard isolation refactor + `shard_writes_allowed_for` bypass primitive
+
+The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_move_to` will be built on.
+
+**Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
+
+**Bypass primitive.** [`shard_writes_allowed_for(*objs)`](../evennia_shards/isolation.py) — a context manager that lifts the chokepoints for specific objects within a `with` block. Tracks identity two ways:
+
+- `id(instance)` — checked by `pre_save` and `pre_delete` (instance-receiving chokepoints). Works for unsaved rows.
+- `(concrete_model, pk)` — checked by `from_db` and `QuerySet.update` (which receive class + pk, not the instance). Normalised via `_meta.concrete_model` so a bypass entered with an Evennia typeclass instance (a Django proxy of `ObjectDB`) matches `from_db` calls where `cls` is `ObjectDB` itself.
+
+Scoped to the `with` block, nesting-safe, exception-safe (cleanup runs in `finally`). Public API, exported from `evennia_shards.__init__`.
+
+Documented in [shard-isolation.md](shard-isolation.md#bypass-shard_writes_allowed_for) — the doc gained a new "Bypass" section explaining the semantics, identity tracking, and composition with `transaction.atomic()` and `flush_from_cache()` for handoff scenarios.
+
+148 tests passing (138 prior + 10 new in `ShardWritesAllowedForTests`): allows-remote-save, scoped-cleanup, no-auto-stamp-of-explicit-id, allows-remote-delete, only-listed-objects, nested-bypass, exception-cleanup, allows-from-db, allows-qs-update, partial-qs-update-still-raises.
+
 ### 2026-05-02 — `AUTO_PUPPET_ON_LOGIN = True` path: live smoke-test green
 
 The router-side `at_post_login` override (landed 2026-05-01) verified end-to-end with live smoke testing under both auto-puppet modes. Two corrections were applied during the smoke test cycle:
@@ -224,7 +241,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 **Beyond the four-chokepoint spike** (Phase 2 / out of scope here):
 
-- Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).
+- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Bypass primitive landed 2026-05-02 — see milestone above. Cross-shard handoff (`cross_shard_move_to`) is the next planned spike.*
 - Backfill migration for legacy NULL rows.
 - ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 
