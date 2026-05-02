@@ -7,7 +7,17 @@ forces all gamedir-shaped settings (CMDSET_*, BASE_*_TYPECLASS, ...) to
 evennia.game_template fallbacks at test runtime.
 """
 import os
+import sys
 import tempfile
+
+import evennia
+
+# Evennia 6.0.0+ ships migrations that import ``typeclasses.objects``
+# (a gamedir module). Put Evennia's game_template on sys.path so the
+# import resolves without requiring a real gamedir.
+_game_template = os.path.join(os.path.dirname(evennia.__file__), "game_template")
+if _game_template not in sys.path:
+    sys.path.insert(0, _game_template)
 
 from evennia.settings_default import *  # noqa: F401, F403
 
