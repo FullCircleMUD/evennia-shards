@@ -1743,3 +1743,30 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
 
         # OOC menu rendered.
         self.assertEqual(len(account.at_look_calls), 1)
+
+    @override_settings(AUTO_PUPPET_ON_LOGIN=False)
+    def test_auto_puppet_disabled_renders_ooc_menu_unconditionally(self):
+        """AUTO_PUPPET_ON_LOGIN = False → OOC menu, no redirect.
+
+        Vanilla Evennia's at_post_login renders the OOC menu (else-branch)
+        whenever AUTO_PUPPET_ON_LOGIN is False. The override must honor
+        that setting — if the consumer has chosen "no auto-puppet," the
+        library must not auto-redirect to the last puppet's shard
+        either. Independent of _last_puppet and ticket-flag state.
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char  # would normally trigger redirect
+        session = _FakeSession()
+        # No ticket flag — purely the AUTO_PUPPET=False short-circuit path.
+
+        shard_aware_at_post_login(account, session=session)
+
+        # No ticket created, no shard_redirect OOB sent.
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+
+        # OOC menu rendered.
+        self.assertEqual(len(account.at_look_calls), 1)

@@ -73,6 +73,16 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     self._send_to_connect_channel(f"|G{self.key} connected|n")
     # ── End reproduced prelude ────────────────────────────────────────
 
+    # Honor the consumer's AUTO_PUPPET_ON_LOGIN setting. When the
+    # consumer has disabled auto-puppet, vanilla Evennia's else-branch
+    # always renders the OOC menu — none of the library's redirect
+    # logic should apply. Short-circuit here so the override stays
+    # vanilla-aligned for that case.
+    from django.conf import settings as _django_settings
+    if not getattr(_django_settings, "AUTO_PUPPET_ON_LOGIN", True):
+        self.msg(self.at_look(target=self.characters, session=session), session=session)
+        return
+
     # DEBUG (smoke-test aid; remove once verified live).
     # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
     _flags = getattr(session, "protocol_flags", {}) if session is not None else {}

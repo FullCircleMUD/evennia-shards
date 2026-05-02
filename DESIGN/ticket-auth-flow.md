@@ -136,14 +136,17 @@ Evennia's default `AUTO_PUPPET_ON_LOGIN = True` calls `account.puppet_object(ses
 
 The library replaces `DefaultAccount.at_post_login` on routers with `shard_aware_at_post_login` (in `evennia_shards/hooks.py`). The replacement reproduces Evennia's prelude verbatim (protocol flags, `logged_in` OOB, connect-channel msg), then dispatches:
 
-| Session / `_last_puppet` state | Outcome |
-|---|---|
-| `session.protocol_flags["SHARDS_TICKET_AUTHED"]` is `True` (URL contained `?ticket=`) | OOC character-select menu rendered. **No auto-redirect** — the session was just sent here from a shard's OOC command, looping back would be infinite. |
-| `_last_puppet` set with usable `shard_id` (in `SHARD_URLS`, not `"*"`) | `_redirect_to_character_shard(...)` — ticket created, OOB `shard_redirect` sent, player navigates to the correct shard. |
-| `_last_puppet` set but `shard_id` is `None` / `"*"` / not in `SHARD_URLS` | Warning logged, OOC menu rendered. Login does not fail. |
-| `_last_puppet` is `None` (fresh first login, no last char) | OOC menu rendered silently. |
+| `AUTO_PUPPET_ON_LOGIN` | Session / `_last_puppet` state | Outcome |
+|---|---|---|
+| `False` | any | **OOC character-select menu rendered** (vanilla else-branch behaviour — short-circuits before the library's redirect logic). |
+| `True` | `session.protocol_flags["SHARDS_TICKET_AUTHED"]` is `True` (URL contained `?ticket=`) | OOC menu. **No auto-redirect** — the session was just sent here from a shard's OOC command, looping back would be infinite. |
+| `True` | `_last_puppet` set with usable `shard_id` (in `SHARD_URLS`, not `"*"`) | `_redirect_to_character_shard(...)` — ticket created, OOB `shard_redirect` sent, player navigates to the correct shard. |
+| `True` | `_last_puppet` set but `shard_id` is `None` / `"*"` / not in `SHARD_URLS` | Warning logged, OOC menu rendered. Login does not fail. |
+| `True` | `_last_puppet` is `None` (fresh first login, no last char) | OOC menu rendered silently. |
 
-`_is_redirectable_character()` is the predicate that distinguishes the redirect-eligible rows from the broken-state row. The redirect itself reuses the same `_redirect_to_character_shard()` helper that `ShardAwareCmdIC` uses, so both router-side entry points (manual `ic <char>` and login-time auto-puppet) share one code path.
+The override honours the consumer's `AUTO_PUPPET_ON_LOGIN` setting as the first decision: if the consumer has disabled auto-puppet, the library applies *none* of its redirect logic and renders the OOC menu — same observable outcome as vanilla. The library's redirect machinery only activates when `AUTO_PUPPET_ON_LOGIN = True`.
+
+`_is_redirectable_character()` is the predicate that distinguishes the redirect-eligible row from the broken-state row when AUTO_PUPPET is True. The redirect itself reuses the same `_redirect_to_character_shard()` helper that `ShardAwareCmdIC` uses, so both router-side entry points (manual `ic <char>` and login-time auto-puppet) share one code path.
 
 ### The `SHARDS_TICKET_AUTHED` protocol flag
 
