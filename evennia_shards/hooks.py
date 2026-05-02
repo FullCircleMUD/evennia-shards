@@ -75,30 +75,34 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
 
     # DEBUG (smoke-test aid; remove once verified live).
     # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
-    _debug_flag = (
-        getattr(session, "_ticket_authed", False) if session is not None else None
-    )
+    _flags = getattr(session, "protocol_flags", {}) if session is not None else {}
+    _debug_flag = _flags.get("SHARDS_TICKET_AUTHED", False) if _flags else None
     _session_id = id(session) if session is not None else None
     self.msg(
-        f"|w[evennia-shards debug]|n session._ticket_authed = {_debug_flag}",
+        f"|w[evennia-shards debug]|n SHARDS_TICKET_AUTHED = {_debug_flag}",
         session=session,
     )
     logger.log_info(
-        f"at_post_login: session._ticket_authed = {_debug_flag} "
+        f"at_post_login: SHARDS_TICKET_AUTHED = {_debug_flag} "
         f"(account={self}, session_id={_session_id:#x})"
         if _session_id is not None
-        else f"at_post_login: session._ticket_authed = {_debug_flag} "
+        else f"at_post_login: SHARDS_TICKET_AUTHED = {_debug_flag} "
         f"(account={self}, session=None)"
     )
 
-    # OOC-return signal: any session whose URL carried ?ticket= was, by
-    # construction, the target of a library-issued shard→router redirect.
-    # The flag is set by ShardWebSocketClient.onOpen() based on URL
-    # presence (not validation outcome). When set, render the OOC menu
-    # without consulting _last_puppet — auto-redirecting would create
-    # an infinite shard↔router loop. Leaves _last_puppet vanilla-managed
-    # by Evennia.
-    if session is not None and getattr(session, "_ticket_authed", False):
+    # OOC-return signal: a session whose URL carried ?ticket= was, by
+    # construction, the target of a library-issued redirect to this
+    # process. On the router that is the OOC-return case from a shard;
+    # we render the OOC menu and skip the auto-puppet decision so we
+    # don't bounce the player straight back to the shard they just
+    # left (which would be an infinite loop). Flag is set in
+    # ShardWebSocketClient.onOpen() based on URL presence and stored
+    # in protocol_flags so it survives the Portal→Server AMP sync.
+    # Leaves Evennia's _last_puppet semantics untouched.
+    if (
+        session is not None
+        and session.protocol_flags.get("SHARDS_TICKET_AUTHED", False)
+    ):
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 

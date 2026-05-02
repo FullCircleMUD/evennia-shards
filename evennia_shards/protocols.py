@@ -66,26 +66,11 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
            - Router: fall through to normal login screen.
         """
         # Extract ticket token from URL (if any) but don't validate yet.
+        # The library-namespaced "arrived with ticket" flag is stored
+        # in protocol_flags further down, alongside the other Evennia
+        # protocol_flags assignments — that placement is required so
+        # the value crosses the Portal→Server AMP sync.
         token = self._extract_ticket_token()
-
-        # Flag this session as having arrived via a URL containing a ticket
-        # parameter, regardless of whether validation succeeds. Used by the
-        # router's at_post_login override as the OOC-return signal — any
-        # session with this flag was, by construction, the target of a
-        # library-issued shard→router redirect. Captures URL presence (not
-        # validation outcome) so a page refresh while at the OOC menu —
-        # where the stale token in the URL won't re-validate but the
-        # browser session is reused — still flags the session correctly.
-        self._ticket_authed = bool(token)
-
-        # DEBUG (smoke-test aid; remove once verified live).
-        # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
-        from evennia.utils import logger as _logger
-        _logger.log_info(
-            f"onOpen: set self._ticket_authed = {self._ticket_authed} "
-            f"(token={token!r}, uri={getattr(self, 'http_request_uri', None)!r}, "
-            f"id={id(self):#x})"
-        )
 
         # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
         # Based on Evennia 6.0.0. See DESIGN/library-integration-risks.md.
@@ -139,6 +124,41 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         self.protocol_flags["TRUECOLOR"] = True
         self.protocol_flags["XTERM256"] = True
         self.protocol_flags["ANSI"] = True
+
+        # Library-namespaced flag: True iff this WebSocket connection
+        # arrived with ?ticket= present in its URL. Captures URL
+        # presence, not validation outcome — so a page refresh on a
+        # redirect-target URL (where a stale token won't re-validate
+        # but the browser session is reused) still carries the flag
+        # forward.
+        #
+        # This onOpen runs in the Portal of every non-monolith role,
+        # so the flag is set on shard sessions and router sessions
+        # alike. Currently, the only consumer is the router-side
+        # at_post_login override (evennia_shards/hooks.py), which
+        # reads it as the OOC-return signal to skip auto-puppet on
+        # an inbound redirected session. Other role-specific consumers
+        # may read the flag in the future and should interpret it in
+        # the context of their role and the prevailing redirect
+        # topology — e.g. shard↔shard transfers, if introduced.
+        #
+        # Stored in protocol_flags (rather than as an attribute on
+        # `self`) so the value crosses the Portal→Server AMP sync.
+        # Plain attributes on `self` are dropped at the boundary —
+        # only entries listed in settings.SESSION_SYNC_ATTRS survive,
+        # and protocol_flags is the conventional carrier for this
+        # kind of session-level metadata.
+        self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)
+
+        # DEBUG (smoke-test aid; remove once verified live).
+        # Marker for grep: SHARDS-DEBUG-TICKET-FLAG
+        from evennia.utils import logger as _logger
+        _logger.log_info(
+            f"onOpen: protocol_flags['SHARDS_TICKET_AUTHED'] = "
+            f"{self.protocol_flags['SHARDS_TICKET_AUTHED']} "
+            f"(token={token!r}, uri={getattr(self, 'http_request_uri', None)!r}, "
+            f"id={id(self):#x})"
+        )
 
         # Watch for dead links.
         self.transport.setTcpKeepAlive(1)
