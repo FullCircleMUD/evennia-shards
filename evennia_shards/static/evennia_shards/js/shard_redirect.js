@@ -18,6 +18,39 @@
  * for context.
  */
 $(document).ready(function () {
+    // Track whether the next connection_close event is part of a
+    // deliberate cross-shard transfer (vs. a real disconnect). Set
+    // true just before we close the old WebSocket; consumed by the
+    // emit wrapper below on the first connection_close after.
+    var deliberate_transfer = false;
+    var deliberate_transfer_timeout = null;
+
+    // Wrap Evennia.emitter.emit so that connection_close events
+    // arising from a deliberate cross-shard transfer are swallowed
+    // silently — without this, webclient_gui's onConnectionClose
+    // prints "The connection was closed or lost." on every
+    // transition, which is misleading (the connection wasn't lost,
+    // it was deliberately swapped). Plugins' onConnectionClose
+    // hooks are also intentionally skipped during deliberate
+    // transfers — the page is still alive, just on a different
+    // connection, so close-time cleanup shouldn't run.
+    var orig_emit = Evennia.emitter.emit;
+    Evennia.emitter.emit = function (cmdname, args, kwargs) {
+        if (cmdname === "connection_close" && deliberate_transfer) {
+            deliberate_transfer = false;
+            if (deliberate_transfer_timeout) {
+                clearTimeout(deliberate_transfer_timeout);
+                deliberate_transfer_timeout = null;
+            }
+            console.log(
+                "[evennia-shards] suppressing connection_close " +
+                    "(deliberate cross-shard transfer)"
+            );
+            return;
+        }
+        return orig_emit.apply(this, arguments);
+    };
+
     Evennia.emitter.on("shard_redirect", function (args, kwargs) {
         var target_url = args[0];
         if (!target_url) {
@@ -26,11 +59,19 @@ $(document).ready(function () {
         }
         console.log("[evennia-shards] WS-level redirect to: " + target_url);
 
-        // Close the current connection. This will trigger the standard
-        // 'connection_close' event, which webclient_gui handles with a
-        // brief "connection was closed or lost" message. Tolerable for
-        // PoC; can be suppressed later by stashing/restoring the
-        // emitter's connection_close listener.
+        // Mark this transfer as deliberate so the imminent
+        // connection_close event (from the old socket's onclose) is
+        // suppressed. Safety timeout clears the flag after 5s in
+        // case the old socket never fires its close event — without
+        // this, a stuck flag could accidentally swallow a real
+        // disconnect that happens later.
+        deliberate_transfer = true;
+        deliberate_transfer_timeout = setTimeout(function () {
+            deliberate_transfer = false;
+            deliberate_transfer_timeout = null;
+        }, 5000);
+
+        // Close the current connection.
         var old_conn = Evennia.connection;
         try {
             if (old_conn && typeof old_conn.close === "function") {
