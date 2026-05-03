@@ -25,17 +25,20 @@ DATABASES["default"]["NAME"] = os.path.join(_CONF_DIR, "..", "evennia.db3")
 # Add evennia_shards to all sharded instances.
 INSTALLED_APPS = list(INSTALLED_APPS) + ["evennia_shards"]
 
-# Router webclient base URL (used by shards for OOC redirect).
+# Router WebSocket URL (used by shards for OOC redirect).
+# The library does WebSocket-level redirects: when a player crosses a
+# shard boundary, the JS in the webclient closes the current WebSocket
+# and opens a new one to this URL with ?ticket=TOKEN appended.
 # In production, set via environment variable.
-ROUTER_URL = "http://localhost:4001"
+ROUTER_URL = "ws://localhost:4002/"
 
-# Map of shard IDs to their webclient base URLs.
-# Used by get_shard_url() to build IC redirect URLs.
-# Shard IDs are flexible — name them to match your game world.
-# In production, set these via environment variables.
+# Map of shard IDs to their WebSocket URLs.
+# Used by get_shard_url() to build IC redirect URLs (same shape as
+# ROUTER_URL above). Shard IDs are flexible — name them to match
+# your game world. In production, set these via environment variables.
 SHARD_URLS = {
-    "shard0": "http://localhost:4011",
-    "shard1": "http://localhost:4021",
+    "shard0": "ws://localhost:4012/",
+    "shard1": "ws://localhost:4022/",
 }
 
 # Telnet disabled for all sharded instances — ticket-based auth is

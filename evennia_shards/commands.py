@@ -167,7 +167,7 @@ class ShardAwareCmdOOC(CmdOOC):
             account.id, character_id, get_router_shard_id(),
             client_ip=session.address,
         )
-        url = f"{get_router_url()}/webclient?ticket={token}"
+        url = f"{get_router_url()}?ticket={token}"
         session.msg(shard_redirect=[[url], {}])
         self.msg("Redirecting to router...")
 

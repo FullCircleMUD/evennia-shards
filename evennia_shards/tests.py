@@ -66,11 +66,11 @@ class ConfigAccessorTests(BaseEvenniaTestCase):
 class ShardUrlAccessorTests(BaseEvenniaTestCase):
     """Tests for the get_shard_url accessor."""
 
-    @override_settings(SHARD_URLS={"shard0": "http://localhost:4001"})
+    @override_settings(SHARD_URLS={"shard0": "ws://localhost:4001/"})
     def test_returns_url_for_known_shard(self):
-        self.assertEqual(get_shard_url("shard0"), "http://localhost:4001")
+        self.assertEqual(get_shard_url("shard0"), "ws://localhost:4001/")
 
-    @override_settings(SHARD_URLS={"shard0": "http://localhost:4001"})
+    @override_settings(SHARD_URLS={"shard0": "ws://localhost:4001/"})
     def test_raises_key_error_for_unknown_shard(self):
         with self.assertRaises(KeyError):
             get_shard_url("shard99")
@@ -83,23 +83,23 @@ class ShardUrlAccessorTests(BaseEvenniaTestCase):
 
     @override_settings(
         SHARD_URLS={
-            "overworld": "http://overworld.example.com",
-            "dungeons": "http://dungeons.example.com",
-            "pvp_arena": "http://pvp.example.com",
+            "overworld": "ws://overworld.example.com/",
+            "dungeons": "ws://dungeons.example.com/",
+            "pvp_arena": "ws://pvp.example.com/",
         }
     )
     def test_multiple_shards_flexible_names(self):
-        self.assertEqual(get_shard_url("overworld"), "http://overworld.example.com")
-        self.assertEqual(get_shard_url("dungeons"), "http://dungeons.example.com")
-        self.assertEqual(get_shard_url("pvp_arena"), "http://pvp.example.com")
+        self.assertEqual(get_shard_url("overworld"), "ws://overworld.example.com/")
+        self.assertEqual(get_shard_url("dungeons"), "ws://dungeons.example.com/")
+        self.assertEqual(get_shard_url("pvp_arena"), "ws://pvp.example.com/")
 
 
 class RouterUrlAccessorTests(BaseEvenniaTestCase):
     """Tests for the get_router_url accessor."""
 
-    @override_settings(ROUTER_URL="http://router.example.com")
+    @override_settings(ROUTER_URL="ws://router.example.com/")
     def test_returns_configured_url(self):
-        self.assertEqual(get_router_url(), "http://router.example.com")
+        self.assertEqual(get_router_url(), "ws://router.example.com/")
 
     @override_settings(ROUTER_URL=None)
     def test_raises_value_error_when_not_configured(self):
@@ -933,8 +933,8 @@ class _FakeCaller:
 @override_settings(
     SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
     SHARD_URLS={
-        "shard0": "http://localhost:4011",
-        "shard1": "http://localhost:4021",
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
     },
 )
 class CmdShardCheckTests(BaseEvenniaTestCase):
@@ -977,8 +977,8 @@ class CmdShardCheckTests(BaseEvenniaTestCase):
 @override_settings(
     SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
     SHARD_URLS={
-        "shard0": "http://localhost:4011",
-        "shard1": "http://localhost:4021",
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
     },
 )
 class CmdCrossShardDigTests(BaseEvenniaTestCase):
@@ -1052,8 +1052,8 @@ class AdminCommandAutoInstallTests(BaseEvenniaTestCase):
 @override_settings(
     SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
     SHARD_URLS={
-        "shard0": "http://localhost:4011",
-        "shard1": "http://localhost:4021",
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
     },
 )
 class CrossShardCharacterMoveTests(BaseEvenniaTestCase):
@@ -2163,7 +2163,7 @@ def _make_cmd(args="", role=ROLE_ROUTER, shard_id=ROLE_ROUTER, account=None,
 
 @override_settings(
     SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
-    SHARD_URLS={"shard0": "http://localhost:4011"},
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
 )
 class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
     """Direct tests for the _redirect_to_character_shard helper.
@@ -2197,7 +2197,7 @@ class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
         # OOB shard_redirect sent on the session.
         self.assertIn("shard_redirect", session.oob_messages)
         oob_url = session.oob_messages["shard_redirect"][0][0]
-        self.assertIn("http://localhost:4011/webclient?ticket=", oob_url)
+        self.assertIn("ws://localhost:4011/?ticket=", oob_url)
         self.assertIn(ticket.token, oob_url)
 
         # Returned URL matches the OOB URL.
@@ -2206,7 +2206,7 @@ class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
 
 @override_settings(
     SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0",
-    SHARD_URLS={"shard0": "http://localhost:4011"},
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
 )
 class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
     """IC command on a shard tells the player to return to the router."""
@@ -2226,7 +2226,7 @@ class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
 
 @override_settings(
     SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
-    SHARD_URLS={"shard0": "http://localhost:4011"},
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
 )
 class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
     """IC command on the router creates a ticket and redirects."""
@@ -2250,7 +2250,7 @@ class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
         self.assertIn("shard_redirect", session.oob_messages)
         redirect_args = session.oob_messages["shard_redirect"]
         url = redirect_args[0][0]
-        self.assertIn("http://localhost:4011/webclient?ticket=", url)
+        self.assertIn("ws://localhost:4011/?ticket=", url)
         self.assertIn(ticket.token, url)
 
     def test_router_sets_last_puppet(self):
@@ -2339,7 +2339,7 @@ def _make_ooc_cmd(account=None, session=None, puppet=None):
 
 @override_settings(
     SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0",
-    ROUTER_URL="http://localhost:4001",
+    ROUTER_URL="ws://localhost:4001/",
 )
 class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
     """OOC command on a shard creates a ticket and redirects to the router."""
@@ -2361,7 +2361,7 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         self.assertIn("shard_redirect", session.oob_messages)
         redirect_args = session.oob_messages["shard_redirect"]
         url = redirect_args[0][0]
-        self.assertIn("http://localhost:4001/webclient?ticket=", url)
+        self.assertIn("ws://localhost:4001/?ticket=", url)
         self.assertIn(ticket.token, url)
 
     def test_shard_no_puppet_with_last_puppet_redirects(self):
@@ -2441,7 +2441,7 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
 
 @override_settings(
     SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER,
-    SHARD_URLS={"shard0": "http://localhost:4011"},
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
 )
 class AtPostLoginRouterTests(BaseEvenniaTestCase):
     """Direct tests for shard_aware_at_post_login on routers.

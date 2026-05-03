@@ -8,9 +8,9 @@ How the library's configuration items are declared, read, and defaulted.
 |---|---|---|---|
 | `SHARDS_ROLE` | `str` | `ROLE_MONOLITH` | One of `ROLE_MONOLITH`, `ROLE_ROUTER`, `ROLE_SHARD` (string constants exported by the library: `"monolith"`, `"router"`, `"shard"`). Selects which role this Evennia process plays. |
 | `SHARD_ID` | `str \| None` | `None` | Identifier for this shard. Consumer-chosen — descriptive names like `"overworld"` or `"underdark"` are fine. Required when role is `ROLE_SHARD`. For `ROLE_ROUTER`, must equal `get_router_shard_id()` (library mandate). |
-| `ROUTER_URL` | `str \| None` | `None` | Webclient base URL for the router. Used by shards for OOC redirect. |
+| `ROUTER_URL` | `str \| None` | `None` | **WebSocket** URL for the router (e.g. `"ws://router.example.com/"`, `"wss://..."`). Used by shards for OOC redirect: the player's webclient closes its current WebSocket and opens a new one to this URL with `?ticket=TOKEN` appended. |
 | `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
-| `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to webclient base URLs. Used by router for IC redirect. Shard IDs are flexible — name them to match your game world. |
+| `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to **WebSocket** URLs (e.g. `"ws://shard0.example.com/"`). Used by the router for IC redirect: same connection-level swap as `ROUTER_URL`, in the other direction. Shard IDs are flexible — name them to match your game world. |
 
 ## How they flow
 
@@ -73,21 +73,25 @@ The library also adds a `shard_id` column to `ObjectDB` (and likely other partit
 
 The router and shards have separate URL settings, reflecting their different roles in the redirect flow:
 
-- **`ROUTER_URL`** — single string. Shards use `get_router_url()` to build OOC redirect URLs (sending players back to the router).
-- **`SHARD_URLS`** — dict mapping shard IDs to URLs. The router uses `get_shard_url(shard_id)` to build IC redirect URLs (sending players to a shard).
+- **`ROUTER_URL`** — single string, the router's WebSocket URL. Shards use `get_router_url()` to build OOC redirect URLs (sending players back to the router).
+- **`SHARD_URLS`** — dict mapping shard IDs to WebSocket URLs. The router uses `get_shard_url(shard_id)` to build IC redirect URLs (sending players to a shard).
 
 ```python
-ROUTER_URL = "http://router.example.com"
+ROUTER_URL = "ws://router.example.com/"
 SHARD_URLS = {
-    "overworld": "http://overworld.example.com",
-    "dungeons": "http://dungeons.example.com",
-    "pvp_arena": "http://pvp.example.com:5001",
+    "overworld": "ws://overworld.example.com/",
+    "dungeons": "ws://dungeons.example.com/",
+    "pvp_arena": "wss://pvp.example.com/",
 }
 ```
 
-Shard IDs are flexible — name them to match your game world. Each instance's `SHARD_ID` must match a key in `SHARD_URLS`. In production, URLs are typically set via environment variables.
+These are **WebSocket URLs** (`ws://` or `wss://`), not HTTP URLs — the library does *connection-level* redirects: when a player crosses a shard boundary, the JS in the loaded webclient page closes its current WebSocket and opens a new one to the configured target URL with `?ticket=TOKEN` appended. The page itself is not reloaded; UI state, scrollback, plugins all persist across the transition.
 
-The IC routing decision comes from the character's game state: `character.location or character.home` → room's `shard_id` → `get_shard_url(shard_id)`. Returning players go back to where they were; new characters land in their home room.
+This is the same pattern that telnet/SSH/MUD-client redirect would use (close the connection, open a new one to the target host:port with auth) — the WebSocket URL is just one expression of it. The HTTP URL of a shard or router is not the library's concern; whether the consumer also serves an HTTP webclient is a deployment decision.
+
+Shard IDs are flexible — name them to match your game world. Each shard instance's `SHARD_ID` must match a key in `SHARD_URLS`. In production, URLs are typically set via environment variables.
+
+The IC routing decision comes from the character's game state: `character.location or character.home` → room's `shard_id` → `get_shard_url(shard_id)`. Returning players go back to where they were; new characters land in their start location.
 
 ## Per-shard home room
 

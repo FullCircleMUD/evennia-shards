@@ -364,7 +364,12 @@ def _redirect_to_character_shard(account, session, character) -> str:
     ``None``, not the ``"*"`` sentinel, and resolvable via
     ``get_shard_url``).
 
-    Returns the redirect URL.
+    The OOB payload is a WebSocket URL with the ticket as a query
+    parameter. The client closes its current WebSocket and opens a
+    new one to this URL; the destination shard's ``onOpen`` validates
+    the ticket and auto-logs-in the session.
+
+    Returns the redirect URL (the WebSocket URL with ticket).
     """
     shard_id = character.shard_id
 
@@ -375,7 +380,7 @@ def _redirect_to_character_shard(account, session, character) -> str:
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,
     )
-    url = f"{get_shard_url(shard_id)}/webclient?ticket={token}"
+    url = f"{get_shard_url(shard_id)}?ticket={token}"
     session.msg(shard_redirect=[[url], {}])
 
     logger.log_sec(
