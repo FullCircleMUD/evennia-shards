@@ -22,6 +22,7 @@ from .messagebus import (
     send_message,
     start_message_bus,
 )
+from .messaging import send_cross_shard_message
 from .tickets import create_ticket, delete_ticket, get_ticket
 
 __version__ = "0.0.1"
@@ -42,6 +43,7 @@ __all__ = [
     "MessageHandler",
     "process_inbox",
     "start_message_bus",
+    "send_cross_shard_message",
     "create_ticket",
     "get_ticket",
     "delete_ticket",

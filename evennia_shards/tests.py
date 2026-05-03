@@ -2778,3 +2778,185 @@ class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
         self.assertEqual(recorder["kwargs"]["typeclass"], "my.path")
         self.assertEqual(recorder["kwargs"]["character_typeclass"], "my.path")
         self.assertIs(recorder["kwargs"]["extra"], sentinel)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
+class SendCrossShardMessageTests(BaseEvenniaTestCase):
+    """Sender-side helper built on top of the ``obj_msg`` primitive.
+
+    Exercises the four behaviours of ``send_cross_shard_message``:
+    local-vs-remote dispatch, typeclass filter, single ``.values_list``
+    DB read, and validation rejection on target-gone or typeclass
+    mismatch. The receiver-side ``obj_msg`` handler is already tested
+    in ``MessageHandlerTests``; these tests verify only the sender
+    behaviour and the bus-row shape it produces.
+    """
+
+    def _make_target(self, shard_id="shard0", typeclass=TYPECLASS):
+        """Create an ObjectDB row with an explicit shard_id."""
+        target = ObjectDB.objects.create(
+            db_key="target", db_typeclass_path=typeclass,
+        )
+        # The pre_save chokepoint auto-stamps to the current SHARD_ID
+        # ("shard0" in this class). For tests that need the row on a
+        # different shard, forge it via raw SQL (matches the existing
+        # _forge_db_shard pattern used elsewhere in this file).
+        if shard_id != "shard0":
+            _forge_db_shard(target.pk, shard_id)
+        return target
+
+    def test_local_target_calls_msg_directly_no_bus_row(self):
+        """Target on this shard → direct .msg call, no Message inserted."""
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard0")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "local hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [{"text": "local hi"}])
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_global_star_target_treated_as_local(self):
+        """shard_id="*" rows are owned by every shard; deliver locally."""
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="*")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "global hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [{"text": "global hi"}])
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_remote_target_inserts_obj_msg_bus_row(self):
+        """Target on another shard → obj_msg bus row, no local .msg call."""
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard1")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "remote hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        # No local .msg call.
+        self.assertEqual(captured, [])
+        # Exactly one bus row, addressed to the target's shard with the
+        # primitive's expected payload shape.
+        msgs = list(Message.objects.all())
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].kind, "obj_msg")
+        self.assertEqual(msgs[0].to_shard, "shard1")
+        self.assertEqual(msgs[0].from_shard, "shard0")
+        self.assertEqual(
+            msgs[0].payload, {"pk": target.pk, "kwargs": {"text": "remote hi"}}
+        )
+
+    def test_target_gone_returns_false_no_bus_row(self):
+        """Non-existent pk → return False, no bus row, no exception."""
+        from evennia_shards import send_cross_shard_message
+
+        result = send_cross_shard_message(999_999, {"text": "ghost"})
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_typeclass_mismatch_returns_false_no_bus_row(self):
+        """Target whose typeclass isn't a subclass of filter → reject."""
+        from evennia.objects.objects import DefaultCharacter
+
+        from evennia_shards import send_cross_shard_message
+
+        # DefaultObject is NOT a subclass of DefaultCharacter (DC inherits
+        # from DO, not the other way around). Filter rejects.
+        target = self._make_target(
+            shard_id="shard1",
+            typeclass="evennia.objects.objects.DefaultObject",
+        )
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "hi"}, target_typeclass=DefaultCharacter,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    @override_settings(
+        SHARD_ID="shard0",
+        SHARDS_ROLE=ROLE_SHARD,
+        BASE_CHARACTER_TYPECLASS="evennia.objects.objects.DefaultObject",
+    )
+    def test_default_typeclass_resolves_from_settings_at_call_time(self):
+        """target_typeclass=None → class_from_module(BASE_CHARACTER_TYPECLASS).
+
+        Resolved at call time so test override_settings (and consumer
+        config churn) is picked up without re-importing the helper.
+        """
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard1")  # DefaultObject
+
+        result = send_cross_shard_message(target.pk, {"text": "hi"})
+
+        self.assertTrue(result)
+        self.assertEqual(Message.objects.count(), 1)
+
+    def test_kwargs_pass_through_to_remote_payload(self):
+        """Multi-key kwargs (text + OOB + options) flow through unchanged."""
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard1")
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1", "ticket": "abc"},
+            "options": {"raw": True},
+        }
+        result = send_cross_shard_message(
+            target.pk, kwargs, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        msg = Message.objects.first()
+        self.assertEqual(msg.payload["kwargs"], kwargs)
+
+    def test_kwargs_pass_through_to_local_msg(self):
+        """Multi-key kwargs flow through to local .msg() unchanged."""
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard0")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1"},
+            "options": {"raw": True},
+        }
+        result = send_cross_shard_message(
+            target.pk, kwargs, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [kwargs])
