@@ -6,6 +6,14 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-03 — Inventory recursion + rename to `cross_shard_character_move`
+
+Renamed `cross_shard_move_to` → `cross_shard_character_move` to reflect that the primitive is character-shaped (sessions, puppet tags, redirects). Added recursive inventory movement: all contents (items, bags-within-bags, arbitrarily nested) have their `shard_id` bulk-updated and are evicted from the idmapper in the same atomic block as the character. Contents' `db_location_id` is unchanged — parent pk doesn't change across shards. Global (`"*"`) items are left alone.
+
+**Technical approach:** `_collect_all_contents(root_pk)` does breadth-first pk traversal via `values_list` (avoids `from_db`). Single `qs.update` for contents — no bypass needed since items have `shard_id == current_shard`. Idmapper eviction uses `flush_from_cache(force=True)` on cached instances with direct dict-pop fallback.
+
+170 tests passing (164 prior + 6 new inventory tests). Live smoke-tested: flat inventory, nested containers (char → bag → gem), round-trips across shards.
+
 ### 2026-05-03 — Pre-emptive session detach: zombie session fix for cross-shard round-trips
 
 Live smoke testing of `cross_shard_character_move` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
@@ -47,9 +55,9 @@ Live smoke testing of `cross_shard_character_move` (shard0 → shard1 → shard0
 
 164 tests passing.
 
-### 2026-05-02 — `cross_shard_character_move` spike 1: single-object move (unit-tested)
+### 2026-05-02 — `cross_shard_character_move` spike 1: character move (unit-tested)
 
-The first slice of the cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Spike 1 scope: move a single `ObjectDB`-derived row across shards, no recursion through `obj.contents`, with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
+The cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Initial scope: move a single character row across shards (inventory recursion added 2026-05-03 — see milestone above), with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
 
 The primitive composes:
 
@@ -65,7 +73,7 @@ Three findings worth recording for future work:
 
 156 tests passing (148 prior + 8 new in `CrossShardCharacterMoveTests`): no-sessions, one-session, multi-session, target-shard-not-configured, target-location-doesn't-exist, target-location-on-wrong-shard, atomic-rollback-on-save-failure, session-redirect-failure-captured.
 
-**Deferred to subsequent spikes:** recursion through `obj.contents` (spike 3), generalisation to non-character objects (spike 2 — same machinery, no session redirect needed), live smoke testing with real router+shard processes, contrib-layer typeclasses (`CrossShardExit`, `CrossShardCmdTeleport`).
+**Deferred:** generalisation to non-character objects (same machinery, no session redirect needed), contrib-layer typeclasses (`CrossShardExit`, `CrossShardCmdTeleport`).
 
 ### 2026-05-02 — Shard isolation refactor + `shard_writes_allowed_for` bypass primitive
 
