@@ -15,8 +15,8 @@ examples/
                     demo_shard0's code and settings, but has its own
                     server/ directory for PID files and logs.
 
-  demo_shard1/      Symlinked instance for a second shard (not active
-                    by default — add "shard1" to SHARD_URLS when ready).
+  demo_shard1/      Symlinked instance for a second shard. Same
+                    pattern as demo_router. Active in SHARD_URLS.
 ```
 
 ### What's symlinked vs real
@@ -31,6 +31,29 @@ Each symlinked instance (`demo_router`, `demo_shard1`) contains:
 This means PID files and logs are per-instance (no collisions), while
 game code and settings are shared (edit once, applies everywhere).
 
+### Windows note (symlink limitation)
+
+The symlinked layout was developed and tested on macOS. On Windows the
+symlinks generally do not work end-to-end — git's checkout of symlinks
+on Windows depends on `core.symlinks` plus user permissions, and even
+when the links materialise, Evennia's `os.path.realpath`-based settings
+resolution can behave inconsistently on Windows-shortcut-style links.
+
+Workaround for Windows development: instead of relying on symlinks,
+**copy the contents of `demo_shard0`** into `demo_router` and
+`demo_shard1`. Keep the per-instance `server/__init__.py` and `logs/`
+in place so PID files and logs stay separate. The settings files
+already exist for each role inside `demo_shard0/server/conf/`
+(`settings_router.py`, `settings_shard0.py`, `settings_shard1.py`); a
+copied tree gives each instance its own physical copy of those files
+to point at via `--settings`.
+
+The trade-off is that "edit once, applies everywhere" no longer holds —
+changes to game code under `demo_shard0` need to be propagated by hand
+to the copied instances. Acceptable for smoke testing; for ongoing
+multi-instance development on Windows, a Docker-based setup or a
+small sync helper would be worth the time.
+
 ### Shared database
 
 All instances share the same SQLite database at
@@ -40,10 +63,28 @@ to resolve symlinks back to the real conf directory.
 
 ## Quick start
 
-### 1. First-time setup
+### 1. Migrate and start shard0 first
 
-From the `demo_shard0` directory (shard0 must boot first so Limbo #2
-gets stamped with `shard_id="shard0"`):
+Boot order matters. The first instance to run `evennia migrate` and
+`evennia start` is the one whose initial-setup runs — which is what
+creates the bootstrap rows (`#1` superuser character, `#2` Limbo).
+Those rows get auto-stamped by the `pre_save` chokepoint with
+whatever shard the booting process is, so **whichever shard runs
+first owns Limbo**.
+
+Chargen happens on the **router** (it's an OOC operation), so the
+**router's** `START_LOCATION` is what determines where new characters
+spawn. The library's chargen wrapper looks up that row's `shard_id`
+and stamps the new character to match. Per-shard `START_LOCATION`
+settings are not consulted in the sharded path — change the router's
+`START_LOCATION` (in `settings_router.py`) to point at a room on the
+shard you want new players to spawn on.
+
+We boot `shard0` first so Limbo (`#2`) lands on `shard0`, and the
+router's default `START_LOCATION = "#2"` resolves to a `shard0`-owned
+row — meaning new players land on `shard0`. Point the router's
+`START_LOCATION` at a room on a different shard to change where
+chargen spawns to.
 
 ```bash
 cd examples/demo_shard0
@@ -51,24 +92,39 @@ evennia migrate --settings settings_shard0
 evennia start --settings settings_shard0
 ```
 
-This will prompt you to create a superuser, run initial setup, and
-start shard0 on its ports (web 4011, websocket 4012).
+The migrate step prompts for superuser creation and runs initial
+setup. shard0 then listens on web 4011 / websocket 4012.
 
-### 2. Start the router
+### 2. Start shard1
 
-In a separate terminal:
+The DB is shared, so shard1 only needs `evennia start` — no
+separate migration. In a new terminal:
+
+```bash
+cd examples/demo_shard1
+evennia start --settings settings_shard1
+```
+
+shard1 listens on web 4021 / websocket 4022.
+
+### 3. Start the router
+
+In a third terminal:
 
 ```bash
 cd examples/demo_router
 evennia start --settings settings_router
 ```
 
-The router starts on default ports (web 4001, websocket 4002).
+The router listens on web 4001 / websocket 4002.
 
-### 3. Connect
+### 4. Connect
 
-- **Router webclient**: http://localhost:4001
-- **Shard0 webclient**: http://localhost:4011
+- **Router webclient**: http://localhost:4001 — log in here. After `@ic`
+  you're redirected to the character's owning shard.
+- **Shard0 webclient**: http://localhost:4011 (direct shard access; for
+  smoke testing only, normal play goes through the router).
+- **Shard1 webclient**: http://localhost:4021 (same).
 
 ### Stopping
 
@@ -77,6 +133,7 @@ From each instance's directory:
 ```bash
 evennia stop --settings settings_router    # from demo_router/
 evennia stop --settings settings_shard0    # from demo_shard0/
+evennia stop --settings settings_shard1    # from demo_shard1/
 ```
 
 ## Port assignments
