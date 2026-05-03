@@ -11,7 +11,7 @@ For the design wiki, read [DESIGN/INDEX.md](DESIGN/INDEX.md).
 
 ## Project status
 
-**Pre-PoC.** The library scaffold exists but no library code is written yet. Phase 1 (router + 1 shard) is the next milestone — see the original brainstorm at [DESIGN/archive/evennia-shards-HANDOVER.md](DESIGN/archive/evennia-shards-HANDOVER.md#phased-poc-plan) for the phasing as originally sketched. The project's current decisions extend and refine that brainstorm; it is archived as historical context, not as a canonical spec.
+**Working MVP, not production-ready.** The four shard-isolation chokepoints, ticket-based WebSocket auth, cross-shard character + inventory move, chargen wrapper, and primitive cross-shard messaging (`obj_msg` / `account_msg`) are all shipped and live-smoke-verified end-to-end against three demo gamedirs. The original PoC phasing in the [archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#phased-poc-plan) is historical context; for the current state read [DESIGN/progress.md](DESIGN/progress.md), which is the running log of milestones with links to evidence (test results, design docs, code changes). The library has not yet been exercised by a real consumer game.
 
 ## Where to read first
 

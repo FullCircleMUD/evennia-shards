@@ -69,35 +69,37 @@ class EvenniaShardsConfig(AppConfig):
             #   shard_id in the DB while this process's Account Attribute
             #   cache still holds the old Python object.
             from evennia.accounts.accounts import DefaultAccount
+            from evennia.utils.utils import class_from_module
+
+            # Resolve the consumer-configured account class once. Used
+            # for the chargen wrapper install (which patches it
+            # directly so consumer overrides compose) and for
+            # detecting at_post_login overrides that would shadow the
+            # library's DefaultAccount patch (the at_post_login patch
+            # itself stays on DefaultAccount — see
+            # library-integration-risks.md for the asymmetry rationale).
+            from .hooks import warn_if_at_post_login_overridden
+
+            AccountCls = class_from_module(settings.BASE_ACCOUNT_TYPECLASS)
+            warn_if_at_post_login_overridden(AccountCls, get_role())
 
             if get_role() == ROLE_ROUTER:
                 from .hooks import shard_aware_at_post_login
 
                 DefaultAccount.at_post_login = shard_aware_at_post_login
 
-                # Wrap create_character on the router so newly
-                # created characters get their shard_id stamped from the
-                # start-location row's shard_id (instead of being left
-                # as auto-stamped "router", which is not redirectable).
-                #
-                # Patch the consumer-configured account typeclass (via
-                # BASE_ACCOUNT_TYPECLASS), not DefaultAccount directly:
-                # if the consumer subclasses DefaultAccount and overrides
-                # create_character, patching the base would be shadowed
-                # by their override and our wrapper would never run.
-                # Resolving the configured class and reading
-                # AccountCls.create_character lets MRO pick up either
-                # the consumer's override or the inherited
-                # DefaultAccount method, whichever is in effect.
-                # Same pattern as protocols.py uses for
+                # Wrap create_character on the consumer's configured
+                # account class so newly created characters get their
+                # shard_id stamped from the start-location row's
+                # shard_id (instead of being left as auto-stamped
+                # "router", which is not redirectable). Wrapping
+                # AccountCls (rather than DefaultAccount) lets a
+                # consumer override of create_character compose with
+                # the library's stamp via the wrap pattern. Same
+                # pattern as protocols.py uses for
                 # WEBSOCKET_PROTOCOL_CLASS.
-                from evennia.utils.utils import class_from_module
-
                 from .chargen import make_shard_aware_create_character
 
-                AccountCls = class_from_module(
-                    settings.BASE_ACCOUNT_TYPECLASS
-                )
                 AccountCls.create_character = (
                     make_shard_aware_create_character(
                         AccountCls.create_character

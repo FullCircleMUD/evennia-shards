@@ -18,17 +18,6 @@ If Evennia upstream ever ships per-session puppet memory, the library's `at_post
 
 Originally surfaced 2026-05-01 while designing the `AUTO_PUPPET_ON_LOGIN = True` path on the router.
 
-### Player-facing experience walkthrough (protocol/UX detail)
-
-The detailed player-facing walkthrough — exact behaviour on `@ic`, `@ooc`, gateway traversal, web client redirect handling — has not been designed. Specifics depend on decisions we have not yet made:
-
-- Exact `RECONNECT_TO` message format.
-- How tickets are presented (URL params, headers, initial WS message).
-- Reachable error states (ticket expired, shard unreachable, character missing).
-- What the player sees during the brief reconnect (loading indicator, blank, smooth).
-
-Originally raised as a TBD in `deployment-topology.md` but identified as belonging in a future protocol/UX design doc rather than in topology.
-
 ### Client protocol support for the redirect mechanism
 
 The library should aim to support all client protocols Evennia natively supports (web, telnet, SSH, etc.) — not preemptively defer non-web. Web clients have auto-reconnect built in, making the redirect transparent; telnet and SSH do not, so the player UX during cross-shard handoff for those protocols is open.
@@ -36,21 +25,6 @@ The library should aim to support all client protocols Evennia natively supports
 The mechanism for non-web protocols (printed reconnect prompt, automatic TCP-level forwarding, something else) is implementation-discovery work. Constraints on a particular protocol should only be documented if technical barriers actually force them, not assumed upfront.
 
 Originally raised as a TBD in `deployment-topology.md` (framed there as "telnet handling deferred"); reframed as a positive aim of full client-protocol support.
-
-### Do gateway rooms have any deploy-time requirements?
-
-Open until the gateway lookup / handoff machinery is designed and prototyped. Specifically unknown:
-
-- Whether gateway rooms need to be deployed at any particular time, or via any particular mechanism, for cross-shard wiring to work.
-- Whether they need to be idempotent across deploys (may not matter if gateway rooms are effectively stateless).
-- Whether the lookup machinery requires them to pre-exist before a cross-shard reference can resolve, or can cope with fresh creation.
-- Whether any specific operational model (Evennia's `at_initial_setup` hook, an `evennia shell -c` release command, manual in-game build) is preferred or required for gateway rooms.
-
-We previously assumed gateway rooms would need idempotent deployment via a library-provided helper, but that assumption is anticipatory and pre-implementation. Pending the actual lookup/handoff mechanism design to determine.
-
-**Technical observation worth recording while it's fresh:** a standalone `python build_world.py` does not work as a deploy-time script because Evennia must be bootstrapped (Django settings loaded, models registered, idmapper alive) for `from evennia import create_object` to function. Any deploy-time build must run within an Evennia-aware context — `evennia shell -c "..."`, `at_initial_setup`, or invoked from within the running game. Relevant to whatever deploy story emerges.
-
-Originally raised in conversation about possible `build-and-deploy-models.md` and `idempotent-builds.md` docs; both were speculative and have been deleted. Their substance — three operational models, source-vs-runtime attribute split, idempotency patterns, factory shapes — is preserved in our session history but not enshrined as design until the underlying mechanism question is resolved.
 
 ### What cross-shard player interactions are feasible?
 
@@ -60,14 +34,14 @@ What sits in between — parties, follower trains, ambient effects on remote cha
 
 Originally captured in `consumer-constraints.md` as "cross-shard player interactions are second-class" — that constraint was too strong; removed pending discovery.
 
-### Can shard membership / world topology change at runtime?
+### Partial wrap improvement for `at_post_login` patches
 
-The original assumption (per the handover) was that zone-to-shard mapping is a Python constant and reshuffles are planned downtime events. That assumption may not hold: it may be possible for a superuser to create new gateway rooms (and by implication, new shard boundaries) at runtime via in-game admin commands, or to reshuffle zone ownership without downtime. Open until the gateway lookup / handoff machinery is designed and the boundaries become clear.
+The library currently patches `DefaultAccount.at_post_login` directly (full replacement on routers, thin wrapper on shards). This means a consumer override of `at_post_login` on their custom account class shadows our patch via MRO — bypassing the library's redirect/cache-bust logic unless they call `super()`. Documented in [library-integration-risks.md](library-integration-risks.md#defaultaccountat_post_login-override) with the recommended `super()` pattern.
 
-Originally captured in `consumer-constraints.md` as "static zone-to-shard mapping; reshuffles are planned events" — removed pending implementation reality.
+There's a partial-improvement path worth revisiting: switch the patch target to the consumer-configured `BASE_ACCOUNT_TYPECLASS` (matching the chargen wrapper's pattern), and on routers delegate to the original for the `AUTO_PUPPET_ON_LOGIN = False` branch. That branch is just OOC-menu rendering — vanilla / consumer-override does the right thing. The library only needs to inline the `AUTO_PUPPET=True` branch where the redirect logic actually fires. Result: consumer overrides compose cleanly for the no-auto-puppet case (the more common case for many games), and only get bypassed for the auto-puppet path the library specifically exists to handle.
 
-### How do cross-shard messages behave during in-transit state?
+The trade-off: in the `AUTO_PUPPET=True + consumer-override` case, behaviour shifts from "library silently shadowed by consumer" to "consumer silently overwritten by library" — a different failure mode, not strictly better. Worth picking up if a real consumer game lands an `at_post_login` override and wants composition semantics; not load-bearing for current MVP scope.
 
-A character mid-handoff is briefly not resident on either source or target shard (between the source's eviction from idmapper and the target's load). If a third party sends them a message during that window — a tell, a channel message, a directed effect — what happens? The handover proposed bouncing with *"player is in transit, try again,"* but the actual mechanism for detecting in-transit state, the UX implications, and whether the same logic applies to all message classes (tells, channels, persistent mail) haven't been worked through.
+### Can the room-to-shard partition be reshuffled without downtime?
 
-Originally captured in `consumer-constraints.md` as "do not assume in-process synchronicity for cross-shard operations" — moved here as it's an unresolved design question, not a settled constraint.
+The library partitions at the room level — every `ObjectDB` row carries a `shard_id`, and the `cross_shard_character_move` primitive can change a character's owning shard at runtime. What's unclear is whether the *room layout itself* can be reshuffled without downtime: moving rooms between shards (changing `shard_id` on a room and its contents) while a process is running, or carving out a new shard from rooms previously owned by another. The current working assumption is that such reshuffles are planned downtime events with full redeploy; whether the live machinery could support hot reshuffles without losing players is open. Likely deferred until a real consumer game wants to reorganise their world live.

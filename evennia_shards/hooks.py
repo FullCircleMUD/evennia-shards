@@ -130,6 +130,60 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     self.msg(self.at_look(target=self.characters, session=session), session=session)
 
 
+def warn_if_at_post_login_overridden(account_cls, role) -> bool:
+    """Log a warning if ``account_cls`` overrides ``at_post_login``.
+
+    The library patches ``DefaultAccount.at_post_login`` directly (full
+    replacement on routers, thin wrapper on shards). A consumer that
+    subclasses ``DefaultAccount`` and overrides ``at_post_login``
+    anywhere in the chain *between* their configured class and
+    ``DefaultAccount`` shadows our patch via Python MRO unless the
+    override calls ``super().at_post_login(...)``.
+
+    Detection walks ``account_cls.__mro__`` from the leaf class up,
+    stopping at ``DefaultAccount`` (which is the library's patch
+    target, not a consumer override). If any class along the way has
+    ``at_post_login`` in its ``__dict__``, that's an override — fire
+    the warning.
+
+    The warning fires even when the override is well-behaved (does
+    call ``super()``); the false-positive cost is one log line at
+    startup. The true-positive case (no ``super()``) catches a silent
+    failure mode that's otherwise only discoverable by the library's
+    behaviour mysteriously not running.
+
+    Returns True if a warning was emitted, False otherwise. Used by
+    tests to assert detection without coupling to log capture.
+    """
+    from evennia.accounts.accounts import DefaultAccount
+
+    overriding_cls = None
+    for cls in account_cls.__mro__:
+        if cls is DefaultAccount:
+            break
+        if "at_post_login" in cls.__dict__:
+            overriding_cls = cls
+            break
+    if overriding_cls is None:
+        return False
+    role_specific = (
+        "auto-puppet redirect logic"
+        if role == "router"
+        else "idmapper / Attribute cache-bust before auto-puppet"
+    )
+    logger.log_warn(
+        f"evennia-shards: {overriding_cls.__module__}."
+        f"{overriding_cls.__qualname__}.at_post_login is overridden. "
+        f"The library patches DefaultAccount.at_post_login; this "
+        f"override shadows the library's patch via Python MRO unless "
+        f"it calls super().at_post_login(session=session, **kwargs). "
+        f"Without the super() call, the {role} role's "
+        f"{role_specific} will not run for this account class. See "
+        f"DESIGN/library-integration-risks.md."
+    )
+    return True
+
+
 def make_shard_at_post_login(original_at_post_login):
     """Return a shard-side ``at_post_login`` that busts stale caches.
 

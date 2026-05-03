@@ -2960,3 +2960,120 @@ class SendCrossShardMessageTests(BaseEvenniaTestCase):
 
         self.assertTrue(result)
         self.assertEqual(captured, [kwargs])
+
+
+class WarnIfAtPostLoginOverriddenTests(BaseEvenniaTestCase):
+    """Detect consumer overrides of ``Account.at_post_login``.
+
+    The library patches ``DefaultAccount.at_post_login`` directly. A
+    consumer subclass that overrides ``at_post_login`` shadows the
+    library's patch via Python MRO unless the override calls
+    ``super()``. ``warn_if_at_post_login_overridden`` detects the
+    override and emits a warning at install time so the integration
+    risk is visible in startup logs. The function returns True iff
+    a warning was emitted; tests assert on the return value rather
+    than coupling to log capture (matching the convention in
+    ``AtPostLoginRouterTests``).
+    """
+
+    def test_default_account_returns_false(self):
+        """DefaultAccount itself is the library's patch target.
+
+        Walking the MRO stops at ``DefaultAccount``, so even though
+        ``DefaultAccount.at_post_login`` is in its own ``__dict__``,
+        the detector treats it as the floor and returns False. This
+        keeps the warning silent when ``BASE_ACCOUNT_TYPECLASS``
+        resolves to ``DefaultAccount`` itself (consumer hasn't
+        subclassed).
+        """
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        self.assertFalse(
+            warn_if_at_post_login_overridden(DefaultAccount, "router")
+        )
+        self.assertFalse(
+            warn_if_at_post_login_overridden(DefaultAccount, "shard")
+        )
+
+    def test_subclass_with_intermediate_override_returns_true(self):
+        """Override at any level between leaf and DefaultAccount triggers.
+
+        Walks the MRO so a multi-level subclass tree where the
+        intermediate class overrides at_post_login is also detected,
+        even when the leaf class doesn't redeclare it.
+        """
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class MidLevelAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                pass
+
+        class LeafAccount(MidLevelAccount):
+            pass
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(LeafAccount, "router")
+        )
+
+    def test_subclass_without_override_returns_false(self):
+        """Consumer subclass that doesn't override at_post_login: no warning.
+
+        This is the typical safe case — the consumer subclasses
+        DefaultAccount for typeclass identity but doesn't touch
+        at_post_login. The library's patch on DefaultAccount fires
+        via MRO when ``account.at_post_login(...)`` is called.
+        """
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class PassThroughAccount(DefaultAccount):
+            pass
+
+        self.assertFalse(
+            warn_if_at_post_login_overridden(PassThroughAccount, "router")
+        )
+        self.assertFalse(
+            warn_if_at_post_login_overridden(PassThroughAccount, "shard")
+        )
+
+    def test_subclass_with_override_returns_true(self):
+        """Consumer override is detected and warning is emitted."""
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class ShadowingAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                pass  # consumer override that does NOT call super()
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(ShadowingAccount, "router")
+        )
+        self.assertTrue(
+            warn_if_at_post_login_overridden(ShadowingAccount, "shard")
+        )
+
+    def test_subclass_with_super_calling_override_still_returns_true(self):
+        """A correct (super-calling) override still triggers the warning.
+
+        The detection is based on ``__dict__`` membership, which can't
+        distinguish a well-behaved override from a shadowing one.
+        False-positive cost is one log line at startup. Documented as
+        deliberate in ``warn_if_at_post_login_overridden``'s docstring.
+        """
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class CooperativeAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                super().at_post_login(session=session, **kwargs)
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(CooperativeAccount, "router")
+        )

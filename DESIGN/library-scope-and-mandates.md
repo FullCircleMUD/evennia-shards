@@ -8,15 +8,14 @@ The library is bound to the **single-Postgres era** — from one Evennia process
 
 ## Library primitives (working set)
 
-A 2026-04-29 conversation reframed the library's value as a small set of cross-shard primitives rather than a consumer-facing typeclass mandate. The primitives identified, in build order:
+The library's value is a small set of cross-shard primitives rather than a consumer-facing typeclass mandate. Shipped primitives:
 
-1. **Cross-shard message bus.** Foundational. A way for one shard's process to send a message to another. Used internally for the teleport handoff signal and externally for cross-shard tells, channel propagation, and similar.
-2. **Cross-shard query helpers.** `.values()`-shaped reads of rows owned by another shard, returning data without instantiating typeclass objects locally (preserving the cache invariant).
-3. **Cross-shard teleport.** Library-extended movement primitive that handles same-shard and cross-shard targets transparently. Internally: serialise row, evict from source idmapper, signal destination via (1), destination loads row, redirect player session.
+1. **Cross-shard message bus.** Foundational. A way for one shard's process to send a message to another. Postgres-table-polled via Twisted `LoopingCall`; library-shipped kinds include `obj_msg` and `account_msg` (player-facing message delivery) plus internal `ping` / `ping_received` / `undeliverable_reply`. See [cross-shard-message-bus.md](cross-shard-message-bus.md).
+2. **Cross-shard messaging helper.** `send_cross_shard_message(target_pk, kwargs, target_typeclass=None)` — sender-side wrapper with single `.values_list` lookup, local-vs-remote dispatch, and typeclass filter (defaults to `BASE_CHARACTER_TYPECLASS`). Built on top of the bus's `obj_msg` primitive.
+3. **Cross-shard movement.** `cross_shard_character_move(obj, target_shard, target_location_pk)` — atomic DB writes via the chokepoint bypass, recursive inventory move, idmapper eviction, per-session redirect via the ticket flow. See `evennia_shards/handoff.py` and the milestone log for the full design history.
+4. **Cross-shard query helpers** *(implicit, not packaged as a primitive).* `.values()` / `.values_list()` reads of rows owned by another shard return data without instantiating typeclass objects locally (preserving the cache invariant). Used internally throughout the library; consumers can use the same idiom directly via Django.
 
-A possible fourth, deferred:
-
-4. **Extended exit traversal.** Consumer exits whose destinations are on other shards. Mechanically a thin wrapper on (3) once (3) exists; deferred because the UX risk is real — `east` taking a noticeable moment will feel unresponsive in a way that "use portal" or "recall" does not. Worth doing only if the implementation is genuinely cheap by then and the UX is acceptable.
+Concrete patterns built on these primitives — e.g. a `CrossShardExit` typeclass that lets `east` cross shards transparently, or specialised cross-shard tells / channel propagation built on `send_cross_shard_message` — are not library responsibilities. They are candidates for `evennia_shards/contrib/` (analogous to `evennia/contrib/`), where the library developers or community may publish opt-in implementations consumers can import, extend, or ignore. The library core ships the primitives; contrib ships the patterns; the consumer chooses what to use.
 
 ## External dependencies
 
@@ -25,15 +24,17 @@ Research on 2026-04-29 surfaced existing Django ecosystem libraries relevant to 
 - **No external partitioning library.** `django-multitenant` was evaluated as off-the-shelf prior art for `tenant_id`-style row tagging and auto-filtering. After parallel prototyping it was not adopted — the bespoke four-chokepoint approach won on idmapper-composition simplicity, loud-failure semantics, and zero new runtime dependencies. See [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant) for the decision in detail.
 - **No external messaging dependency.** Earlier thinking considered `channels_redis` for the cross-shard message bus. A subsequent conversation reframed the bus as a Postgres `messages` table with polling — see [cross-shard-message-bus.md](cross-shard-message-bus.md). Removing Redis from the picture means one less ops dependency; the only infrastructure required by the library is Postgres, which Evennia already requires.
 
-## Mandate: TBD pending review
+## Mandate: none
 
-The previous mandate of this document was: *"Consumers must apply `ShardGatewayMixin` to any room typeclass that acts as a cross-shard boundary."* The 2026-04-29 conversation called this into question. The reasoning:
+The library has no consumer-facing typeclass mandate. Consumers write rooms, characters, exits, and items the way they always did; cross-shard cases are handled inside the library's primitives (movement, messaging, chokepoints). Any room can be a cross-shard movement target; any character on a remote shard can receive a message; nothing requires special marking.
 
-- If the cross-shard machinery lives in library-provided primitives (teleport, query helpers, message bus), there is no need for a special "boundary room" typeclass — any room can be a cross-shard target, transparently.
-- The mixin's three jobs (stable identification, cross-shard data access, handoff landing) all reduce to *"every row has `(shard_id, pk)`"* plus the primitives above.
-- Removing the mandate makes the library invisible to consumers: they write rooms and exits the way they always did; the library handles cross-shard cases inside its own primitives.
+This is a deliberate departure from the original handover sketch, which proposed a `ShardGatewayMixin` for "boundary rooms." The mixin idea was deprecated in favour of the primitive-based approach because:
 
-[**TBD** — needs discussion: whether the library has any consumer-facing mandate at all, or whether the entire surface is "use the library's teleport/exit/messaging primitives in place of the corresponding raw Evennia ones." The original mixin mandate is no longer treated as canonical; the replacement (if any) is open.]
+- The mixin's three jobs (stable identification, cross-shard data access, handoff landing) all reduce to *"every row carries `(shard_id, pk)`"* plus the primitives, with no consumer-side marking required.
+- A primitive-based design keeps the library invisible in the common case — the consumer's typeclasses don't change, the consumer's commands don't change, only the consumer's `settings.py` flips it from monolith into split mode.
+- "Boundary rooms" as a concept conflates a *game-design* choice (which rooms are dramatic crossing points) with a *deployment* concern (which rows live on which shard). The library cares about the deployment concern only; the game-design concern is the consumer's.
+
+The single integration step the library does ask of consumers is settings-level: declare `SHARDS_ROLE` and `SHARD_ID`, add `evennia_shards` to `INSTALLED_APPS` in non-monolith roles, and call `start_message_bus()` from `at_server_start`. There is no typeclass mandate beyond that.
 
 ## What the library does not provide
 

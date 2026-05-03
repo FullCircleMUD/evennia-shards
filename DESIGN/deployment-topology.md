@@ -37,7 +37,9 @@ The same shape, scaled up. Discussed in the context of Railway as the example pl
 - N+1 platform services (one router, N shards), all deployed from the same repository on the same branch.
 - Each service has its own environment variable set: `SHARDS_ROLE`, `SHARD_ID` (where applicable), per-service URLs/ports.
 - All services share one Postgres instance.
-- Multi-shard deployments additionally share one Redis instance for cross-shard messaging.
+- Multi-shard deployments use the Postgres-backed message bus for cross-shard messaging (see [cross-shard-message-bus.md](cross-shard-message-bus.md)) — no infrastructure beyond the shared Postgres.
+
+Redis was originally considered for the cross-shard message bus (the archived handover and earlier drafts referenced `channels_redis`). It was not adopted: the Postgres-table-polled `LoopingCall` design covers the same ground without adding a runtime dependency.
 
 When a commit is pushed, the platform redeploys all services in parallel from the new commit. Code stays in lockstep across roles by definition — there is no "shard A is on a different commit than shard B" failure mode.
 
@@ -53,7 +55,7 @@ When a commit is pushed, the platform redeploys all services in parallel from th
 | Running processes | 3 (terminals) | 3 (platform services) |
 | What differentiates | `DJANGO_SETTINGS_MODULE` per terminal | Env vars per service |
 | Shared database | One SQLite | One Postgres |
-| Shared message bus (multi-shard) | None needed | One Redis |
+| Shared message bus (multi-shard) | Postgres-polled (shared with main DB) | Postgres-polled (no additional infra) |
 
 The shape is identical; the scale differs. Local dev is the same topology as production, not a simplified approximation.
 
@@ -63,26 +65,26 @@ Discussed and agreed: maintaining N repositories for N roles re-introduces the f
 
 This is the same reasoning Kubernetes applies to its one-image-many-pods model.
 
-## Library development: the demo game
+## Library development: the demo gamedirs
 
-The library's repository contains a demo game at `examples/demo_game/`. It is the consumer pattern in miniature: a real Evennia game folder, generated with `evennia --init`, that depends on `evennia_shards` exactly as a real consumer game would.
+The library's repository contains three demo gamedirs under `examples/` (`demo_router`, `demo_shard0`, `demo_shard1`) — one per role. They are the consumer pattern in miniature: real Evennia gamedirs (generated via `evennia --init`) that depend on `evennia_shards` exactly as a real consumer game would, with their game code shared via symlinks (`demo_shard0` is the source of truth; the other two link to its `commands/`, `typeclasses/`, `web/`, `world/`, `server/conf/`). See [`examples/README.md`](../examples/README.md) for the layout and run-three-processes recipe.
 
 Discussed and agreed:
 
-- The demo's purpose is to drive library development (run it to test library changes).
-- It is **not shipped** as part of the pip package — `[tool.setuptools.packages.find]` includes only `evennia_shards*`, excluding `examples/`, `tests/`, and `DESIGN/`.
-- It is **not a starting template** that consumers should clone. Real consumer games live in their own separate repositories.
-- Real consumer games depend on the library via `pip install evennia-shards` (once published) or `pip install git+https://github.com/.../evennia-shards.git`. They do not derive from or copy the demo.
+- The demos' purpose is to drive library development (run them to test library changes end-to-end).
+- They are **not shipped** as part of the pip package — `[tool.setuptools.packages.find]` includes only `evennia_shards*`, excluding `examples/`, `tests/`, and `DESIGN/`.
+- They are **not a starting template** that consumers should clone. Real consumer games live in their own separate repositories.
+- Real consumer games depend on the library via `pip install evennia-shards` (once published) or `pip install git+https://github.com/.../evennia-shards.git`. They do not derive from or copy the demos.
 
-## Development phasing
+## Development phasing (followed during build)
 
-The library is built up across four cases, each a distinct deployment shape exercising a new capability:
+The library was built up across four cases, each a distinct deployment shape exercising a new capability. All four are functionally complete; see [progress.md](progress.md) for the running milestone log with evidence pointers.
 
 1. **Monolith.** Library installed; `SHARDS_ROLE` setting exposed but defaulting to `monolith`; library is dormant; game runs as native Evennia.
-2. **Split: router + 1 shard.** Auth/web/OOC on the router; the entire IC world on the shard. Exercises the redirect/ticket protocol end-to-end.
-3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via gateway rooms.
-3b. **Multi-shard messaging.** Adds Redis-backed cross-shard tells, who, channels.
+2. **Split: router + 1 shard.** Auth/web/OOC on the router; the entire IC world on the shard. Exercises the ticket-based redirect protocol end-to-end.
+3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via the `cross_shard_character_move` primitive (atomic DB writes via the chokepoint bypass, recursive inventory move, idmapper eviction, per-session ticket redirect).
+3b. **Multi-shard messaging.** Postgres-backed cross-shard message bus with player-facing delivery primitives (`obj_msg`, `account_msg`) and the `send_cross_shard_message` helper. Specialised consumer-level patterns (cross-shard tells, channel propagation) are deferred to `evennia_shards/contrib/`.
 
 Each case strictly builds on the previous.
 
-Case 1 is qualitatively different from the others: it is a prerequisite gate ("did installing the library break anything?") rather than a feature milestone. It is testable using Evennia's own test suite — running `evennia test evennia` from inside `examples/demo_game/` with `evennia_shards` installed should pass exactly as it does without the library. If Evennia's tests fail with the library present, the library is not genuinely transparent in monolith mode and that failure is the first thing to fix. This makes Case 1 a strong, automatable verification gate before any work on Cases 2/3a/3b begins.
+Case 1 is qualitatively different from the others: it is a prerequisite gate ("did installing the library break anything?") rather than a feature milestone. It is testable using Evennia's own test suite — running `evennia test evennia` with `evennia_shards` installed should pass exactly as it does without the library. If Evennia's tests fail with the library present, the library is not genuinely transparent in monolith mode and that failure is the first thing to fix. This made Case 1 a strong, automatable verification gate before work on Cases 2/3a/3b began.

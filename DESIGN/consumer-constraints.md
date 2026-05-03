@@ -19,9 +19,7 @@ Several consequences flow from this first principle:
 
 ### Cross-shard movement requires a safe character state
 
-Cross-shard movement only completes when the character is in a "safe" state (not in combat, not casting, no in-flight delayed callbacks). The "safe to move?" predicate is consumer-overridable, but its existence is non-optional.
-
-[**TBD** — the previous version of this constraint specifically referenced *gateway rooms* ("Gateway rooms must be designed as inherently safe spaces"). After the 2026-04-29 conversation that questioned the gateway-room mandate, the framing here is broadened to "cross-shard movement" generally. Whether consumers still need to mark anything specially, or whether the library's cross-shard teleport simply refuses to run on an unsafe character regardless of how the move was initiated, is open.]
+Cross-shard movement should only happen when the character is in a "safe" state — not in combat, not casting, no in-flight delayed callbacks that assume the character stays on this shard. The library's `cross_shard_character_move` primitive does not enforce this itself (per principle 3: "in combat" is a game concept); the consumer is responsible for calling the primitive only when their game's safe-state predicate holds. Consumer-side typeclass code (a `CrossShardExit`, a teleport command, an admin tool) is the right place for that check.
 
 ### No live mid-action session migration
 
@@ -35,4 +33,4 @@ The architecture assumes one logical Postgres database, vertically scaled. Read 
 
 The library treats cross-shard movement as a UX concept. The brief reconnect (visible to telnet, invisible to web clients) is acceptable precisely because the transition is narratively distinct from regular movement. Consumer world design should make cross-shard transitions feel like deliberate beats — portals, docks, trailheads, passages, fast-travel — rather than indistinguishable from regular exits.
 
-[**TBD** — the previous version of this constraint was titled "Gateway rooms are narrative beats" and assumed the existence of a gateway-room concept. With the gateway-room mandate now under review (see [library-scope-and-mandates.md](library-scope-and-mandates.md)), this constraint is broadened to cross-shard movement generally. Worth confirming the constraint as written still reflects intent, since "extended exit traversal" — if it ships — would arguably let cross-shard movement *not* be a deliberate beat.]
+The library ships the `cross_shard_character_move` primitive; concrete patterns built on it — e.g. a `CrossShardExit` typeclass that lets `east` cross shards transparently — may land in `evennia_shards/contrib/` over time, contributed by the library developers or community. Such an implementation would weaken this constraint: once `east` *can* cross a boundary indistinguishably from a normal exit, the transition stops feeling like a deliberate beat. That's not a library decision — consumers choose whether to import a transparent contrib exit, write their own deliberate-beat exit, or ignore both and call the primitive directly. The trade-off (UX latency on every move vs. narrative distinctiveness on shard crossings) is a consumer-side game-design choice.
