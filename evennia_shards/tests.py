@@ -364,6 +364,128 @@ class MessageHandlerTests(BaseEvenniaTestCase):
         # the handler — that's process_inbox's job).
         self.assertEqual(Message.objects.count(), before_count)
 
+    def test_obj_msg_calls_target_msg_with_kwargs(self):
+        """obj_msg → ObjectDB.objects.get(pk).msg(**kwargs)."""
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        recorded_kwargs = {}
+        # Shadow the typeclass-level msg method on this instance only,
+        # bypassing Evennia's protective __setattr__ (same trick
+        # CrossShardCharacterMoveTests uses for `sessions`).
+        target.__dict__["msg"] = lambda **kwargs: recorded_kwargs.update(kwargs)
+
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "hello"}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(recorded_kwargs, {"text": "hello"})
+
+    def test_obj_msg_passes_oob_kwargs_intact(self):
+        """obj_msg splats arbitrary kwargs (text + OOB) into target.msg."""
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        captured = []
+        target.__dict__["msg"] = lambda **kwargs: captured.append(kwargs)
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1", "ticket": "abc"},
+            "options": {"raw": True},
+        }
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": kwargs},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0], kwargs)
+
+    def test_obj_msg_target_gone_returns_true_and_inserts_nothing(self):
+        """obj_msg with non-existent pk: log + consume, no exception."""
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": 999_999, "kwargs": {"text": "hi"}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(Message.objects.count(), before_count)
+
+    def test_account_msg_calls_target_msg_with_kwargs(self):
+        """account_msg → AccountDB.objects.get(pk).msg(**kwargs)."""
+        from evennia.accounts.models import AccountDB
+
+        target = AccountDB.objects.create(
+            username="msg_target",
+            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
+        )
+        recorded_kwargs = {}
+        target.__dict__["msg"] = lambda **kwargs: recorded_kwargs.update(kwargs)
+
+        msg = Message.objects.create(
+            kind="account_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "ooc hi"}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(recorded_kwargs, {"text": "ooc hi"})
+
+    def test_account_msg_target_gone_returns_true_and_inserts_nothing(self):
+        """account_msg with non-existent pk: log + consume, no exception."""
+        msg = Message.objects.create(
+            kind="account_msg",
+            payload={"pk": 999_999, "kwargs": {"text": "hi"}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        result = MessageHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(Message.objects.count(), before_count)
+
+    def test_subclass_super_handle_dispatches_obj_msg(self):
+        """A subclass calling super().handle() inherits obj_msg dispatch.
+
+        Mirrors the docstring's example pattern — consumers add their
+        own kinds without losing the library-shipped ones.
+        """
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        captured = []
+        target.__dict__["msg"] = lambda **kwargs: captured.append(kwargs)
+
+        class ConsumerHandler(MessageHandler):
+            def handle(self, message):
+                if super().handle(message):
+                    return True
+                if message.kind == "consumer_kind":
+                    return True
+                return False
+
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "via super"}},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        result = ConsumerHandler().handle(msg)
+        self.assertTrue(result)
+        self.assertEqual(captured, [{"text": "via super"}])
+
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class ProcessInboxTests(BaseEvenniaTestCase):

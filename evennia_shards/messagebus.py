@@ -7,6 +7,11 @@ overrideable handler hook — build on these. See
 DESIGN/cross-shard-message-bus.md for the full design.
 """
 
+import logging
+
+log = logging.getLogger(__name__)
+
+
 def send_message(
     kind: str,
     payload: dict,
@@ -82,6 +87,17 @@ class MessageHandler:
     - `ping_received` — silently consumed. (Useful for inspection: poll
       the inbox before the next cycle to observe replies; the consumer
       can override this method to surface them.)
+    - `undeliverable_reply` — silently consumed. Notification that an
+      earlier outbound message we sent timed out. Consumers can override
+      to surface failures (UI, retry, metrics).
+    - `obj_msg` — deliver a player-facing message to an `ObjectDB` row
+      on this shard. Payload is `{"pk": <int>, "kwargs": <dict>}`; the
+      handler resolves the row and calls `obj.msg(**kwargs)`. Evennia's
+      own `Object.msg` then does the local session fanout.
+    - `account_msg` — same shape, targeting an `AccountDB` row. Used
+      for OOC delivery (tells, system messages, account-level channel
+      msgs). Receiver looks up the account and calls
+      `account.msg(**kwargs)`.
 
     Consumers extend by subclassing:
 
@@ -102,6 +118,10 @@ class MessageHandler:
             return self._handle_ping_received(message)
         if message.kind == "undeliverable_reply":
             return self._handle_undeliverable_reply(message)
+        if message.kind == "obj_msg":
+            return self._handle_obj_msg(message)
+        if message.kind == "account_msg":
+            return self._handle_account_msg(message)
         return False
 
     def _handle_ping(self, message) -> bool:
@@ -132,6 +152,72 @@ class MessageHandler:
         # surface it (UI notification, retry logic, metrics, etc.).
         return True
 
+    def _handle_obj_msg(self, message) -> bool:
+        """Deliver a player-facing message to an ObjectDB row.
+
+        Resolves the row by pk and calls ``obj.msg(**kwargs)`` —
+        Evennia's own ``Object.msg`` handles session fanout (multiple
+        sessions puppeting the same object in MULTISESSION_MODE 2/3).
+
+        Target-gone semantics: if the row no longer exists, log a
+        warning and return ``True`` (consumed). The bus is real-time
+        only; deferring won't bring a deleted target back, and an
+        ``undeliverable_reply`` for routine "character deleted between
+        send and receive" is noise. Consumers wanting different
+        semantics can override.
+
+        Misroute safety: if the row exists but is owned by another
+        shard, ``ObjectDB.objects.get`` raises ``ShardIsolationError``
+        via the ``from_db`` chokepoint — caught by ``process_inbox``
+        and treated as defer, eventually triggering
+        ``undeliverable_reply`` to the sender. Loud failure on
+        misroute, by construction.
+        """
+        from evennia.objects.models import ObjectDB
+
+        pk = message.payload.get("pk")
+        kwargs = message.payload.get("kwargs", {})
+        try:
+            obj = ObjectDB.objects.get(pk=pk)
+        except ObjectDB.DoesNotExist:
+            log.warning(
+                "obj_msg: target ObjectDB pk=%r not found; dropping "
+                "(message pk=%s from %r)",
+                pk, message.pk, message.from_shard,
+            )
+            return True
+        obj.msg(**kwargs)
+        return True
+
+    def _handle_account_msg(self, message) -> bool:
+        """Deliver a player-facing message to an AccountDB row.
+
+        Used for OOC delivery — tells, system messages, account-level
+        channel msgs. Same shape as ``_handle_obj_msg`` but resolves
+        ``AccountDB``. ``Account.msg`` handles fanout to all of the
+        account's sessions on this shard.
+
+        Target-gone and misroute semantics match ``_handle_obj_msg``.
+        AccountDB has no shard-isolation chokepoint (accounts are
+        router-owned and global), so misroute manifests as a
+        ``DoesNotExist`` rather than a chokepoint raise.
+        """
+        from evennia.accounts.models import AccountDB
+
+        pk = message.payload.get("pk")
+        kwargs = message.payload.get("kwargs", {})
+        try:
+            account = AccountDB.objects.get(pk=pk)
+        except AccountDB.DoesNotExist:
+            log.warning(
+                "account_msg: target AccountDB pk=%r not found; dropping "
+                "(message pk=%s from %r)",
+                pk, message.pk, message.from_shard,
+            )
+            return True
+        account.msg(**kwargs)
+        return True
+
 
 def process_inbox(handler: MessageHandler | None = None) -> int:
     """Run one polling cycle: poll, dispatch, delete on success or timeout.
@@ -154,13 +240,9 @@ def process_inbox(handler: MessageHandler | None = None) -> int:
     Pure function — testable without the reactor; the polling loop wraps
     this in a Twisted `LoopingCall`.
     """
-    import logging
-
     from django.utils import timezone
 
     from .config import get_message_timeout, get_shard_id
-
-    log = logging.getLogger(__name__)
 
     if handler is None:
         handler = MessageHandler()

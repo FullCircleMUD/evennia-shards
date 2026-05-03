@@ -129,13 +129,20 @@ Once the bus exists, adding a new message type is data, not code:
 
 No schema migrations, no library release, no new table.
 
-**Library-shipped message kinds (initial):**
+**Library-shipped message kinds:**
 
-- `character_handoff` — internal, used by cross-shard teleport. The load-bearing one.
-- `undeliverable_reply` — the failure mode of the bus itself.
-- (Optional) `ping` / health-check — operational diagnostic, not strictly required.
+- `ping` / `ping_received` — diagnostic round-trip. Sender posts `ping`; the receiver replies with `ping_received` to the original `from_shard`, echoing the payload. Useful for operational health checks and end-to-end smoke testing.
+- `undeliverable_reply` — the failure mode of the bus itself. Inserted automatically by `process_inbox` when an outbound message ages past its kind-specific timeout. Payload carries `original_kind`, `original_payload`, `reason`. Consumed silently in the base handler; consumers override to surface delivery failures.
+- `obj_msg` — deliver a player-facing message to an `ObjectDB` row on the receiving shard. Payload: `{"pk": <int>, "kwargs": <dict>}`. Receiver does `ObjectDB.objects.get(pk=...)` and calls `obj.msg(**kwargs)`; Evennia's own `Object.msg` then handles local session fanout (covering `MULTISESSION_MODE 2/3`). Covers IC delivery: room broadcast targeting a remote character, channel msg targeting a body, ambient effects on remote NPCs. Mechanically generic — works for any puppetable `ObjectDB` (characters, vehicles, possessed objects), with the typeclass policy left to consumer-side helpers.
+- `account_msg` — same shape, targeting an `AccountDB` row. Used for OOC delivery: tells/pages, system messages, account-level channel msgs. Receiver looks up the account and calls `account.msg(**kwargs)`. Required for messaging brand-new or perpetually-OOC players who have no character yet.
 
-**Consumer-defined kinds:** anything game-specific the consumer wants to layer on (cross-shard tells, channel propagation, custom signals).
+For `obj_msg` and `account_msg`, target-gone (DoesNotExist) is consumed silently with a warning log — the bus is real-time only, deferring won't bring a deleted target back. Misroute (target row owned by a different shard) trips the `from_db` chokepoint, raises `ShardIsolationError`, gets caught by `process_inbox` as defer, and eventually triggers `undeliverable_reply` to the sender — loud failure on misroute by construction.
+
+The primitives splat their `kwargs` directly into `target.msg(**kwargs)`, which means kwargs must be JSON-serialisable (the `payload` JSONField enforces this at send time). Notably, `from_obj=` (a common `Object.msg` kwarg pointing at an `ObjectDB` instance) is not serialisable and not constructible cross-shard. Sender-side helpers (a separate layer, not yet shipped) will be responsible for rendering text on the sender side and dropping `from_obj` before constructing the payload.
+
+**Sender-side helpers (deferred):** `send_cross_shard_message` and any specialised wrappers (cross-shard tells, channel propagation, room broadcast) build on top of the primitives once they are proven. The primitives are sender-API-agnostic — consumers can drive them directly via `send_message(kind="obj_msg", payload=..., to_shard=...)` until the helper layer lands.
+
+**Consumer-defined kinds:** anything game-specific the consumer wants to layer on. The `obj_msg` / `account_msg` primitives cover the common "deliver text to a row" case; consumers add their own kinds for game-specific cross-shard signals (combat events, world-state propagation, etc.).
 
 ## TBDs
 
