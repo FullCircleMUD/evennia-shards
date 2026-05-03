@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-03 — Cross-shard messaging primitives: `obj_msg` and `account_msg`
+
+First piece of cross-shard player-facing messaging. Two new library-shipped bus kinds, both at the same architectural level as the existing `ping` / `ping_received` / `undeliverable_reply` handlers in `messagebus.py`:
+
+- **`obj_msg`** — payload `{"pk": <ObjectDB pk>, "kwargs": <dict>}`. Receiver does `ObjectDB.objects.get(pk=...).msg(**kwargs)`. Evennia's own `Object.msg` handles local session fanout (covers `MULTISESSION_MODE 2/3`). Generic over puppetable `ObjectDB` rows — characters, vehicles, possessed objects, NPCs.
+- **`account_msg`** — same shape, targeting `AccountDB`. Required for OOC delivery and for brand-new / never-yet-IC accounts that have no character.
+
+Sessions don't survive cross-process (no `SessionDB`, `sessid` is local to one Portal/Server pair), so the lowest *cross-shard* primitive is one level up from Evennia's own `ServerSession.data_out`: it operates on a row pk and lets the receiving shard's local Evennia handle session fanout via `target.msg(**kwargs)`.
+
+**Target-gone semantics:** if the row no longer exists at receive time, log a warning and consume silently. The bus is real-time only — deferring won't bring a deleted target back, and routine "logged off / chardelete between send and receive" doesn't justify an `undeliverable_reply` round-trip.
+
+**Misroute safety:** if an `obj_msg` arrives at the wrong shard, `ObjectDB.objects.get` trips the `from_db` chokepoint with `ShardIsolationError`, which `process_inbox`'s except branch treats as defer — eventually triggering `undeliverable_reply` to the sender. Loud failure on misroute, by construction.
+
+**Deliberate non-scope:** this milestone lands the primitive layer only. No sender-side helper (`send_cross_shard_message`), no typeclass filter, no local-vs-remote dispatch, no specialised wrappers (cross-shard tells, channels, room broadcast). All deferred to a separate "helper layer" plan once the primitives are proven. JSON-payload constraint means `from_obj=` (a common `Object.msg` kwarg pointing at an `ObjectDB`) needs sender-side rendering before the helper layer ships.
+
+183 tests passing (177 prior + 6 new in `MessageHandlerTests`): obj_msg/account_msg happy paths, kwargs pass-through (text + OOB + options), target-gone behaviour, `super().handle()` subclass composition.
+
+**Live smoke verified end-to-end:** superuser on shard0 sent `obj_msg` to a character on shard1 (text appeared on B's wire within the polling tick); same primitive shape proven for `account_msg` with an OOC player at the router's character-select menu. Both bus rows correctly deleted by `process_inbox` on truthy handler return.
+
+**Files:** `evennia_shards/messagebus.py` (two new `_handle_*` methods, module-level `log` promotion), `evennia_shards/tests.py` (six new test cases). Doc: `DESIGN/cross-shard-message-bus.md` kinds list extended with semantics for both new kinds.
+
 ### 2026-05-03 — Chargen wrapper: stamp `shard_id` from the start-location row
 
 Closes a quiet break in chargen under split deployment. Without intervention, a new character created on the router lands with `shard_id="router"` (auto-stamped by `pre_save`), which is not in `SHARD_URLS` — so going IC fails with no redirect target.
