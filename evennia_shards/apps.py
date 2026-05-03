@@ -55,20 +55,32 @@ class EvenniaShardsConfig(AppConfig):
 
                 _account_module.CmdOOC = ShardAwareCmdOOC
 
-            # Replace DefaultAccount.at_post_login on routers with the
-            # shard-aware override that intercepts auto-puppet and
-            # converts it to a ticket+redirect to the character's
-            # owning shard. Router-only: monolith uses vanilla Evennia,
-            # and shards rely on Evennia's default auto-puppet path
-            # running after ticket-auth has populated _last_puppet.
-            # See DESIGN/library-integration-risks.md for upgrade and
-            # consumer-override risks.
-            if get_role() == ROLE_ROUTER:
-                from evennia.accounts.accounts import DefaultAccount
+            # Replace DefaultAccount.at_post_login with role-specific
+            # overrides.
+            #
+            # Router: full replacement that intercepts auto-puppet and
+            #   converts it to a ticket+redirect to the character's
+            #   owning shard. See DESIGN/library-integration-risks.md.
+            #
+            # Shard: thin wrapper around Evennia's original that flushes
+            #   stale idmapper/Attribute-cache entries for _last_puppet
+            #   before auto-puppet. Needed because another process's
+            #   cross_shard_move_to may have updated the character's
+            #   shard_id in the DB while this process's Account Attribute
+            #   cache still holds the old Python object.
+            from evennia.accounts.accounts import DefaultAccount
 
+            if get_role() == ROLE_ROUTER:
                 from .hooks import shard_aware_at_post_login
 
                 DefaultAccount.at_post_login = shard_aware_at_post_login
+
+            elif get_role() == ROLE_SHARD:
+                from .hooks import make_shard_at_post_login
+
+                DefaultAccount.at_post_login = make_shard_at_post_login(
+                    DefaultAccount.at_post_login
+                )
 
             # Auto-install permanent library admin commands into
             # CharacterCmdSet. We can't import cmdset_character here:

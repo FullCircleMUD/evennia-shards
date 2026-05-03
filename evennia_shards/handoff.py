@@ -61,7 +61,10 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
     1. Validate ``target_shard`` is in ``SHARD_URLS``.
     2. Validate ``target_location_pk`` exists and is on
        ``target_shard`` (or is the global ``"*"`` sentinel).
-    3. Atomic DB writes + idmapper eviction inside one
+    3. Snapshot the sessions currently puppeting ``obj`` (with their
+       accounts) before anything changes — after the session detach
+       (step 5) the puppet references will be cleared.
+    4. Atomic DB writes + idmapper eviction inside one
        ``transaction.atomic()`` block (with ``shard_writes_allowed_for``
        lifting the chokepoints for ``obj``): update ``obj.shard_id``
        and ``obj.db_location_id``, save, evict from this process's
@@ -71,7 +74,24 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
        ``obj.shard_id`` was mutated before save, so even with a
        rolled-back DB the cached instance is stale and shouldn't be
        served from the idmapper afterwards.
-    4. For each session puppeting ``obj``: create a ticket and send
+    5. Pre-emptive session detach — still inside the
+       ``shard_writes_allowed_for`` bypass but outside the atomic
+       block. Clears ``session.puppet`` and ``session.puid`` for
+       each snapshotted session, and removes the ``"puppeted"`` tag
+       from ``obj``.  We cannot call Evennia's full
+       ``unpuppet_object()`` because its ``at_post_unpuppet`` hook
+       dereferences ``obj.location`` — a FK to the room on
+       ``target_shard`` — which triggers ``from_db`` on a foreign
+       row not in the bypass set.  The minimal detach is sufficient:
+       the disconnect handler's ``obj = session.puppet; if obj:``
+       guard finds ``None`` and returns immediately — no save, no
+       chokepoint error, no zombie session.  Without this detach,
+       the asynchronous disconnect handler (WebSocket close →
+       ``portal_disconnect`` → ``at_disconnect`` →
+       ``unpuppet_object``) runs outside any bypass and creates a
+       zombie session whose stale ``shard_id`` poisons the next
+       ``portal_connect`` via ``disconnect_duplicate_sessions``.
+    6. For each snapshotted session: create a ticket and send
        ``shard_redirect`` OOB. Per-session failures are captured in
        the returned :class:`MoveResult` and do not roll back the move.
 
@@ -120,42 +140,104 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
             f"is on shard {location_shard!r}, not {target_shard!r}"
         )
 
-    # 3. Atomic DB writes + idmapper eviction. shard_writes_allowed_for
-    # lifts the chokepoints for obj; transaction.atomic ensures the
-    # row update is all-or-nothing. flush_from_cache lives inside the
-    # atomic block so an eviction failure (vanishingly rare — it's a
-    # dict pop) rolls back the DB write too.
+    # 3. Snapshot sessions before anything changes. After the
+    # session detach (step 5) the puppet references will be cleared,
+    # and we need the (session, account) pairs for redirect in step 6.
+    sessions_to_redirect = [
+        (session, session.account) for session in obj.sessions.all()
+    ]
+
+    # 4. Atomic DB writes + idmapper eviction + pre-emptive session detach.
+    #
+    # shard_writes_allowed_for wraps the whole block — both the
+    # atomic DB update (step 4) AND the session detach (step 5).
+    # The bypass is keyed on id(obj), which stays valid
+    # because flush_from_cache only evicts from the idmapper dict;
+    # the Python object and its identity are unchanged.
+    #
+    # transaction.atomic ensures the row update is all-or-nothing.
+    # flush_from_cache lives inside the atomic block so an eviction
+    # failure (vanishingly rare — it's a dict pop) rolls back the
+    # DB write too.
     #
     # On any exception inside the block, the except branch evicts
     # again defensively. The in-memory obj.shard_id was mutated to
     # the new shard before save() ran, so even with a rolled-back DB
     # the cached instance is stale relative to the row; eviction
-    # ensures any future idmapper access reloads from the (rolled-back)
-    # DB rather than serving the stale Python object.
+    # ensures any future idmapper access reloads from the
+    # (rolled-back) DB rather than serving the stale Python object.
     try:
-        with transaction.atomic(), shard_writes_allowed_for(obj):
-            obj.shard_id = target_shard
-            obj.db_location_id = target_location_pk
-            # Suppress Evennia's post-save contents-cache update for
-            # this save. Without this, at_db_location_postsave fires
-            # after save and dereferences self.db_location, which
-            # loads the target room — and the target row lives on
-            # target_shard, so from_db refuses (correctly: the move's
-            # source process should not be instantiating a remote
-            # row). Same flag Evennia itself uses for analogous
-            # location-change paths (see ObjectDB.location setter in
-            # evennia/objects/models.py).
-            obj._safe_contents_update = True
-            try:
-                obj.save()
-            finally:
-                # Remove the flag whether save succeeded or raised, so
-                # nothing downstream sees it lingering.
+        with shard_writes_allowed_for(obj):
+            with transaction.atomic():
+                obj.shard_id = target_shard
+                obj.db_location_id = target_location_pk
+                # Suppress Evennia's post-save contents-cache update
+                # for this save. Without this,
+                # at_db_location_postsave fires after save and
+                # dereferences self.db_location, which loads the
+                # target room — and the target row lives on
+                # target_shard, so from_db refuses (correctly: the
+                # move's source process should not be instantiating a
+                # remote row). Same flag Evennia itself uses for
+                # analogous location-change paths (see
+                # ObjectDB.location setter in
+                # evennia/objects/models.py).
+                obj._safe_contents_update = True
                 try:
-                    del obj._safe_contents_update
-                except AttributeError:
-                    pass
-            obj.flush_from_cache(force=True)
+                    obj.save()
+                finally:
+                    # Remove the flag whether save succeeded or
+                    # raised, so nothing downstream sees it lingering.
+                    try:
+                        del obj._safe_contents_update
+                    except AttributeError:
+                        pass
+                obj.flush_from_cache(force=True)
+
+            # 5. Pre-emptive session detach — inside bypass, outside
+            # atomic.
+            #
+            # We cannot call Evennia's full unpuppet_object() here
+            # because its hooks (at_post_unpuppet) dereference
+            # obj.location — a FK to the room, which now lives on
+            # target_shard.  That dereference triggers from_db on
+            # the room row, and the room is NOT in the bypass set,
+            # so from_db refuses.
+            #
+            # Instead we do the minimum needed to prevent the
+            # asynchronous disconnect handler from creating a zombie:
+            #
+            # a) session.puppet = None — the disconnect handler's
+            #    unpuppet_object does ``obj = session.puppet; if
+            #    obj:`` — with puppet cleared it returns immediately.
+            #    No save, no chokepoint error, no zombie.
+            #
+            # b) session.puid = None — mirrors Evennia's own
+            #    unpuppet_object cleanup; prevents stale puid from
+            #    confusing session accounting.
+            #
+            # c) obj.tags.remove("puppeted") — prevents Evennia's
+            #    server_maintenance periodic task from trying to
+            #    from_db a now-foreign row via
+            #    get_by_tag("puppeted").  Tag operations hit the Tag
+            #    model, not ObjectDB, so from_db is not triggered.
+            #
+            # We intentionally skip the DB-level cleanup (clearing
+            # db_sessid, db_account) and the unpuppet hooks
+            # (at_pre_unpuppet, at_post_unpuppet).  The destination
+            # shard's puppet_object will overwrite db_sessid and
+            # db_account when the player arrives, so stale values
+            # in those fields are harmless.
+            for session, _account in sessions_to_redirect:
+                session.puppet = None
+                session.puid = None
+            try:
+                obj.tags.remove("puppeted", category="account")
+            except Exception as exc:
+                logger.log_warn(
+                    f"cross_shard_move_to: puppeted tag removal "
+                    f"failed for obj pk={obj.pk}: {exc}"
+                )
     except Exception:
         try:
             obj.flush_from_cache(force=True)
@@ -163,21 +245,18 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
             pass
         raise
 
-    # 4. Per-session redirect. Reached only if the atomic block above
-    # committed cleanly — any exception there re-raises and skips this
-    # block (the control flow is the guarantee; no flag needed).
+    # 6. Per-session redirect. Reached only if the bypass block
+    # above completed cleanly — any exception there re-raises and
+    # skips this block (the control flow is the guarantee; no flag
+    # needed). Uses the pre-snapshotted (session, account) pairs
+    # because obj.sessions is now empty after the session detach.
     # Per-session failures are captured but don't roll back the move,
     # and the player can ticket-auth on next reconnect regardless.
     redirected = 0
     failures = []
-    for session in obj.sessions.all():
+    for session, account in sessions_to_redirect:
         try:
-            # session.account is the authenticated account on the
-            # session — canonical source for the ticket's account_id
-            # and the _last_puppet write. Doesn't depend on the
-            # character's FK being readable (it may be momentarily
-            # awkward to read post-eviction).
-            _redirect_to_character_shard(session.account, session, obj)
+            _redirect_to_character_shard(account, session, obj)
             redirected += 1
         except Exception as exc:
             logger.log_warn(

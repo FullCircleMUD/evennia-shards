@@ -1810,6 +1810,10 @@ class _FakeSessionHandler:
     def all(self):
         return list(self._sessions)
 
+    def remove(self, session):
+        if session in self._sessions:
+            self._sessions.remove(session)
+
     def count(self):
         return len(self._sessions)
 
@@ -1870,6 +1874,11 @@ class _FakeAccount:
         self.at_look_calls.append({"target": target, "session": session})
         return "OOC menu"
 
+    def unpuppet_object(self, session):
+        """Minimal unpuppet for tests — clears session.puppet like Evennia's."""
+        for s in (session if isinstance(session, (list, tuple)) else [session]):
+            s.puppet = None
+
 
 class _FakeCharacter:
     """Minimal character stand-in for command tests."""
@@ -1880,6 +1889,11 @@ class _FakeCharacter:
         self.pk = pk
         self.shard_id = shard_id
         self.name = key
+
+    def flush_from_cache(self, force=False):
+        # No-op for tests; production code evicts the idmapper cache
+        # entry so refresh_from_db() actually hits the database.
+        pass
 
     def refresh_from_db(self, fields=None):
         # No-op for tests; production code calls this on the router to

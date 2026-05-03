@@ -48,8 +48,11 @@ class ShardAwareCmdIC(CmdIC):
 
         # Router process may hold a stale row in the idmapper if another
         # process moved this character (e.g. cross_shard_move_to updates
-        # shard_id and db_location_id together). Refresh from DB before
-        # reading so the redirect target reflects current ownership.
+        # shard_id and db_location_id together). Flush from the idmapper
+        # cache first — Evennia's SharedMemoryModelBase.__call__ returns
+        # the cached instance from from_db(), so refresh_from_db() is a
+        # no-op unless the cache entry is evicted beforehand.
+        new_character.flush_from_cache(force=True)
         new_character.refresh_from_db()
 
         shard_id = new_character.shard_id

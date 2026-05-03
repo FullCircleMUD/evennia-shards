@@ -47,7 +47,10 @@ The hazard is a consumer overriding `onOpen()` on their custom class without cal
 
 ## DefaultAccount.at_post_login() override
 
-**What we patch / extend:** `evennia/accounts/accounts.py` → `DefaultAccount.at_post_login`. Library code: `evennia_shards/hooks.py` → `shard_aware_at_post_login`. Installed via monkey-patch in `AppConfig.ready()`, gated on `get_role() == ROLE_ROUTER`. Based on Evennia 6.0.0.
+**What we patch / extend:** `evennia/accounts/accounts.py` → `DefaultAccount.at_post_login`. Two role-specific patches, both installed via monkey-patch in `AppConfig.ready()`. Based on Evennia 6.0.0.
+
+- **Router** (`get_role() == ROLE_ROUTER`): full replacement → `evennia_shards/hooks.py` → `shard_aware_at_post_login`.
+- **Shard** (`get_role() == ROLE_SHARD`): thin wrapper around Evennia's original → `evennia_shards/hooks.py` → `make_shard_at_post_login(original)`. Flushes the `_last_puppet` character from the idmapper and refreshes it from the DB before delegating to the original. Needed because `cross_shard_move_to` on the source shard updates the character's `shard_id` in the DB, but the destination shard's Account Attribute-handler cache may still hold the stale Python object with the old `shard_id` — causing `puppet_object` to trip the `pre_save` chokepoint.
 
 **Why:**
 
@@ -68,11 +71,11 @@ Reproducing the body and swapping the if-branch is the only clean approach. The 
 - Changes to the else-branch's OOC-menu rendering — currently `self.msg(self.at_look(target=self.characters, session=session), session=session)`. We reproduce that line.
 - Signature or call-order changes around `at_post_login` in `sessionhandler.login()`.
 
-How to check: diff upstream `DefaultAccount.at_post_login` against the snapshot in `shard_aware_at_post_login`. The override carries a comment citing the Evennia version it was based on.
+How to check: diff upstream `DefaultAccount.at_post_login` against the snapshot in `shard_aware_at_post_login`. The override carries a comment citing the Evennia version it was based on. The shard wrapper is thin (flush + refresh + delegate), so only the router replacement needs a line-by-line diff.
 
 **Risk in consumer override:**
 
-A consumer that subclasses `DefaultAccount` and overrides `at_post_login` without calling `super().at_post_login(...)` will bypass our patch — the consumer's body runs instead, and auto-puppet on the router goes back to its broken default. Recommended pattern: any consumer override of `at_post_login` must call `super().at_post_login(session=session, **kwargs)` (or accept that auto-puppet redirect will not run on their accounts).
+A consumer that subclasses `DefaultAccount` and overrides `at_post_login` without calling `super().at_post_login(...)` will bypass our patch — the consumer's body runs instead. On the router, auto-puppet redirect stops working. On shards, the cache-busting preamble is skipped and cross-shard moves back to a previously-visited shard will trip the `pre_save` chokepoint. Recommended pattern: any consumer override of `at_post_login` must call `super().at_post_login(session=session, **kwargs)` (or accept that these behaviours will not run on their accounts).
 
 A consumer that *doesn't* override `at_post_login` is safe by Python MRO — `account.at_post_login(...)` resolves to our patched `DefaultAccount.at_post_login` automatically.
 

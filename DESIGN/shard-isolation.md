@@ -90,6 +90,33 @@ Inside the `with` block, all four chokepoints skip enforcement for the listed ob
 
 For ownership handoff specifically, idmapper eviction (`instance.flush_from_cache()`) is the third moving part — eviction happens inside the same atomic block so a flush failure rolls the DB write back, and a defensive eviction also runs in the `except` branch so a rolled-back move doesn't leave a stale Python instance (with the mutated `shard_id`) in the source process's idmapper. The `cross_shard_move_to` primitive in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py) composes the three (bypass + atomic + flush) into a single operation; consumers writing their own cross-shard orchestration code use the bypass directly with their own composition.
 
+## Cross-process cache staleness
+
+The chokepoints enforce correct *write* behaviour. A separate concern is **read staleness**: when one process updates a row (e.g. `cross_shard_move_to` changes `shard_id` and `db_location_id`), other processes' in-memory caches — both the idmapper and Evennia's Attribute-handler cache — still hold the old values. Two specific cache layers cause problems:
+
+### Idmapper (`SharedMemoryModelBase.__call__`)
+
+Evennia's `SharedMemoryModelBase` metaclass caches model instances by pk. Django's `Model.from_db()` calls `cls(*values)`, which the metaclass intercepts — if the pk is already cached, it returns the cached instance **ignoring the fresh DB values**. This makes Django's `refresh_from_db()` a no-op for cached instances: the queryset evaluation goes through `from_db`, gets back the stale cached object, and `refresh_from_db()` copies fields from that stale object back to itself.
+
+**Fix pattern:** call `instance.flush_from_cache(force=True)` before `refresh_from_db()`. Evicting the cache entry forces `from_db` to construct a fresh instance from the DB row, which `refresh_from_db()` then copies into the caller's reference.
+
+Applied in:
+- `ShardAwareCmdIC.func()` — router reads character's `shard_id` for redirect target.
+- `_is_redirectable_character()` — router's `at_post_login` checks character's `shard_id`.
+- `make_shard_at_post_login` wrapper — shard's `at_post_login` refreshes `_last_puppet` before auto-puppet.
+
+### Account Attribute-handler cache
+
+Evennia's `AttributeHandler` (the `.db` accessor) caches deserialized Attribute values on the model instance. When code sets `account.db._last_puppet = character`, the handler writes to the DB *and* caches the live Python object. If another process later updates the same Attribute row, this process's cache still holds the old Python reference — with stale field values baked in.
+
+This is distinct from the idmapper: even after flushing the idmapper entry, the Attribute cache can still serve a direct reference to the old Python object (which the idmapper no longer tracks).
+
+**Fix pattern:** the shard-side `at_post_login` wrapper reads `_last_puppet` from the Attribute cache (getting the potentially-stale object), then flushes and refreshes it. This updates the stale object's fields in-place from the DB, so when Evennia's original `at_post_login` hands it to `puppet_object`, the fields are current.
+
+### General principle
+
+Any code path that reads an `ObjectDB` field which may have been updated by another process must flush the idmapper entry and refresh from the DB before acting on it. The `flush_from_cache(force=True)` + `refresh_from_db()` pair is the standard pattern. `values_list()` queries bypass both caches entirely and are safe for cross-process reads that don't need an instance.
+
 ## Decision: bespoke chokepoints vs `django-multitenant`
 
 Two approaches were on the table:

@@ -5,12 +5,17 @@ These replace Evennia hook methods when the library is active in a role
 that needs them. Injected by ``AppConfig.ready()`` via monkey-patch on
 the relevant Evennia class.
 
-Currently houses one override:
+Two overrides:
 
 - ``shard_aware_at_post_login`` — replaces ``DefaultAccount.at_post_login``
   on routers, intercepting Evennia's auto-puppet step and converting it
   to a ticket+redirect to the character's owning shard. See
   DESIGN/library-integration-risks.md for what to diff on Evennia upgrade.
+
+- ``make_shard_at_post_login`` — factory that wraps Evennia's original
+  ``at_post_login`` on shards, flushing stale idmapper/Attribute-cache
+  entries for ``_last_puppet`` so that ``puppet_object`` works with the
+  live DB state after a cross-shard move.
 """
 
 from evennia.utils import logger
@@ -30,8 +35,11 @@ def _is_redirectable_character(character) -> bool:
         return False
     # Router process may hold a stale row in the idmapper if another
     # process moved this character (e.g. cross_shard_move_to updates
-    # shard_id and db_location_id together). Refresh from DB before
-    # reading so redirect decisions use the live values.
+    # shard_id and db_location_id together). Flush from the idmapper
+    # cache first — Evennia's SharedMemoryModelBase.__call__ returns
+    # the cached instance from from_db(), so refresh_from_db() is a
+    # no-op unless the cache entry is evicted beforehand.
+    character.flush_from_cache(force=True)
     character.refresh_from_db()
     shard_id = getattr(character, "shard_id", None)
     if not shard_id or shard_id == "*":
@@ -120,3 +128,30 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
 
     # OOC menu (reproduced from Evennia at_post_login else-branch).
     self.msg(self.at_look(target=self.characters, session=session), session=session)
+
+
+def make_shard_at_post_login(original_at_post_login):
+    """Return a shard-side ``at_post_login`` that busts stale caches.
+
+    When a character is moved back to this shard by another process
+    (via ``cross_shard_move_to``), the Account's Attribute-handler
+    cache on *this* process may still hold the Python object from the
+    *outbound* move — with the old ``shard_id`` baked into its fields.
+    Evennia's default ``at_post_login`` reads ``_last_puppet`` from that
+    cache and hands the stale object straight to ``puppet_object``,
+    which tries to save it. The ``pre_save`` chokepoint then refuses
+    because it sees the old ``shard_id``.
+
+    This wrapper intercepts before the original fires, flushes the
+    character from the idmapper, and refreshes its fields from the DB
+    so ``puppet_object`` always works with the live row.
+    """
+
+    def shard_at_post_login(self, session=None, **kwargs):
+        character = self.db._last_puppet
+        if character is not None and hasattr(character, "flush_from_cache"):
+            character.flush_from_cache(force=True)
+            character.refresh_from_db()
+        original_at_post_login(self, session=session, **kwargs)
+
+    return shard_at_post_login

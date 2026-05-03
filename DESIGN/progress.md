@@ -6,6 +6,47 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-03 — Pre-emptive session detach: zombie session fix for cross-shard round-trips
+
+Live smoke testing of `cross_shard_move_to` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
+
+**Full causal chain:**
+
+1. Forward move (shard0 → shard1) commits correctly. WebSocket close fires `unpuppet_object` on the in-memory character whose `shard_id` is now `"shard1"` — `pre_save` refuses, creating a zombie session on shard0.
+2. Return move (shard1 → shard0) commits correctly. Player arrives on shard0, `disconnect_duplicate_sessions` finds the zombie from step 1, tries to unpuppet it, `del obj.account → save` fails with the stale `shard_id`. AMP exception kills the entire `portal_connect`. `at_post_login` never fires. Black screen.
+
+**First fix attempt (calling `unpuppet_object` inside bypass) failed.** Evennia's `at_post_unpuppet` hook does `self.db.prelogout_location = self.location`, which dereferences the location FK to the room on the target shard. The room is NOT in the bypass set, so `from_db` refuses.
+
+**Working fix: minimal session detach.** Instead of calling Evennia's full `unpuppet_object`, `cross_shard_move_to` now clears `session.puppet = None` and `session.puid = None` for each puppeting session, and removes the `"puppeted"` tag from the character. This prevents the disconnect handler from entering the puppet cleanup path (its `if obj:` guard finds `None`), and prevents `server_maintenance` from trying to `from_db` a now-foreign row via `get_by_tag("puppeted")`.
+
+**Why minimal detach is safe:** The destination shard's `puppet_object` overwrites `db_sessid` and `db_account` when the player arrives, so stale values in those fields are harmless. The skipped hooks (`at_pre_unpuppet`, `at_post_unpuppet`) are not needed because the character is leaving this process entirely.
+
+**Files changed:** `handoff.py` (step 5 replaced: `unpuppet_object` call → minimal session detach), `tests.py` (`unpuppet_object` on `_FakeAccount`, `remove` on `_FakeSessionHandler`, `flush_from_cache` stub on `_FakeCharacter`).
+
+164 tests passing. Full round-trip verified live: forward move, return move, OOC/IC cycling, cross-shard dig, all clean.
+
+### 2026-05-03 — Idmapper / Attribute-cache staleness fix for cross-shard moves
+
+Live smoke testing of `cross_shard_move_to` (shard0 → shard1 → shard0 round-trip) exposed two bugs caused by Evennia's in-memory caching defeating cross-process DB updates. Both share the same root cause: when one process updates a row's `shard_id`, other processes' caches still hold the old value.
+
+**Bug 1: Router IC command redirects to wrong shard.** After moving a character from shard0 to shard1, going OOC back to the router, then typing `ic` — the router redirected to shard0 (old `shard_id`) instead of shard1.
+
+- **Root cause:** Evennia's idmapper (`SharedMemoryModelBase.__call__`) returns the cached instance from `from_db()`, ignoring fresh DB values. This makes `refresh_from_db()` a no-op for cached instances.
+- **Fix:** Added `flush_from_cache(force=True)` before `refresh_from_db()` in `ShardAwareCmdIC.func()` and `_is_redirectable_character()`.
+
+**Bug 2: Black screen on return move to shard.** After a shard0 → shard1 move, then a shard1 → shard0 return move, the client arrives on shard0 but gets a blank screen. Portal log: `pre_save refused: shard 'shard0' cannot persist Character pk=1 owned by shard 'shard1'`.
+
+- **Root cause:** The Account's Attribute-handler cache on shard0 still held the Python object from the outbound move (whose `shard_id` field was `"shard1"`). Evennia's default `at_post_login` read `_last_puppet` from this stale cache and handed the stale object to `puppet_object`, which tried to save it — tripping the `pre_save` chokepoint.
+- **Fix:** Installed a thin `at_post_login` wrapper on shards (`make_shard_at_post_login` in `hooks.py`) that flushes the `_last_puppet` character from the idmapper and refreshes its fields from the DB before delegating to Evennia's original `at_post_login`.
+
+**General pattern documented:** Any code path that reads an `ObjectDB` field which may have been updated by another process must use `flush_from_cache(force=True)` + `refresh_from_db()` before acting on the value. See [shard-isolation.md](shard-isolation.md#cross-process-cache-staleness) for the full write-up.
+
+**Files changed:** `hooks.py` (flush+refresh in `_is_redirectable_character`, new `make_shard_at_post_login` factory), `commands.py` (flush+refresh in `ShardAwareCmdIC.func()`), `apps.py` (shard-side `at_post_login` wrapper installation alongside existing router override), `tests.py` (`flush_from_cache` stub on `_FakeCharacter`).
+
+**Docs updated:** [ticket-auth-flow.md](ticket-auth-flow.md) (shards no longer use vanilla `at_post_login`), [library-integration-risks.md](library-integration-risks.md) (shard wrapper added to `at_post_login` coupling section), [shard-isolation.md](shard-isolation.md) (new "Cross-process cache staleness" section).
+
+164 tests passing.
+
 ### 2026-05-02 — `cross_shard_move_to` spike 1: single-object move (unit-tested)
 
 The first slice of the cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Spike 1 scope: move a single `ObjectDB`-derived row across shards, no recursion through `obj.contents`, with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
@@ -74,7 +115,7 @@ Closes the auth/redirect feature: both `AUTO_PUPPET_ON_LOGIN = True` and `False`
 | set with broken `shard_id` (`None`, `"*"`, not in `SHARD_URLS`) | log warning, render OOC menu — login does not fail |
 | `None` | render OOC menu silently |
 
-Install gating: inline `if get_role() == ROLE_ROUTER:` in `AppConfig.ready()`, alongside the existing CmdIC/CmdOOC patches. Shards keep vanilla `at_post_login` — that's their auto-puppet path after ticket-auth.
+Install gating: inline `if get_role() == ROLE_ROUTER:` in `AppConfig.ready()`, alongside the existing CmdIC/CmdOOC patches. Shards originally kept vanilla `at_post_login` — that was their auto-puppet path after ticket-auth. *(Later amended: shards now wrap the original with a cache-busting preamble — see 2026-05-03 milestone.)*
 
 New coupling section added to [library-integration-risks.md](library-integration-risks.md#defaultaccountat_post_login-override) covering Evennia upgrade and consumer override risks.
 
