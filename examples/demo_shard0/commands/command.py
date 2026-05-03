@@ -28,7 +28,7 @@ class CmdCrossShardMove(BaseCommand):
     Usage:
       cross_shard_move <shard_id> <room_pk>
 
-    Calls cross_shard_move_to to move self.caller (the character the
+    Calls cross_shard_character_move to move self.caller (the character the
     admin is currently puppeting) to the room at room_pk on shard_id.
     Reports the move result. Sessions are redirected automatically by
     the primitive.
@@ -43,7 +43,7 @@ class CmdCrossShardMove(BaseCommand):
     help_category = "Admin"
 
     def func(self):
-        from evennia_shards import cross_shard_move_to
+        from evennia_shards import cross_shard_character_move
 
         args = self.args.strip().split(None, 1)
         if len(args) < 2:
@@ -60,9 +60,9 @@ class CmdCrossShardMove(BaseCommand):
             return
 
         try:
-            result = cross_shard_move_to(self.caller, target_shard, room_pk)
+            result = cross_shard_character_move(self.caller, target_shard, room_pk)
         except Exception as exc:  # noqa: BLE001
-            self.caller.msg(f"|rcross_shard_move_to failed: {exc}|n")
+            self.caller.msg(f"|rcross_shard_character_move failed: {exc}|n")
             return
 
         self.caller.msg(

@@ -8,7 +8,7 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ### 2026-05-03 — Pre-emptive session detach: zombie session fix for cross-shard round-trips
 
-Live smoke testing of `cross_shard_move_to` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
+Live smoke testing of `cross_shard_character_move` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
 
 **Full causal chain:**
 
@@ -17,7 +17,7 @@ Live smoke testing of `cross_shard_move_to` round-trips (shard0 → shard1 → s
 
 **First fix attempt (calling `unpuppet_object` inside bypass) failed.** Evennia's `at_post_unpuppet` hook does `self.db.prelogout_location = self.location`, which dereferences the location FK to the room on the target shard. The room is NOT in the bypass set, so `from_db` refuses.
 
-**Working fix: minimal session detach.** Instead of calling Evennia's full `unpuppet_object`, `cross_shard_move_to` now clears `session.puppet = None` and `session.puid = None` for each puppeting session, and removes the `"puppeted"` tag from the character. This prevents the disconnect handler from entering the puppet cleanup path (its `if obj:` guard finds `None`), and prevents `server_maintenance` from trying to `from_db` a now-foreign row via `get_by_tag("puppeted")`.
+**Working fix: minimal session detach.** Instead of calling Evennia's full `unpuppet_object`, `cross_shard_character_move` now clears `session.puppet = None` and `session.puid = None` for each puppeting session, and removes the `"puppeted"` tag from the character. This prevents the disconnect handler from entering the puppet cleanup path (its `if obj:` guard finds `None`), and prevents `server_maintenance` from trying to `from_db` a now-foreign row via `get_by_tag("puppeted")`.
 
 **Why minimal detach is safe:** The destination shard's `puppet_object` overwrites `db_sessid` and `db_account` when the player arrives, so stale values in those fields are harmless. The skipped hooks (`at_pre_unpuppet`, `at_post_unpuppet`) are not needed because the character is leaving this process entirely.
 
@@ -27,7 +27,7 @@ Live smoke testing of `cross_shard_move_to` round-trips (shard0 → shard1 → s
 
 ### 2026-05-03 — Idmapper / Attribute-cache staleness fix for cross-shard moves
 
-Live smoke testing of `cross_shard_move_to` (shard0 → shard1 → shard0 round-trip) exposed two bugs caused by Evennia's in-memory caching defeating cross-process DB updates. Both share the same root cause: when one process updates a row's `shard_id`, other processes' caches still hold the old value.
+Live smoke testing of `cross_shard_character_move` (shard0 → shard1 → shard0 round-trip) exposed two bugs caused by Evennia's in-memory caching defeating cross-process DB updates. Both share the same root cause: when one process updates a row's `shard_id`, other processes' caches still hold the old value.
 
 **Bug 1: Router IC command redirects to wrong shard.** After moving a character from shard0 to shard1, going OOC back to the router, then typing `ic` — the router redirected to shard0 (old `shard_id`) instead of shard1.
 
@@ -47,7 +47,7 @@ Live smoke testing of `cross_shard_move_to` (shard0 → shard1 → shard0 round-
 
 164 tests passing.
 
-### 2026-05-02 — `cross_shard_move_to` spike 1: single-object move (unit-tested)
+### 2026-05-02 — `cross_shard_character_move` spike 1: single-object move (unit-tested)
 
 The first slice of the cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Spike 1 scope: move a single `ObjectDB`-derived row across shards, no recursion through `obj.contents`, with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
 
@@ -63,13 +63,13 @@ Three findings worth recording for future work:
 - **`_safe_contents_update` flag suppresses Evennia's post-save contents-cache update**, which would otherwise dereference `self.db_location` (the target room on the remote shard) and trip the `from_db` chokepoint. Same flag Evennia itself uses for analogous location-change paths.
 - **Test setup uses `obj.__dict__["sessions"] = ...`** to shadow the lazy_property descriptor without going through Evennia's protective `__setattr__`. Real `ObjectDB` for the chokepoint-exercising parts; fake session handler for the redirect-counting parts.
 
-156 tests passing (148 prior + 8 new in `CrossShardMoveToTests`): no-sessions, one-session, multi-session, target-shard-not-configured, target-location-doesn't-exist, target-location-on-wrong-shard, atomic-rollback-on-save-failure, session-redirect-failure-captured.
+156 tests passing (148 prior + 8 new in `CrossShardCharacterMoveTests`): no-sessions, one-session, multi-session, target-shard-not-configured, target-location-doesn't-exist, target-location-on-wrong-shard, atomic-rollback-on-save-failure, session-redirect-failure-captured.
 
 **Deferred to subsequent spikes:** recursion through `obj.contents` (spike 3), generalisation to non-character objects (spike 2 — same machinery, no session redirect needed), live smoke testing with real router+shard processes, contrib-layer typeclasses (`CrossShardExit`, `CrossShardCmdTeleport`).
 
 ### 2026-05-02 — Shard isolation refactor + `shard_writes_allowed_for` bypass primitive
 
-The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_move_to` will be built on.
+The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_character_move` will be built on.
 
 **Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
 
@@ -302,7 +302,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 **Beyond the four-chokepoint spike** (Phase 2 / out of scope here):
 
-- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_move_to spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
+- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_character_move spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
 - Backfill migration for legacy NULL rows.
 - ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 

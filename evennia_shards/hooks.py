@@ -34,7 +34,7 @@ def _is_redirectable_character(character) -> bool:
     if character is None:
         return False
     # Router process may hold a stale row in the idmapper if another
-    # process moved this character (e.g. cross_shard_move_to updates
+    # process moved this character (e.g. cross_shard_character_move updates
     # shard_id and db_location_id together). Flush from the idmapper
     # cache first — Evennia's SharedMemoryModelBase.__call__ returns
     # the cached instance from from_db(), so refresh_from_db() is a
@@ -134,7 +134,7 @@ def make_shard_at_post_login(original_at_post_login):
     """Return a shard-side ``at_post_login`` that busts stale caches.
 
     When a character is moved back to this shard by another process
-    (via ``cross_shard_move_to``), the Account's Attribute-handler
+    (via ``cross_shard_character_move``), the Account's Attribute-handler
     cache on *this* process may still hold the Python object from the
     *outbound* move — with the old ``shard_id`` baked into its fields.
     Evennia's default ``at_post_login`` reads ``_last_puppet`` from that

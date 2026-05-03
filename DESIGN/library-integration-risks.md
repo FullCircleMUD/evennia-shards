@@ -50,7 +50,7 @@ The hazard is a consumer overriding `onOpen()` on their custom class without cal
 **What we patch / extend:** `evennia/accounts/accounts.py` → `DefaultAccount.at_post_login`. Two role-specific patches, both installed via monkey-patch in `AppConfig.ready()`. Based on Evennia 6.0.0.
 
 - **Router** (`get_role() == ROLE_ROUTER`): full replacement → `evennia_shards/hooks.py` → `shard_aware_at_post_login`.
-- **Shard** (`get_role() == ROLE_SHARD`): thin wrapper around Evennia's original → `evennia_shards/hooks.py` → `make_shard_at_post_login(original)`. Flushes the `_last_puppet` character from the idmapper and refreshes it from the DB before delegating to the original. Needed because `cross_shard_move_to` on the source shard updates the character's `shard_id` in the DB, but the destination shard's Account Attribute-handler cache may still hold the stale Python object with the old `shard_id` — causing `puppet_object` to trip the `pre_save` chokepoint.
+- **Shard** (`get_role() == ROLE_SHARD`): thin wrapper around Evennia's original → `evennia_shards/hooks.py` → `make_shard_at_post_login(original)`. Flushes the `_last_puppet` character from the idmapper and refreshes it from the DB before delegating to the original. Needed because `cross_shard_character_move` on the source shard updates the character's `shard_id` in the DB, but the destination shard's Account Attribute-handler cache may still hold the stale Python object with the old `shard_id` — causing `puppet_object` to trip the `pre_save` chokepoint.
 
 **Why:**
 

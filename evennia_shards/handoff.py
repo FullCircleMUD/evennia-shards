@@ -8,10 +8,10 @@ puppeting sessions to the destination shard.
 
 Houses two public primitives:
 
-- :func:`cross_shard_move_to` — composes the full handoff for an
-  object (single-object scope in the current spike): validate, atomic
-  DB writes (inside :func:`shard_writes_allowed_for`), idmapper
-  eviction, per-session ticket+redirect.
+- :func:`cross_shard_character_move` — composes the full handoff for a
+  character and its inventory (recursive): validate, atomic DB writes
+  (inside :func:`shard_writes_allowed_for`), idmapper eviction,
+  per-session ticket+redirect.
 - :func:`_redirect_to_character_shard` — the per-session redirect
   used by the move primitive, the ``ic`` command, and the
   ``at_post_login`` override.
@@ -25,20 +25,64 @@ from collections import namedtuple
 from django.db import transaction
 from evennia.utils import logger
 
-from .config import get_shard_url
+from .config import get_shard_id, get_shard_url
 from .errors import ShardIsolationError
 from .isolation import shard_writes_allowed_for
 from .tickets import create_ticket
+
+
+def _collect_all_contents(root_pk):
+    """Return pks of every descendant of *root_pk* (breadth-first, exclusive).
+
+    Uses ``values_list`` queries to avoid ``from_db`` / instance
+    construction — safe to call for objects on any shard.
+
+    Evennia prevents location loops, so cycle detection is unnecessary.
+    """
+    from evennia.objects.models import ObjectDB
+
+    all_pks = []
+    parents = [root_pk]
+    while parents:
+        children = list(
+            ObjectDB.objects.filter(db_location_id__in=parents)
+            .values_list("pk", flat=True)
+        )
+        if not children:
+            break
+        all_pks.extend(children)
+        parents = children
+    return all_pks
+
+
+def _evict_pks_from_idmapper(pks):
+    """Evict a list of pks from the ObjectDB idmapper cache.
+
+    Uses ``flush_from_cache(force=True)`` on instances already in the
+    cache (Evennia's API), with a direct dict pop as fallback for pks
+    not currently cached.  Both are equivalent today — ``force=True``
+    skips ``at_idmapper_flush`` and is just a dict pop — but using the
+    method is more future-proof.
+    """
+    from evennia.objects.models import ObjectDB
+
+    cache = ObjectDB.__dbclass__.__instance_cache__
+    for pk in pks:
+        cached = cache.get(pk)
+        if cached is not None:
+            cached.flush_from_cache(force=True)
+        else:
+            cache.pop(pk, None)
 
 
 MoveResult = namedtuple(
     "MoveResult",
     ["objects_moved", "sessions_redirected", "failures"],
 )
-"""Outcome of a :func:`cross_shard_move_to` call.
+"""Outcome of a :func:`cross_shard_character_move` call.
 
 - ``objects_moved`` (int): number of rows whose ``shard_id`` was
-  updated to the new shard. Spike 1: always 1 on success.
+  updated to the new shard (character + inventory contents).
 - ``sessions_redirected`` (int): number of puppeting sessions for
   which a ticket was created and a ``shard_redirect`` OOB was sent.
 - ``failures`` (list[tuple]): per-session failure entries —
@@ -48,13 +92,13 @@ MoveResult = namedtuple(
 """
 
 
-def cross_shard_move_to(obj, target_shard, target_location_pk):
-    """Move ``obj`` to ``target_shard``, into the room at ``target_location_pk``.
+def cross_shard_character_move(obj, target_shard, target_location_pk):
+    """Move ``obj`` and its inventory to ``target_shard``, into the room at ``target_location_pk``.
 
-    Spike 1 scope: single object, **no recursion through
-    ``obj.contents``**. Caller is responsible for ensuring ``obj`` has
-    no contents (or is comfortable with contents being orphaned in
-    source-shard rows). Recursion lands as a separate spike.
+    Moves the character and all recursive contents (inventory items,
+    bags-within-bags, etc.).  Contents' ``db_location_id`` is unchanged
+    — parent pk doesn't change across shards.  Contents with
+    ``shard_id == "*"`` (globals) are left alone.
 
     Steps:
 
@@ -63,18 +107,18 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
        ``target_shard`` (or is the global ``"*"`` sentinel).
     3. Snapshot the sessions currently puppeting ``obj`` (with their
        accounts) before anything changes — after the session detach
-       (step 5) the puppet references will be cleared.
+       (step 6) the puppet references will be cleared.
+    3b. Collect all descendant pks (recursive inventory) via
+       ``_collect_all_contents``.
     4. Atomic DB writes + idmapper eviction inside one
        ``transaction.atomic()`` block (with ``shard_writes_allowed_for``
        lifting the chokepoints for ``obj``): update ``obj.shard_id``
        and ``obj.db_location_id``, save, evict from this process's
-       idmapper. The eviction is inside the atomic block so a failure
-       there rolls back the DB write too. On any exception, a defensive
-       second eviction runs in the ``except`` branch — the in-memory
-       ``obj.shard_id`` was mutated before save, so even with a
-       rolled-back DB the cached instance is stale and shouldn't be
-       served from the idmapper afterwards.
-    5. Pre-emptive session detach — still inside the
+       idmapper.
+    5. Bulk-update contents' ``shard_id`` to ``target_shard`` and evict
+       them from the idmapper.  Single ``qs.update`` — no bypass needed
+       because contents have ``shard_id == current_shard``.
+    6. Pre-emptive session detach — still inside the
        ``shard_writes_allowed_for`` bypass but outside the atomic
        block. Clears ``session.puppet`` and ``session.puid`` for
        each snapshotted session, and removes the ``"puppeted"`` tag
@@ -85,13 +129,8 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
        row not in the bypass set.  The minimal detach is sufficient:
        the disconnect handler's ``obj = session.puppet; if obj:``
        guard finds ``None`` and returns immediately — no save, no
-       chokepoint error, no zombie session.  Without this detach,
-       the asynchronous disconnect handler (WebSocket close →
-       ``portal_disconnect`` → ``at_disconnect`` →
-       ``unpuppet_object``) runs outside any bypass and creates a
-       zombie session whose stale ``shard_id`` poisons the next
-       ``portal_connect`` via ``disconnect_duplicate_sessions``.
-    6. For each snapshotted session: create a ticket and send
+       chokepoint error, no zombie session.
+    7. For each snapshotted session: create a ticket and send
        ``shard_redirect`` OOB. Per-session failures are captured in
        the returned :class:`MoveResult` and do not roll back the move.
 
@@ -119,7 +158,7 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
         get_shard_url(target_shard)
     except (KeyError, ValueError) as exc:
         raise ShardIsolationError(
-            f"cross_shard_move_to: target_shard {target_shard!r} is not "
+            f"cross_shard_character_move: target_shard {target_shard!r} is not "
             f"configured (not present in SHARD_URLS)"
         ) from exc
 
@@ -130,27 +169,30 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
     )
     if not target_rows:
         raise ShardIsolationError(
-            f"cross_shard_move_to: target_location_pk {target_location_pk!r} "
+            f"cross_shard_character_move: target_location_pk {target_location_pk!r} "
             f"does not exist"
         )
     location_shard = target_rows[0]
     if location_shard != target_shard and location_shard != "*":
         raise ShardIsolationError(
-            f"cross_shard_move_to: target_location_pk {target_location_pk!r} "
+            f"cross_shard_character_move: target_location_pk {target_location_pk!r} "
             f"is on shard {location_shard!r}, not {target_shard!r}"
         )
 
     # 3. Snapshot sessions before anything changes. After the
-    # session detach (step 5) the puppet references will be cleared,
-    # and we need the (session, account) pairs for redirect in step 6.
+    # session detach (step 6) the puppet references will be cleared,
+    # and we need the (session, account) pairs for redirect in step 7.
     sessions_to_redirect = [
         (session, session.account) for session in obj.sessions.all()
     ]
 
+    # 3b. Collect all descendant pks (recursive inventory).
+    content_pks = _collect_all_contents(obj.pk)
+
     # 4. Atomic DB writes + idmapper eviction + pre-emptive session detach.
     #
     # shard_writes_allowed_for wraps the whole block — both the
-    # atomic DB update (step 4) AND the session detach (step 5).
+    # atomic DB update (steps 4-5) AND the session detach (step 6).
     # The bypass is keyed on id(obj), which stays valid
     # because flush_from_cache only evicts from the idmapper dict;
     # the Python object and its identity are unchanged.
@@ -194,7 +236,22 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
                         pass
                 obj.flush_from_cache(force=True)
 
-            # 5. Pre-emptive session detach — inside bypass, outside
+                # 5. Bulk-update contents' shard_id and evict from
+                # idmapper.  No bypass needed — contents have
+                # shard_id == current_shard, so the custom
+                # QuerySet.update chokepoint allows the write.
+                # Filter by current shard to skip globals ("*"),
+                # NULLs, and any foreign strays.
+                if content_pks:
+                    current_shard = get_shard_id()
+                    contents_updated = ObjectDB.objects.filter(
+                        pk__in=content_pks, shard_id=current_shard,
+                    ).update(shard_id=target_shard)
+                    _evict_pks_from_idmapper(content_pks)
+                else:
+                    contents_updated = 0
+
+            # 6. Pre-emptive session detach — inside bypass, outside
             # atomic.
             #
             # We cannot call Evennia's full unpuppet_object() here
@@ -235,17 +292,23 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
                 obj.tags.remove("puppeted", category="account")
             except Exception as exc:
                 logger.log_warn(
-                    f"cross_shard_move_to: puppeted tag removal "
+                    f"cross_shard_character_move: puppeted tag removal "
                     f"failed for obj pk={obj.pk}: {exc}"
                 )
     except Exception:
+        # Defensive eviction — idmapper pops aren't rolled back by
+        # transaction.atomic, so purge stale entries on failure too.
         try:
             obj.flush_from_cache(force=True)
         except Exception:
             pass
+        try:
+            _evict_pks_from_idmapper(content_pks)
+        except Exception:
+            pass
         raise
 
-    # 6. Per-session redirect. Reached only if the bypass block
+    # 7. Per-session redirect. Reached only if the bypass block
     # above completed cleanly — any exception there re-raises and
     # skips this block (the control flow is the guarantee; no flag
     # needed). Uses the pre-snapshotted (session, account) pairs
@@ -260,13 +323,13 @@ def cross_shard_move_to(obj, target_shard, target_location_pk):
             redirected += 1
         except Exception as exc:
             logger.log_warn(
-                f"cross_shard_move_to: redirect failed for session "
+                f"cross_shard_character_move: redirect failed for session "
                 f"{session!r} on obj pk={obj.pk}: {exc}"
             )
             failures.append((session, exc))
 
     return MoveResult(
-        objects_moved=1,
+        objects_moved=1 + contents_updated,
         sessions_redirected=redirected,
         failures=failures,
     )
@@ -280,7 +343,7 @@ def _redirect_to_character_shard(account, session, character) -> str:
 
     - ``ShardAwareCmdIC`` (manual ``ic <char>``)
     - ``shard_aware_at_post_login`` (login-time auto-puppet)
-    - upcoming ``cross_shard_move_to`` (programmatic handoff)
+    - ``cross_shard_character_move`` (programmatic handoff)
 
     The caller is responsible for validating ``character.shard_id``
     before calling — this helper assumes a usable shard id (not
