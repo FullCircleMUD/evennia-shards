@@ -24,7 +24,7 @@ The library does not impose its own room or character base classes — it provid
 - Not a multi-region, multi-database, or multi-datacenter design.
 - Not a solution for *"what if we had millions of players"* — that is explicitly deferred.
 
-The design is scoped to the **single-Postgres era**: from one Evennia process today through however many shards run against a single, vertically scaled Postgres. See [the archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#project-identity-and-positioning) for the original positioning statement and out-of-scope list.
+The design is scoped to the **single-Postgres era**: from one Evennia process today through however many shards run against a single, vertically scaled Postgres. The working theory is that Evennia's per-process bottleneck is its single-threaded Twisted reactor — game logic, ticks, scripts, and player commands all share one thread — while Postgres handles concurrent connections and aggregate load comfortably. Horizontal scaling for Evennia therefore means adding *Evennia* processes, not databases; a single vertically scaled Postgres should absorb the load of many shards before its own limits bite. We haven't benchmarked at scale, and "many" is qualitative — if a real game pushes through that frontier, the architectural assumptions here will need revisiting. Scoping to single-Postgres keeps the design surface small in the meantime. See [the archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#project-identity-and-positioning) for the original positioning statement and out-of-scope list.
 
 ## Quick start
 
