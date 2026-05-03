@@ -12,7 +12,7 @@ Each coupling section follows the same template:
 - **Risk on Evennia upgrade** — what to diff in the new Evennia version.
 - **Risk in consumer override** — what consumer-side customisation would collide, and the recommended pattern.
 
-This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (CmdIC/CmdOOC patches, ObjectDB.from_db, pre_save/pre_delete signals, QuerySet.update, WEBSOCKET_PROTOCOL_CLASS rewiring, middleware injection) will be backfilled as we revisit them.
+This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (CmdIC/CmdOOC patches, ObjectDB.from_db, pre_save/pre_delete signals, QuerySet.update, WEBSOCKET_PROTOCOL_CLASS rewiring, middleware injection) will be backfilled as we revisit them.
 
 ## WebSocketClient.onOpen() override
 
@@ -78,6 +78,34 @@ How to check: diff upstream `DefaultAccount.at_post_login` against the snapshot 
 A consumer that subclasses `DefaultAccount` and overrides `at_post_login` without calling `super().at_post_login(...)` will bypass our patch — the consumer's body runs instead. On the router, auto-puppet redirect stops working. On shards, the cache-busting preamble is skipped and cross-shard moves back to a previously-visited shard will trip the `pre_save` chokepoint. Recommended pattern: any consumer override of `at_post_login` must call `super().at_post_login(session=session, **kwargs)` (or accept that these behaviours will not run on their accounts).
 
 A consumer that *doesn't* override `at_post_login` is safe by Python MRO — `account.at_post_login(...)` resolves to our patched `DefaultAccount.at_post_login` automatically.
+
+## `Account.create_character()` wrapper
+
+**What we patch / extend:** `evennia/accounts/accounts.py` → `Account.create_character` (the consumer-configured account class via `settings.BASE_ACCOUNT_TYPECLASS`, not `DefaultAccount` directly). Library code: `evennia_shards/chargen.py` → `make_shard_aware_create_character(original)`. Installed only on the router. Based on Evennia 6.0.0.
+
+**Why:**
+
+`Account.create_character` is the converging seam for all chargen paths — `CmdCharCreate`, `AUTO_CREATE_CHARACTER_WITH_ACCOUNT`, and the guest path all funnel through it. It runs on the router (chargen is an OOC operation; the player's session lives on the router while OOC). Without intervention, the new row is auto-stamped by `pre_save` with `current = get_shard_id() = "router"`, which is not a member of `SHARD_URLS` — so `ShardAwareCmdIC` and the `at_post_login` auto-puppet path cannot redirect the player to any shard.
+
+The wrapper calls vanilla unmodified, then reads the new character's `db_location_id`'s `shard_id` via `.values_list` and overwrites the router auto-stamp. The character's shard is by definition the shard that owns its location row — there is no separate policy decision. The two `save()`s (vanilla's plus the wrapper's `update_fields=["shard_id"]`) are both router-side, exempt from the foreign-shard refusal in `pre_save`, so no bypass is needed.
+
+`DEFAULT_HOME` is not touched at chargen time — vanilla `create_character` does not set `db_home`, and any later cross-shard home transfer is a runtime move handled by `cross_shard_character_move`.
+
+**Risk on Evennia upgrade:**
+
+- Changes to `Account.create_character`'s return contract (currently `(character, errs)`). Wrapper assumes a tuple and a falsy `character` on failure.
+- Changes to whether `db_location_id` is set inline by `account.create_character` before returning (currently set from `settings.START_LOCATION` if not provided). If a future Evennia version delays location assignment, the wrapper's lookup would see `None` and skip the stamp.
+- A new chargen path that bypasses `Account.create_character` (e.g. a separate `Account.create_npc` or rewritten `DefaultGuest.authenticate`) would not pass through the wrapper.
+
+How to check: diff upstream `Account.create_character` (and `DefaultGuest.authenticate`'s character-creation block) against the calling pattern the wrapper assumes.
+
+**Risk in consumer override:**
+
+A consumer that subclasses `DefaultAccount` and overrides `create_character` is **safe by construction**: the wrapper is installed on the configured `BASE_ACCOUNT_TYPECLASS` and reads `AccountCls.create_character` at install time, so MRO picks up either the consumer's override or the inherited `DefaultAccount` method — whichever is in effect — and wraps that. The consumer's body runs first, then the stamp.
+
+The hazard is a consumer override that doesn't actually call `create.create_object` (or otherwise produces a character whose `db_location_id` is `None`). The wrapper logs a warning and leaves the character router-stamped; chargen succeeds but IC won't work. Recommended pattern: any consumer override should set `db_location` via the same `START_LOCATION` (or equivalent) source as vanilla.
+
+A consumer who points `BASE_ACCOUNT_TYPECLASS` at a class that doesn't derive from `DefaultAccount` would not have `create_character` at all; the wrapper install would fail at startup. This is symmetrical to other base-class assumptions in Evennia (locks, `_playable_characters`, etc.).
 
 ## `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation` override
 

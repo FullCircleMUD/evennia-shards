@@ -6,6 +6,20 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-03 — Chargen wrapper: stamp `shard_id` from the start-location row
+
+Closes a quiet break in chargen under split deployment. Without intervention, a new character created on the router lands with `shard_id="router"` (auto-stamped by `pre_save`), which is not in `SHARD_URLS` — so going IC fails with no redirect target.
+
+The fix is a shallow wrapper around `Account.create_character` (the converging seam for `CmdCharCreate`, `AUTO_CREATE_CHARACTER_WITH_ACCOUNT`, and the guest path). After vanilla creates the character, the wrapper looks up `db_location_id`'s `shard_id` via `.values_list` (same idiom as `handoff.py:166`) and overwrites the router auto-stamp with the start room's shard. The two rows must agree by definition — the character's location determines its shard. No new setting; no policy decision; just lookup-and-stamp.
+
+**Files:** new `evennia_shards/chargen.py` (`make_shard_aware_create_character` factory), `apps.py` (router-side install). The patch resolves the consumer's configured account class via `class_from_module(settings.BASE_ACCOUNT_TYPECLASS)` rather than patching `DefaultAccount` directly — so a consumer override of `create_character` is wrapped rather than shadowed (same pattern `protocols.py` uses for `WEBSOCKET_PROTOCOL_CLASS`).
+
+Unusable start-location cases (`shard_id` is `None`, `"*"`, or `"router"`) log a warning and leave the character router-stamped — chargen does not fail, but the player will hit the existing broken-IC path so the misconfiguration surfaces twice (log + IC attempt).
+
+`DEFAULT_HOME` is intentionally not handled here. Vanilla `account.create_character` does not set `db_home`; any later cross-shard "send to home" is a runtime move, handled by the existing handoff machinery.
+
+177 tests passing (170 prior + 7 new in `ShardAwareCreateCharacterTests`): happy path, vanilla-returned-None pass-through, unstamped/global/router-owned/no-location cases, and kwargs pass-through. Live smoke pending.
+
 ### 2026-05-03 — Inventory recursion + rename to `cross_shard_character_move`
 
 Renamed `cross_shard_move_to` → `cross_shard_character_move` to reflect that the primitive is character-shaped (sessions, puppet tags, redirects). Added recursive inventory movement: all contents (items, bags-within-bags, arbitrarily nested) have their `shard_id` bulk-updated and are evicted from the idmapper in the same atomic block as the character. Contents' `db_location_id` is unchanged — parent pk doesn't change across shards. Global (`"*"`) items are left alone.

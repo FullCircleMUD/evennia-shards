@@ -18,7 +18,7 @@ These together prevent cache poisoning, cross-shard data corruption, and silent 
 The router is exempt from all four chokepoints. It needs unrestricted access to ObjectDB because it is the coordinator for OOC operations that span shards:
 
 - **Reads**: deserializing `_last_puppet` to resolve which character (and which shard) to redirect to on login.
-- **Writes**: character creation (chargen) — the router creates characters and stamps them with the target shard's `shard_id`.
+- **Writes**: character creation (chargen) — the router creates characters and stamps them with the target shard's `shard_id`. The stamp is derived from the new character's `db_location_id` row's `shard_id` by a wrapper around `Account.create_character`; see [library-integration-risks.md](library-integration-risks.md#accountcreate_character-wrapper) and `evennia_shards/chargen.py`.
 - **Deletes**: character deletion is an OOC operation handled by the router.
 
 The isolation rule is: **shards are isolated from each other; the router is trusted**. In the chokepoint logic, the check becomes "am I a shard and is this object owned by a different shard?" rather than "is this object owned by a different shard?"

@@ -2456,3 +2456,203 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
 
         # OOC menu rendered.
         self.assertEqual(len(account.at_look_calls), 1)
+
+
+@override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
+class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
+    """Direct tests for ``make_shard_aware_create_character``.
+
+    The wrapper sits on the router-side ``Account.create_character`` seam
+    (the converging point for ``CmdCharCreate``,
+    ``AUTO_CREATE_CHARACTER_WITH_ACCOUNT``, and the guest path). On
+    successful chargen it reads the new character's start-location row's
+    ``shard_id`` via ``.values_list`` and stamps the character to match,
+    overwriting the ``"router"`` auto-stamp from ``pre_save``. Tests use
+    real ``ObjectDB`` rows for the location lookup; the vanilla
+    ``create_character`` is a stub callable that returns a pre-built
+    character row.
+    """
+
+    def _make_room(self, shard_id):
+        """Create an ObjectDB row to act as the start location."""
+        room = ObjectDB.objects.create(
+            db_key="start_room", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(room.pk, shard_id)
+        return room
+
+    def _make_character(self, location):
+        """Create an ObjectDB row to act as the new character.
+
+        Auto-stamped to ``"router"`` by ``pre_save`` since the test
+        class is in router role.
+        """
+        char = ObjectDB.objects.create(
+            db_key="newchar",
+            db_typeclass_path=TYPECLASS,
+            db_location=location,
+        )
+        return char
+
+    def _stub_original(self, character, errs=None):
+        """Build a vanilla-shaped ``create_character`` stub.
+
+        Records its kwargs so tests can assert pass-through.
+        """
+        recorder = {"args": None, "kwargs": None}
+
+        def _original(self, *args, **kwargs):
+            recorder["args"] = args
+            recorder["kwargs"] = kwargs
+            return character, errs
+
+        return _original, recorder
+
+    def test_stamps_shard_id_from_start_location(self):
+        """Happy path: new character's shard_id matches start room's."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="shard0")
+        char = self._make_character(location=room)
+        # Sanity: pre_save auto-stamped the character to the router.
+        self.assertEqual(char.shard_id, ROLE_ROUTER)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        result_char, result_errs = wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIs(result_char, char)
+        self.assertIsNone(result_errs)
+        # Persisted update_fields=["shard_id"] write.
+        persisted_shard = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)[0]
+        )
+        self.assertEqual(persisted_shard, "shard0")
+        # In-memory instance also updated.
+        self.assertEqual(char.shard_id, "shard0")
+
+    def test_passes_through_when_vanilla_returns_none(self):
+        """Vanilla refused (e.g. slot limit) → wrapper returns same tuple."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        errs = ["You have reached the max characters for this account."]
+        original, recorder = self._stub_original(None, errs=errs)
+        wrapped = make_shard_aware_create_character(original)
+
+        result_char, result_errs = wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(result_char)
+        self.assertEqual(result_errs, errs)
+        # Ensure original was actually invoked.
+        self.assertEqual(recorder["args"], ("Bob",))
+
+    def test_unstamped_start_location_leaves_router_stamp(self):
+        """Start room shard_id=None → character left as ``"router"``.
+
+        Wrapper logs a warning (Evennia's logger setup is independent of
+        Python's stdlib logging — see comment in
+        ``AtPostLoginRouterTests.test_unusable_shard_id_warns_and_falls_through``);
+        we assert on the side-effect (no overwrite) rather than the log.
+        """
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        # _forge_db_shard with None: room is unstamped.
+        room = ObjectDB.objects.create(
+            db_key="start_room", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(room.pk, None)
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        persisted_shard = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)[0]
+        )
+        self.assertEqual(persisted_shard, ROLE_ROUTER)
+
+    def test_global_start_location_leaves_router_stamp(self):
+        """Start room shard_id="*" → character left as ``"router"``."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="*")
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        persisted_shard = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)[0]
+        )
+        self.assertEqual(persisted_shard, ROLE_ROUTER)
+
+    def test_router_owned_start_location_leaves_router_stamp(self):
+        """Start room shard_id="router" → no overwrite."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id=ROLE_ROUTER)
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        persisted_shard = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)[0]
+        )
+        self.assertEqual(persisted_shard, ROLE_ROUTER)
+
+    def test_no_db_location_leaves_router_stamp(self):
+        """Character created without db_location → no overwrite."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        char = ObjectDB.objects.create(
+            db_key="newchar", db_typeclass_path=TYPECLASS,
+        )
+        self.assertIsNone(char.db_location_id)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        persisted_shard = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)[0]
+        )
+        self.assertEqual(persisted_shard, ROLE_ROUTER)
+
+    def test_kwargs_flow_through_to_vanilla(self):
+        """Wrapper does not mutate args/kwargs going into vanilla."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="shard0")
+        char = self._make_character(location=room)
+
+        original, recorder = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        sentinel = object()
+        wrapped(
+            _FakeAccount(pk=7),
+            "Bob",
+            "A description.",
+            typeclass="my.path",
+            character_typeclass="my.path",
+            extra=sentinel,
+        )
+
+        self.assertEqual(recorder["args"], ("Bob", "A description."))
+        self.assertEqual(recorder["kwargs"]["typeclass"], "my.path")
+        self.assertEqual(recorder["kwargs"]["character_typeclass"], "my.path")
+        self.assertIs(recorder["kwargs"]["extra"], sentinel)
