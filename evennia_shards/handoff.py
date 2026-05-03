@@ -139,9 +139,23 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
             shard, to be moved to ``target_shard``.
         target_shard: the destination shard's ``SHARD_ID``. Must be a
             key in ``SHARD_URLS``.
-        target_location_pk: pk of the destination room (or container)
-            on the target shard. Must exist; must have ``shard_id ==
-            target_shard`` or ``shard_id == "*"``.
+        target_location_pk: pk of the destination row on the target
+            shard (typically a room, but the primitive does not enforce
+            that — see "Target typeclass not validated" below). Must
+            exist; must have ``shard_id == target_shard`` or
+            ``shard_id == "*"``.
+
+    Target typeclass not validated. The primitive checks only that the
+    target row exists and is on the target shard. It does not check
+    that the target is a Room (vs. a Character, Item, Exit, etc.).
+    Considered and rejected: encoding "valid move targets" as a
+    library-level rule would put a game concept into the primitive,
+    against load-bearing principle 3 (the library does not own game
+    concepts). Some games legitimately move characters into vehicles,
+    mounts, or containers; the choice of valid destinations is the
+    consumer's. Consumer-side typeclass code (e.g. a ``CrossShardExit``
+    or a teleport command) should validate the target's typeclass
+    before calling this primitive.
 
     Returns:
         :class:`MoveResult` with counts and per-session failures.
