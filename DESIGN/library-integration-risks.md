@@ -58,7 +58,7 @@ When `AUTO_PUPPET_ON_LOGIN = True` (Evennia's default), `at_post_login` calls `p
 
 The library needs to make a routing decision (redirect-to-shard vs render OOC menu) at exactly the position where Evennia's if/else lives. Three alternatives were considered and rejected:
 
-- **Mutate `_AUTO_PUPPET_ON_LOGIN`** to force the else-branch: it's a module-level cached constant. Mutating it is process-global, races on concurrent logins, and the redirect would still need to happen *after* the else-branch rendered the OOC menu (visible flash before page navigates).
+- **Mutate `_AUTO_PUPPET_ON_LOGIN`** to force the else-branch: it's a module-level cached constant. Mutating it is process-global, races on concurrent logins, and the redirect would still need to happen *after* the else-branch rendered the OOC menu (visible flash before the WS-level redirect kicks in).
 - **Override `puppet_object` instead**: wrong granularity — by the time `puppet_object` is called the prelude has run and the if-branch has been taken. Doesn't handle the `_last_puppet=None` case at all (because `puppet_object` is never called when it raises early). Also broadens blast radius (`puppet_object` is also called from `CmdIC` etc.).
 - **Use `SIGNAL_ACCOUNT_POST_LOGIN`**: fires *after* `at_post_login` completes — by which point the puppet has already happened or the OOC menu has rendered. Three state transitions instead of one.
 

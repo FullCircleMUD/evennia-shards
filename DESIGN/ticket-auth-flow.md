@@ -16,22 +16,20 @@ Router                          Client                          Shard
   |    account_id, character_id,  |                               |
   |    "shard0")                  |                               |
   |                               |                               |
-  |  shard_url = get_shard_url(   |                               |
+  |  ws_url = get_shard_url(      |                               |
   |    "shard0")                  |                               |
+  |  (a ws:// or wss:// URL)      |                               |
   |                               |                               |
   |  OOB: shard_redirect          |                               |
-  |  [shard_url?ticket=T]         |                               |
+  |  [ws_url?ticket=T]            |                               |
   |------------------------------>|                               |
-  |                               |  window.location.href =       |
-  |                               |  http://shard/webclient?       |
-  |                               |    ticket=T                   |
+  |                               |  shard_redirect.js:           |
+  |                               |  1. close existing WebSocket   |
+  |                               |     (page stays loaded;       |
+  |                               |     scrollback / UI persist)  |
+  |                               |  2. open new WebSocket to      |
+  |                               |     ws_url?ticket=T           |
   |                               |------------------------------>|
-  |                               |                               |
-  |                               |  middleware injects ticket     |
-  |                               |  into window.csessid           |
-  |                               |                               |
-  |                               |  ws connects with             |
-  |                               |  &ticket=T in query string    |
   |                               |                               |
   |                               |  onOpen() auth cascade:       |
   |                               |  1. browser session? (no)     |
@@ -40,6 +38,9 @@ Router                          Client                          Shard
   |                               |  4. delete ticket             |
   |                               |                               |
   |                               |  player is IC, playing        |
+  |                               |  (same browser tab, same      |
+  |                               |   page — only the WebSocket   |
+  |                               |   has changed)                |
   |                               |<----------------------------->|
 ```
 
@@ -86,14 +87,26 @@ This ordering is load-bearing: tickets are single-use, so checking them first wo
 
 ## Client-side redirect mechanism
 
-The redirect uses a full page navigation (`window.location.href`), not a WebSocket-level reconnect. This is simpler and gives better UX:
+The redirect operates at the **WebSocket connection layer**, not the page-navigation layer. The page stays loaded; only the underlying WebSocket changes target. UI state, scrollback, command history, plugin state — all persist across cross-shard transitions.
 
-- **OOB message**: server sends `["shard_redirect", ["http://host:port/webclient?ticket=TOKEN"], {}]`
-- **JS plugin** (`shard_redirect.js`): catches the OOB via a direct emitter listener (bypasses `default_out.js` catch-all) and navigates the browser to the target URL.
-- **Middleware** (`ShardRedirectScriptMiddleware`): intercepts the target instance's webclient HTML response. If `?ticket=` is present in the HTTP URL, injects an inline `<script>` that appends `&ticket=TOKEN` to `window.csessid`. This places the ticket in the WebSocket URL's query string alongside Evennia's positional params (`csessid&ticket=TOKEN&cuid&browser`), where both Evennia's positional parser and the library's `parse_qs()` extraction handle it correctly.
-- **Browser refresh**: works because `at_login()` saves the uid to the Django session via csessid. A refresh re-sends the stale `?ticket=` in the URL, but the browser session check (auth priority #1) catches it first.
+- **OOB message**: server sends `["shard_redirect", ["ws://host:port/?ticket=TOKEN"], {}]`. The URL is a WebSocket URL (`ws://` or `wss://`) with the single-use ticket in the query string.
+- **JS plugin** (`shard_redirect.js`): catches the OOB via a direct emitter listener and:
+  1. Sets a `deliberate_transfer` flag.
+  2. Calls `Evennia.connection.close()` on the current WebSocket-backed connection.
+  3. Constructs a new `WebSocket(target_url)` and replaces `Evennia.connection` with a wrapper exposing the standard `{connect, msg, close, isOpen}` contract — mirroring Evennia's own `WebsocketConnection` event-emit shape so other plugins continue working unchanged.
+  4. Wraps `Evennia.emitter.emit` once at module load to swallow the `connection_close` event triggered by step 2 (otherwise webclient_gui's `onConnectionClose` would print a misleading "connection was closed or lost" message). Real disconnects continue to render normally — the flag is consumed on the first `connection_close` after each deliberate transfer, with a 5s safety timeout.
+- **Middleware** (`ShardRedirectScriptMiddleware`): injects the `shard_redirect.js` script tag into webclient HTML responses. This is what gets the JS plugin loaded into the page in the first place. The middleware also has a legacy ticket-injection path (`?ticket=` in the page URL → inline `<script>` appending `&ticket=TOKEN` to `window.csessid`); that path is now only relevant if someone loads a webclient page directly with `?ticket=` in the URL — an edge case (manual paste, bookmark) that the WS-level redirect doesn't otherwise traverse.
+- **Browser refresh**: refreshes the loaded webclient page (same as a vanilla Evennia refresh). The Django/csessid session continues; if the player was IC on a shard at refresh time, they reconnect to that shard via the saved csessid (no ticket needed for a re-attach).
 
 The middleware and JS plugin are auto-injected by `AppConfig.ready()` — zero consumer configuration beyond `INSTALLED_APPS`.
+
+### Why connection-level instead of page-navigation
+
+This design was chosen over an earlier full-page-navigation approach (`window.location.href`) for several reasons that compound:
+
+- **UX continuity.** The page never reloads; scrollback, plugin state, custom UI all persist across cross-shard transitions. Players experience the transition as a brief connection swap, not as "the world disappeared and reappeared."
+- **Protocol-agnostic shape.** "Close the existing connection, open a new one to a target with a single-use auth token" is exactly the same pattern that telnet/SSH/MUD-client redirects would use (via GMCP, server-side reconnect notice, etc.). The library's WebSocket implementation is one expression of a universal shape, not a web-specific mechanism.
+- **No public-shard-URL UX problem.** A page-navigation redirect has to navigate to a URL on the destination shard, which means the destination shard must serve an HTTP webclient — and any direct hit to that URL becomes an orphan-landing problem. With connection-level redirect, the player's browser only ever loads the router's webclient; shards are reached only via WebSocket. This positions a future architecture where shards run WebSocket-only (no Django HTTP at all) — reducing attack surface, eliminating orphan URLs, simplifying deployment.
 
 ## Auto-puppet and `_last_puppet`
 
@@ -126,7 +139,7 @@ The injection uses the same pattern as the WebSocket protocol and middleware ove
 - **Shard**: creates a ticket targeting the router (`to_shard = get_router_shard_id()`, always `"router"`) and sends a `shard_redirect` OOB to redirect the client back to the router's webclient. Always redirects — even if no puppet (error state), because a player should never be OOC on a shard.
 - **Character ID in ticket**: `old_char.id` (current puppet) → `account.db._last_puppet.id` (fallback) → `0` (sentinel for truly broken state, with `logger.log_warn`).
 - **`_last_puppet` is left alone.** The library does not mutate Evennia's `_last_puppet` attribute — vanilla semantics preserved. The OOC redirect loop on routers running `AUTO_PUPPET_ON_LOGIN = True` is broken instead by the per-session `protocol_flags["SHARDS_TICKET_AUTHED"]` value set in `ShardWebSocketClient.onOpen()` (see "Auto-puppet on login" below).
-- **No explicit unpuppet**: the redirect triggers a full page navigation (`window.location.href`), which closes the WebSocket connection. Evennia's disconnect handler (`sessionhandler.disconnect()` → `account.unpuppet_object()`) automatically releases the character on the shard when the connection drops.
+- **No explicit unpuppet**: the redirect closes the existing WebSocket connection (the JS plugin's first step before opening the new one). Evennia's disconnect handler (`sessionhandler.disconnect()` → `account.unpuppet_object()`) automatically releases the character on the shard when the connection drops.
 - **Router**: vanilla `CmdOOC` stays — normal unpuppet, player stays on the router OOC.
 - **Monolith**: vanilla `CmdOOC` stays; the override is never injected.
 
@@ -142,7 +155,7 @@ The library replaces `DefaultAccount.at_post_login` on routers with `shard_aware
 |---|---|---|
 | `False` | any | **OOC character-select menu rendered** (vanilla else-branch behaviour — short-circuits before the library's redirect logic). |
 | `True` | `session.protocol_flags["SHARDS_TICKET_AUTHED"]` is `True` (URL contained `?ticket=`) | OOC menu. **No auto-redirect** — the session was just sent here from a shard's OOC command, looping back would be infinite. |
-| `True` | `_last_puppet` set with usable `shard_id` (in `SHARD_URLS`, not `"*"`) | `_redirect_to_character_shard(...)` — ticket created, OOB `shard_redirect` sent, player navigates to the correct shard. |
+| `True` | `_last_puppet` set with usable `shard_id` (in `SHARD_URLS`, not `"*"`) | `_redirect_to_character_shard(...)` — ticket created, OOB `shard_redirect` sent, the JS plugin closes the current WebSocket and opens a new one to the destination shard's WS URL with the ticket. |
 | `True` | `_last_puppet` set but `shard_id` is `None` / `"*"` / not in `SHARD_URLS` | Warning logged, OOC menu rendered. Login does not fail. |
 | `True` | `_last_puppet` is `None` (fresh first login, no last char) | OOC menu rendered silently. |
 
@@ -152,7 +165,9 @@ The override honours the consumer's `AUTO_PUPPET_ON_LOGIN` setting as the first 
 
 ### The `SHARDS_TICKET_AUTHED` protocol flag
 
-`ShardWebSocketClient.onOpen()` sets `self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)` alongside the other `protocol_flags` assignments (`OOB`, `XTERM256`, etc.), where `token` is whatever was in the URL's `?ticket=` parameter. Captures **URL presence**, not validation outcome — so a refresh while at the OOC menu (URL still has the stale ticket, browser session reused, ticket isn't re-validated) keeps the flag set and the player stays at the OOC menu instead of being auto-redirected.
+`ShardWebSocketClient.onOpen()` sets `self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)` alongside the other `protocol_flags` assignments (`OOB`, `XTERM256`, etc.), where `token` is whatever was in the WebSocket URL's `?ticket=` parameter. Captures **URL presence**, not validation outcome — the flag tells `at_post_login` "this connection arrived via a ticket-bearing redirect, don't immediately auto-redirect them again" (which would be the infinite shard↔router loop).
+
+**Lifecycle.** The flag is per-WebSocket-connection. On a deliberate cross-shard transfer (`shard_redirect.js` swapping the WS), the new connection arrives with `?ticket=X` in its WS URL, so the flag is set on that connection — the player lands at the OOC menu (or auto-puppets, depending on path) without bouncing. The flag does NOT persist across page refresh: a refresh creates a new WebSocket without `?ticket=X` in its URL (the URL bar stays at the router's HTTP host throughout, and never carries a ticket in the new design). On refresh from the OOC menu, the flag is False → if `_last_puppet` is still set with a usable shard_id, the auto-puppet path triggers a redirect back to that character. This is acceptable — refresh is observably equivalent to a fresh login, which auto-puppets via `_last_puppet` per Evennia defaults; the player still has `@ooc` as an explicit way to return to OOC.
 
 **Why `protocol_flags` and not a direct attribute on the session.** Evennia's Portal and Server are separate processes. The Portal-side WebSocket protocol instance and the Server-side `ServerSession` are distinct Python objects in distinct memory spaces; the Portal sends session state to the Server over AMP, and only attributes listed in `settings.SESSION_SYNC_ATTRS` survive that boundary. A custom attribute like `self._ticket_authed` set in the Portal's `onOpen` would be silently dropped on the Server side. `protocol_flags` is a dict in the synced set — that's how Evennia carries `OOB`, `XTERM256`, `CLIENTNAME` etc. across to the Server — so storing the flag there means the Server's `at_post_login` reads what the Portal set.
 
