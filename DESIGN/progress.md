@@ -6,6 +6,24 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-04 — WebSocket-level cross-shard redirect (replaces page navigation)
+
+Cross-shard transitions (`@ic`, `@ooc`, `cross_shard_character_move`) now operate at the WebSocket connection layer instead of via full-page navigation. When the server emits a `shard_redirect` OOB, the JS plugin closes the current WebSocket and opens a new one to the destination's WS URL with the ticket as a query parameter; the browser page itself does not reload. UI state, scrollback, plugins, command history all persist across the transition.
+
+Architectural rationale beyond the immediate UX win:
+
+- **Protocol-agnostic shape.** "Close the existing connection, open a new one to a target host:port with a single-use auth token" is the same pattern that telnet (via GMCP), SSH (via reconnect notice), and MUD-client redirect support would use. The WebSocket implementation here is one expression of a universal connection-level redirect; the deferred non-web-protocol question (long-standing in [open-questions.md](open-questions.md)) now has a concrete shape to build on rather than a hypothetical.
+- **Removes the public-shard-URL UX problem.** A page-navigation redirect required shards to serve an HTTP webclient, which created an orphan-URL UX gap if anyone hit a shard's URL directly without a ticket. With connection-level redirect the player's browser only ever loads the router's webclient; shards are reached only via WebSocket. This positions a future architecture where shards run WebSocket-only (no Django HTTP at all) — smaller attack surface, no orphan URLs, simpler deployment.
+- **Cleaner mental model.** The library's URL settings (`SHARD_URLS`, `ROUTER_URL`) became WebSocket URLs, not HTTP URLs — they were only ever used in two places (the redirect URL constructions), so the semantic shift was contained. Setting names unchanged; values changed from `http://...` to `ws://.../`.
+
+**Connection-lost flash polish.** A naive WS swap fires the `connection_close` event, which webclient_gui handles with a misleading "The connection was closed or lost." message. Suppressed by wrapping `Evennia.emitter.emit` once at module load: a `deliberate_transfer` flag is set just before the deliberate close, and the wrapper swallows the next `connection_close` event when the flag is set. Real disconnects continue to render normally — the flag is consumed on first use, with a 5s safety timeout.
+
+**Behaviour change worth documenting:** with the URL bar no longer carrying the ticket post-redirect, the `SHARDS_TICKET_AUTHED` per-WebSocket flag does not persist across page refresh. Refresh from the OOC menu now auto-puppets back to `_last_puppet` (matching vanilla "fresh login" behaviour) instead of staying at the OOC menu. `@ooc` remains the explicit OOC return.
+
+196 tests passing on the PoC branch (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_character_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message.
+
+**Files:** `evennia_shards/handoff.py` (`_redirect_to_character_shard` builds WS URL), `evennia_shards/commands.py` (`ShardAwareCmdOOC` builds WS URL), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (rewritten for WS swap + emit-wrap suppression), demo gamedirs settings updated to `ws://` URLs. Docs: `DESIGN/shard-settings.md`, `DESIGN/ticket-auth-flow.md`, `DESIGN/library-integration-risks.md` updated for the new mechanism. Branch: `websocket-level-redirect-poc`.
+
 ### 2026-05-03 — Cross-shard messaging primitives: `obj_msg` and `account_msg`
 
 First piece of cross-shard player-facing messaging. Two new library-shipped bus kinds, both at the same architectural level as the existing `ping` / `ping_received` / `undeliverable_reply` handlers in `messagebus.py`:
