@@ -82,10 +82,11 @@ Different audiences should walk through the docs in different orders. Pick the p
 1. [`/README.md`](../README.md) — overview and the three modes.
 2. The "Core architecture: the three-mode design" and "The split-deployment model" sections of [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — substantive architectural sketch from the original brainstorm; still a useful overview, with the caveat that specific decisions may have been refined since.
 
-### "I am about to start Phase 1 of the PoC."
+### "I want to know what's been built."
 
-1. The "Phased PoC plan" section of [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — original sketch of phasing.
-2. *(Future)* `phase-1-router-and-shard.md` — once written, supersedes the handover sketch.
+1. [progress.md](progress.md) — running log of milestones with links to evidence (test results, design docs, code changes). The most current view of what's shipped.
+2. The architecture and how-it-works docs in this index — `shard-isolation.md`, `shard-settings.md`, `cross-shard-message-bus.md`, `ticket-auth-flow.md`, `library-integration-risks.md`. These were updated as features landed and reflect current behaviour.
+3. [`/examples/`](../examples/) — three demo gamedirs (`demo_router`, `demo_shard0`, `demo_shard1`) that exercise the library end-to-end. See [`/examples/README.md`](../examples/README.md) for the run recipe.
 
 ## Originating documents (external)
 

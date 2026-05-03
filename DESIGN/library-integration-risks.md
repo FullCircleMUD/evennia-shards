@@ -12,7 +12,7 @@ Each coupling section follows the same template:
 - **Risk on Evennia upgrade** — what to diff in the new Evennia version.
 - **Risk in consumer override** — what consumer-side customisation would collide, and the recommended pattern.
 
-This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (CmdIC/CmdOOC patches, ObjectDB.from_db, pre_save/pre_delete signals, QuerySet.update, WEBSOCKET_PROTOCOL_CLASS rewiring, middleware injection) will be backfilled as we revisit them.
+This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `CmdIC` / `CmdOOC` (hard overrides — library territory), `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (`ObjectDB.from_db`, `pre_save`/`pre_delete` signals, `QuerySet.update`, `WEBSOCKET_PROTOCOL_CLASS` rewiring, middleware injection) will be backfilled as we revisit them.
 
 ## WebSocketClient.onOpen() override
 
@@ -110,6 +110,32 @@ A consumer that subclasses `DefaultAccount` and overrides `create_character` is 
 The hazard is a consumer override that doesn't actually call `create.create_object` (or otherwise produces a character whose `db_location_id` is `None`). The wrapper logs a warning and leaves the character router-stamped; chargen succeeds but IC won't work. Recommended pattern: any consumer override should set `db_location` via the same `START_LOCATION` (or equivalent) source as vanilla.
 
 A consumer who points `BASE_ACCOUNT_TYPECLASS` at a class that doesn't derive from `DefaultAccount` would not have `create_character` at all; the wrapper install would fail at startup. This is symmetrical to other base-class assumptions in Evennia (locks, `_playable_characters`, etc.).
+
+## `CmdIC` / `CmdOOC` — hard overrides
+
+**What we patch / extend:** `evennia/commands/default/account.py` → `CmdIC` (both router and shard roles) and `CmdOOC` (shard role only). Library code: `evennia_shards/commands.py` → `ShardAwareCmdIC`, `ShardAwareCmdOOC`. Installed via module-attribute swap in `AppConfig.ready()` (`_account_module.CmdIC = ShardAwareCmdIC`). Based on Evennia 6.0.0.
+
+**Why:**
+
+In sharded mode, `CmdIC` and `CmdOOC` *are* the cross-shard redirect mechanism — that's their entire job. `ShardAwareCmdIC.func` does not call `super().func()`; it implements the IC flow from scratch (resolve character → create ticket → emit `shard_redirect` OOB → close session). Vanilla `CmdIC.func` would puppet the character locally on the router, which is structurally wrong (characters live on shards, not the router) and would trip the chokepoints anyway. There is no compose-with-vanilla story: sharded IC isn't "vanilla IC plus some redirect logic," it's a different operation entirely. The same reasoning applies to `CmdOOC` on shards — going OOC from a shard means redirecting back to the router, not unpuppeting locally.
+
+**Library territory, not a consumer extension point.**
+
+These two commands are owned by the library in non-monolith roles. Subclassing or replacing them is **not** a supported integration pattern:
+
+- `class MyCmdIC(CmdIC): ...` in a sharded deployment is a category error — the consumer is extending vanilla IC semantics, but the runtime IC semantics are the library's. Whether the resulting subclass picks up `ShardAwareCmdIC` or vanilla `CmdIC` as its base depends on Python import order (whether the consumer's module was imported before or after `AppConfig.ready()` ran our patch). Either way the resulting code is wrong: with vanilla as base, the cross-shard redirect never runs; with `ShardAwareCmdIC` as base, the consumer's customisation is layered on top of a flow whose contract they didn't design against.
+- Adding `CmdIC()` directly to a custom cmdset (rather than letting `AccountCmdSet` resolve it via the patched module attribute) has the same import-order failure: the local binding may have snapshotted vanilla.
+
+The recommended posture is **don't subclass or replace IC/OOC in sharded deployments.** If a consumer game genuinely needs IC/OOC behaviour the library doesn't provide (audit logging on IC, custom error messaging on OOC, etc.), the right path is to discuss it as a library feature or contrib pattern — not to layer their own semantics on top of an infrastructure command. The library deliberately does not document a "subclass `ShardAwareCmdIC` like this" pattern, because doing so would imply support for use cases that haven't been thought through.
+
+**Risk on Evennia upgrade:**
+
+- Changes to `CmdIC.func` / `CmdOOC.func` body — the router redirect and OOC-return logic in our overrides reproduces the parts of vanilla we explicitly do *not* want (e.g. character resolution from `account.characters`), so a diff against upstream is needed when bumping Evennia.
+- Changes to where `AccountCmdSet` looks up `CmdIC` / `CmdOOC` — currently a module-attribute reference (`account_module.CmdIC`), which is what makes the swap work. If Evennia ever changes `AccountCmdSet` to import `CmdIC` directly into its own module at definition time, our module-attribute swap stops being seen and we'd need to switch to a different patch shape.
+
+How to check: diff upstream `CmdIC.func` and `CmdOOC.func` bodies against what `ShardAwareCmdIC._resolve_character` reproduces; verify `AccountCmdSet` still references commands via module attribute (`from evennia.commands.default import account; account.CmdIC` or equivalent).
+
+**Risk in consumer override:** see "Library territory" above. If a consumer does subclass or replace these, behaviour is undefined — not because of a recoverable bug, but because the consumer is replacing infrastructure they don't own. The library does not detect this case at install time (unlike `at_post_login`); the recommendation is documentation only. Consumer subclasses can be detected by the same MRO walk we use for `at_post_login`, but the failure isn't recoverable via a documented `super()` pattern, so the warning would just say "don't do this" — easier to say it once in the docs than at every startup.
 
 ## `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation` override
 

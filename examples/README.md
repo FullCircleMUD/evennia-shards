@@ -31,28 +31,30 @@ Each symlinked instance (`demo_router`, `demo_shard1`) contains:
 This means PID files and logs are per-instance (no collisions), while
 game code and settings are shared (edit once, applies everywhere).
 
-### Windows note (symlink limitation)
+### Windows note (symlink caveat)
 
-The symlinked layout was developed and tested on macOS. On Windows the
-symlinks generally do not work end-to-end — git's checkout of symlinks
-on Windows depends on `core.symlinks` plus user permissions, and even
-when the links materialise, Evennia's `os.path.realpath`-based settings
-resolution can behave inconsistently on Windows-shortcut-style links.
+The symlinked layout has not been verified on Windows. Symlinks may or
+may not work end-to-end depending on Windows version, `git config
+core.symlinks`, Developer Mode being enabled, and how Evennia's
+`os.path.realpath`-based settings resolution behaves with the link
+type git materialises. With `core.symlinks=true` and the right
+permissions on Windows 10/11, the layout *probably* works — but we
+haven't tested it.
 
-Workaround for Windows development: instead of relying on symlinks,
-**copy the contents of `demo_shard0`** into `demo_router` and
-`demo_shard1`. Keep the per-instance `server/__init__.py` and `logs/`
-in place so PID files and logs stay separate. The settings files
-already exist for each role inside `demo_shard0/server/conf/`
-(`settings_router.py`, `settings_shard0.py`, `settings_shard1.py`); a
-copied tree gives each instance its own physical copy of those files
-to point at via `--settings`.
+A guaranteed-working fallback if symlinks aren't co-operating: instead
+of relying on them, **copy the contents of `demo_shard0`** into
+`demo_router` and `demo_shard1`. Keep the per-instance
+`server/__init__.py` and `logs/` in place so PID files and logs stay
+separate. The settings files already exist for each role inside
+`demo_shard0/server/conf/` (`settings_router.py`, `settings_shard0.py`,
+`settings_shard1.py`); a copied tree gives each instance its own
+physical copy of those files to point at via `--settings`.
 
-The trade-off is that "edit once, applies everywhere" no longer holds —
-changes to game code under `demo_shard0` need to be propagated by hand
-to the copied instances. Acceptable for smoke testing; for ongoing
-multi-instance development on Windows, a Docker-based setup or a
-small sync helper would be worth the time.
+The trade-off with the copy approach is that "edit once, applies
+everywhere" no longer holds — changes to game code under `demo_shard0`
+need to be propagated by hand to the copied instances. Acceptable for
+smoke testing; for ongoing multi-instance development a Docker-based
+setup or a small sync helper would be worth the time.
 
 ### Shared database
 
