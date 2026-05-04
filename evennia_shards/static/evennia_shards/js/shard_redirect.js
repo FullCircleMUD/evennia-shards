@@ -75,11 +75,68 @@ $(document).ready(function () {
         return qmark >= 0 ? url.substring(0, qmark) : url;
     }
 
+    // Ensure the WS URL carries the browser's csessid/cuid/browserstr
+    // as Evennia's positional query args, even when the server emitted
+    // a ticket-only URL like `?ticket=XXX`. Without this, Evennia's
+    // csessid extraction takes the first &-separated chunk after `?`
+    // as csessid — for `?ticket=XXX` that's the literal string
+    // `'ticket=XXX'` — and the destination's csession lookup fails
+    // (no Django session has that key). Result: priority #1 csessid
+    // auth never fires on the destination, and the ticket-auth path
+    // is the only thing that works on first arrival. On refresh
+    // (where there's no fresh ticket), csessid auth has nothing to
+    // attach to and the player is bounced to the router.
+    //
+    // Augmenting here means the destination's onOpen sees a real
+    // csessid (the Django session key, set by the webclient template
+    // from `request.session.session_key`) AND, on first arrival,
+    // also a ticket. Priority #1 wins — Django auth attaches the
+    // session — and the ticket sits unconsumed in the DB until its
+    // TTL expires (acceptable; single-use anyway). On refresh the
+    // URL is csessid-only and priority #1 still wins.
+    //
+    // Idempotent: if the URL already has a positional first chunk
+    // (no `=`), assume csessid is already present and return as-is.
+    // The refresh-routing path below builds URLs that already start
+    // with csessid, so calling this on them is a no-op.
+    function ensure_csessid_in_url(url) {
+        if (!window.csessid) {
+            return url;
+        }
+        var qmark = url.indexOf("?");
+        var base = qmark >= 0 ? url.substring(0, qmark) : url;
+        var query = qmark >= 0 ? url.substring(qmark + 1) : "";
+        if (query) {
+            var first_chunk = query.split("&")[0];
+            if (first_chunk.length > 0 && first_chunk.indexOf("=") < 0) {
+                // Already has positional csessid as first chunk.
+                return url;
+            }
+        }
+        var prefix =
+            window.csessid +
+            "&" +
+            (window.cuid || "") +
+            "&" +
+            (window.browserstr || "browser");
+        var combined = query ? prefix + "&" + query : prefix;
+        return base + "?" + combined;
+    }
+
     Evennia.emitter.on("shard_redirect", function (args, kwargs) {
-        var target_url = args[0];
-        if (!target_url) {
+        var raw_url = args[0];
+        if (!raw_url) {
             console.error("[evennia-shards] shard_redirect: no URL provided");
             return;
+        }
+        var target_url = ensure_csessid_in_url(raw_url);
+        if (target_url !== raw_url) {
+            console.log(
+                "[evennia-shards] augmented WS URL with csessid: " +
+                    raw_url +
+                    " → " +
+                    target_url
+            );
         }
         console.log("[evennia-shards] WS-level redirect to: " + target_url);
 
