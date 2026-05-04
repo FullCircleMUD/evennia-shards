@@ -1811,65 +1811,6 @@ class ExtractTicketTokenTests(BaseEvenniaTestCase):
         self.assertEqual(proto._extract_ticket_token(), "tok123")
 
 
-class TicketAuthedFlagTests(BaseEvenniaTestCase):
-    """ShardWebSocketClient.onOpen sets protocol_flags["SHARDS_TICKET_AUTHED"]
-    when (and only when) ticket auth creates the session.
-
-    The flag lives in protocol_flags (not as a custom attribute on
-    ``self``) so it crosses the Portal→Server AMP sync — see
-    DESIGN/ticket-auth-flow.md and the comment in protocols.py. The
-    router's at_post_login override (hooks.py) reads it as the
-    OOC-return signal.
-
-    **Session-durable semantics.** The flag is set once in onOpen's
-    priority-#2 (ticket auth) branch and never re-evaluated. Subsequent
-    WS opens that re-attach to the same session via csessid (priority
-    #1) preserve the flag. WS opens with no ticket on a session that
-    didn't originate via ticket auth leave the flag at its default
-    (False/unset). This is what makes refresh-from-OOC stay at OOC: the
-    session was born via ticket and the flag persists.
-
-    Under the previous implementation (URL-derived, set on every WS
-    open), refresh would have overwritten the flag to False because
-    the URL bar no longer carries the ticket under WS-level redirect.
-    The session-durable shape is the fix.
-
-    onOpen end-to-end requires Twisted, so these tests cover the
-    underlying token-extraction contract that drives the auth-path
-    decision. The integration of "ticket extracted → priority-#2
-    branch → flag set True" is exercised by smoke testing rather than
-    unit tests (the auth cascade involves init_session, sessionhandler,
-    portal_connect — too much to mock for a unit test).
-    """
-
-    def test_extract_returns_token_when_url_contains_ticket(self):
-        # When _extract_ticket_token returns a token, onOpen takes the
-        # priority-#2 branch and sets the flag.
-        proto = _FakeProtocol(uri="/websocket?ticket=abc123")
-        self.assertTrue(bool(proto._extract_ticket_token()))
-
-    def test_extract_returns_none_when_url_has_no_ticket(self):
-        # No token → priority-#2 branch is not taken → the flag stays
-        # at its default (False/unset) for fresh connections, or
-        # whatever the existing session has set on it (preserved).
-        proto = _FakeProtocol(uri="/websocket")
-        self.assertFalse(bool(proto._extract_ticket_token()))
-
-    def test_extract_returns_none_when_no_uri(self):
-        proto = _FakeProtocol(uri=None)
-        self.assertFalse(bool(proto._extract_ticket_token()))
-
-    def test_extract_returns_token_even_for_stale_or_consumed(self):
-        # Token extraction itself doesn't validate — _validate_ticket
-        # is a separate step inside the priority-#2 branch. A stale
-        # or already-consumed token will be extracted, then rejected
-        # by _validate_ticket, and the connection closed before the
-        # flag is set. No risk of a stale ticket setting the flag on
-        # a session that wouldn't otherwise have it.
-        proto = _FakeProtocol(uri="/websocket?ticket=already-consumed-token")
-        self.assertTrue(bool(proto._extract_ticket_token()))
-
-
 class GetClientAddressTests(BaseEvenniaTestCase):
     """_get_client_address resolves the real client IP."""
 
@@ -2054,8 +1995,8 @@ class _FakeSession:
         self.puppet = None
         self.oob_messages = {}
         self.flag_updates = {}
-        # Mirrors Evennia ServerSession.protocol_flags. The library
-        # stores SHARDS_TICKET_AUTHED here (Portal→Server-synced).
+        # Mirrors Evennia ServerSession.protocol_flags (a per-session
+        # dict carried Portal↔Server via the AMP sync).
         self.protocol_flags = {}
 
     def msg(self, **kwargs):
@@ -2106,6 +2047,11 @@ class _FakeAccount:
         self.key = key
         self._characters = characters or []
         self._last_puppet = None
+        # Initialised to False so hooks reading `account.db._shards_at_ooc_menu`
+        # don't AttributeError. Vanilla Evennia's AttributeHandler returns
+        # None silently for unset attrs, but our _FakeAccount uses
+        # `self.db = self`, so the attribute has to actually exist.
+        self._shards_at_ooc_menu = False
         self.db = self  # db.X delegates to self.X
         self.attributes = _FakeAttributes()
         # Recorders for hook-side-effect assertions.
@@ -2156,6 +2102,19 @@ class _FakeAccount:
         """Minimal unpuppet for tests — clears session.puppet like Evennia's."""
         for s in (session if isinstance(session, (list, tuple)) else [session]):
             s.puppet = None
+
+    def flush_from_cache(self, force=False):
+        # No-op for tests; production code uses this to evict stale
+        # idmapper entries (cross-process attribute writes). The
+        # router's at_post_login override calls it before reading
+        # account.db._shards_at_ooc_menu (the @ooc command writes the
+        # attribute on a shard, the router needs a fresh read).
+        pass
+
+    def refresh_from_db(self, fields=None):
+        # No-op for tests; production code re-reads attributes from
+        # the shared DB after flush_from_cache.
+        pass
 
 
 class _FakeCharacter:
@@ -2242,6 +2201,28 @@ class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
 
         # Returned URL matches the OOB URL.
         self.assertEqual(url, oob_url)
+
+    def test_redirect_clears_at_ooc_menu_flag(self):
+        """The IC redirect must clear account.db._shards_at_ooc_menu.
+
+        The flag was set by ShardAwareCmdOOC at OOC; any IC entry —
+        manual @ic, login auto-puppet, or programmatic
+        cross_shard_character_move — clears it via this helper.
+        Without this, a player who @ooc'd, then @ic'd, would still
+        be treated as "at OOC" on the next connection and be denied
+        the AUTO_PUPPET behaviour they'd expect.
+        """
+        from evennia_shards.handoff import _redirect_to_character_shard
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        # Simulate a previous @ooc having set the flag.
+        account.db._shards_at_ooc_menu = True
+        session = _FakeSession(address="10.0.0.1")
+
+        _redirect_to_character_shard(account, session, char)
+
+        self.assertFalse(account.db._shards_at_ooc_menu)
 
 
 @override_settings(
@@ -2457,11 +2438,12 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
     def test_shard_does_not_mutate_last_puppet(self):
         """ooc must NOT touch _last_puppet — vanilla Evennia semantics.
 
-        The OOC redirect loop is broken by the per-session
-        ``protocol_flags["SHARDS_TICKET_AUTHED"]`` flag set in
-        protocols.onOpen() and read by the router's at_post_login
-        override, not by mutating _last_puppet. Any change here that
-        adds account.db._last_puppet = ... mutation should be
+        The OOC redirect loop is broken by the account-level
+        ``account.db._shards_at_ooc_menu`` flag (set by
+        ShardAwareCmdOOC, cleared by _redirect_to_character_shard,
+        read by the router's at_post_login override), not by
+        mutating _last_puppet. Any change here that adds
+        ``account.db._last_puppet = ...`` mutation should be
         deliberate and re-evaluated against the loop-prevention
         strategy.
         """
@@ -2472,6 +2454,24 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         cmd.func()
 
         self.assertIs(account.db._last_puppet, char)
+
+    def test_shard_sets_at_ooc_menu_flag(self):
+        """ooc must set account.db._shards_at_ooc_menu=True.
+
+        This is the persistent OOC-return signal — read by the
+        router's at_post_login on subsequent connections to
+        suppress the AUTO_PUPPET-driven bounce-back-to-shard.
+        Cleared on any IC entry by _redirect_to_character_shard.
+        """
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        # Ensure the flag starts False (clean baseline).
+        account.db._shards_at_ooc_menu = False
+        cmd = _make_ooc_cmd(puppet=char, account=account)
+        cmd.func()
+
+        self.assertTrue(account.db._shards_at_ooc_menu)
 
 
 # ---------------------------------------------------------------------------
@@ -2562,26 +2562,24 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
                 self.assertNotIn("shard_redirect", session.oob_messages)
                 self.assertEqual(len(account.at_look_calls), 1)
 
-    def test_ticket_authed_session_skips_auto_redirect(self):
-        """Session flagged as ticket-authed → OOC menu, no redirect.
+    def test_at_ooc_menu_flag_skips_auto_redirect(self):
+        """account.db._shards_at_ooc_menu=True → OOC menu, no redirect.
 
-        The flag is set by ShardWebSocketClient.onOpen() into
-        ``protocol_flags["SHARDS_TICKET_AUTHED"]`` when the WS URL
-        contains ?ticket=, and crosses the Portal→Server AMP sync via
-        protocol_flags (a custom attribute on the protocol instance
-        would not survive). Indicates the session was just redirected
-        from a shard. The router must not auto-redirect it back — that
-        would be the infinite shard↔router loop. Even with a fully
-        redirectable _last_puppet set, ticket-authed sessions land at
-        the OOC menu.
+        The flag is set by ShardAwareCmdOOC and cleared by
+        _redirect_to_character_shard (any IC entry). It signals
+        explicit player intent to be at the OOC menu and persists
+        across session lifecycle / refresh / logout-login. Even
+        with a fully redirectable _last_puppet set, an account
+        with this flag lands at the OOC menu rather than being
+        auto-puppeted.
         """
         from evennia_shards.hooks import shard_aware_at_post_login
 
         char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
         account = _FakeAccount(pk=7)
         account.db._last_puppet = char  # would normally trigger redirect
+        account.db._shards_at_ooc_menu = True
         session = _FakeSession()
-        session.protocol_flags["SHARDS_TICKET_AUTHED"] = True
 
         shard_aware_at_post_login(account, session=session)
 

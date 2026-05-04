@@ -377,6 +377,14 @@ def _redirect_to_character_shard(account, session, character) -> str:
     # the correct character after ticket auth.
     account.db._last_puppet = character
 
+    # Clear the OOC-menu marker. The player is going IC; on the next
+    # connection (refresh, reconnect, fresh login) the router's
+    # at_post_login should not suppress AUTO_PUPPET on this account.
+    # Set in ShardAwareCmdOOC; cleared here at the symmetric IC entry
+    # point (covers manual @ic, login-time auto-redirect, and
+    # cross_shard_character_move).
+    account.db._shards_at_ooc_menu = False
+
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,
     )

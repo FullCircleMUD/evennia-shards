@@ -96,19 +96,19 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
-    # OOC-return signal: a session whose URL carried ?ticket= was, by
-    # construction, the target of a library-issued redirect to this
-    # process. On the router that is the OOC-return case from a shard;
-    # we render the OOC menu and skip the auto-puppet decision so we
-    # don't bounce the player straight back to the shard they just
-    # left (which would be an infinite loop). Flag is set in
-    # ShardWebSocketClient.onOpen() based on URL presence and stored
-    # in protocol_flags so it survives the Portal→Server AMP sync.
-    # Leaves Evennia's _last_puppet semantics untouched.
-    if (
-        session is not None
-        and session.protocol_flags.get("SHARDS_TICKET_AUTHED", False)
-    ):
+    # OOC-return signal: explicit player intent to be at the OOC menu.
+    # Set by ShardAwareCmdOOC on @ooc and cleared by
+    # _redirect_to_character_shard at any IC entry (manual @ic,
+    # login-time auto-redirect, programmatic cross_shard_character_move).
+    # Survives session lifecycle, refresh, logout/login — honours
+    # player intent over vanilla AUTO_PUPPET-on-every-connection.
+    #
+    # Cross-process write: the flag is set on the shard process when
+    # @ooc runs, but read here on the router. flush_from_cache +
+    # refresh_from_db to avoid a stale idmapper copy.
+    self.flush_from_cache(force=True)
+    self.refresh_from_db()
+    if self.db._shards_at_ooc_menu:
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
