@@ -81,6 +81,8 @@ Sessions don't survive cross-process (no `SessionDB`, `sessid` is local to one P
 
 **Deliberate non-scope:** this milestone lands the primitive layer only. No sender-side helper (`send_cross_shard_message`), no typeclass filter, no local-vs-remote dispatch, no specialised wrappers (cross-shard tells, channels, room broadcast). All deferred to a separate "helper layer" plan once the primitives are proven. JSON-payload constraint means `from_obj=` (a common `Object.msg` kwarg pointing at an `ObjectDB`) needs sender-side rendering before the helper layer ships.
 
+**Follow-on (same day):** `send_cross_shard_message(target_pk, kwargs, target_typeclass=None)` shipped later 2026-05-03 (commit `59ae37f`), covering the sender helper, typeclass filter, local-vs-remote dispatch, and single `.values_list` lookup. Specialised wrappers (cross-shard tells, channels, room broadcast) and the AccountDB-side routing question remain deferred — the latter as an explicit open question (see [open-questions.md](open-questions.md)).
+
 183 tests passing (177 prior + 6 new in `MessageHandlerTests`): obj_msg/account_msg happy paths, kwargs pass-through (text + OOB + options), target-gone behaviour, `super().handle()` subclass composition.
 
 **Live smoke verified end-to-end:** superuser on shard0 sent `obj_msg` to a character on shard1 (text appeared on B's wire within the polling tick); same primitive shape proven for `account_msg` with an OOC player at the router's character-select menu. Both bus rows correctly deleted by `process_inbox` on truthy handler return.

@@ -28,7 +28,7 @@ These are the principles every implementation decision must respect. They are re
 
 1. **Default to "library does nothing" in `monolith` mode.** Any feature must justify its presence in monolith. Gate it on `SHARDS_ROLE != "monolith"` if it doesn't add value there.
 2. **Branch at registration time, not per call.** Don't register the override in monolith mode in the first place. Per-call branching is acceptable only when registration-time branching is genuinely impossible.
-3. **The library does not own game concepts.** Rooms, characters, zones, items belong to the consumer game. The library provides infrastructure (ticket system, redirect protocol, handoff lifecycle, gateway mixin). When tempted to add a game concept, ask whether it's actually game-specific and should stay in the consumer.
+3. **The library does not own game concepts.** Rooms, characters, zones, items belong to the consumer game. The library provides infrastructure (ticket system, redirect protocol, handoff lifecycle, isolation chokepoints, cross-shard message bus, sender-side helpers). When tempted to add a game concept, ask whether it's actually game-specific and should stay in the consumer.
 4. **No FCM-specific assumptions.** This library was extracted from work on FullCircleMUD (FCM). Anything FCM-specific creeping into the library is a code smell. Zone names, economy concepts, NFT references, FCM-specific typeclass names — all stay in FCM. Default to "consumer concern" when uncertain.
 5. **Cache invariant by construction, not discipline.** Use `.values()` queries, mode-specific code registration, and clear ownership boundaries. Don't rely on developers remembering not to cache things.
 6. **Web-first.** Telnet support is a deliberate post-PoC concern.
@@ -67,9 +67,7 @@ Design documents in `DESIGN/` must reflect decisions **actually discussed and ag
 
 If a session catches itself writing content that goes beyond what was discussed, stop and either remove the extrapolation or convert it to a `[TBD]` marker. Documentation that puts unagreed decisions in the project's mouth is worse than documentation that has gaps.
 
-## Repository layout (intended)
-
-The handover document specifies the full intended layout. Summary:
+## Repository layout
 
 ```
 evennia-shards/
@@ -77,16 +75,19 @@ evennia-shards/
 ├── README.md
 ├── LICENSE                    # BSD 3-Clause
 ├── pyproject.toml
+├── runtests.py                # standalone test runner (no consumer gamedir needed)
 ├── DESIGN/                    # design wiki (humans + LLMs)
-├── evennia_shards/            # library code (not yet written)
-├── tests/                     # not yet written
+├── evennia_shards/            # library code
+│   └── tests.py               # unit tests (run via runtests.py)
 └── examples/
-    └── demo_game/             # `evennia init`-generated, drives dev
+    ├── demo_router/           # router-role demo gamedir
+    ├── demo_shard0/           # shard-role demo gamedir (source of truth — others symlink to it)
+    └── demo_shard1/           # second shard for multi-shard testing
 ```
 
 ## Tools and environment
 
-- Python 3.10+ (pinned via `pyproject.toml` once dependencies are declared).
+- Python 3.10+ (pinned via `pyproject.toml`).
 - Evennia is a runtime dependency (`pip install evennia`).
 - Postgres required only for multi-shard mode; SQLite is fine for monolith and single-shard split.
-- Redis required only for multi-shard cross-shard messaging (Phase 3).
+- No Redis dependency. The cross-shard message bus uses a Postgres-polled `messages` table via Twisted `LoopingCall` — see [DESIGN/cross-shard-message-bus.md](DESIGN/cross-shard-message-bus.md). Earlier drafts considered `channels_redis` but it was not adopted.

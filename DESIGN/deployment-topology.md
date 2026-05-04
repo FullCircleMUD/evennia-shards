@@ -1,6 +1,6 @@
 # Deployment Topology
 
-How a consumer game using this library is structured for development and production. This document captures decisions explicitly discussed. Open questions are flagged with `[TBD]` markers.
+How a consumer game using this library is structured for development and production. This document captures decisions explicitly discussed.
 
 ## Core property: same code, different config
 
@@ -27,7 +27,7 @@ All three processes:
 
 Monolith mode is just one terminal: `cd <game folder> && evennia start` with the base settings.
 
-`[TBD — needs discussion: the canonical settings file structure and naming. Working examples in the handover use settings_router.py / settings_shard0.py, but whether this is the pattern the library encourages, mandates, or merely demonstrates is unresolved.]`
+The settings file naming convention (`settings_router.py` / `settings_shard0.py` / `settings_shard1.py` plus a shared `settings_common_shard_config.py`) is *demonstrated* by the demo gamedirs, not *mandated* by the library — see [shard-settings.md](shard-settings.md#consumer-settings-cascade) for the cascade pattern.
 
 ## Production deployment
 
@@ -43,9 +43,7 @@ Redis was originally considered for the cross-shard message bus (the archived ha
 
 When a commit is pushed, the platform redeploys all services in parallel from the new commit. Code stays in lockstep across roles by definition — there is no "shard A is on a different commit than shard B" failure mode.
 
-`[TBD — needs discussion: whether the library prescribes specific environment variable names beyond SHARDS_ROLE and SHARD_ID, and what the canonical set is.]`
-
-`[TBD — needs discussion: how each service's public URL is communicated to the others (SHARD_MAP for the router, ROUTER_URL for shards, or a different mechanism).]`
+The library's only required role-distinguishing settings are `SHARDS_ROLE` and `SHARD_ID` (see [shard-settings.md](shard-settings.md)); `DJANGO_SETTINGS_MODULE` is the env var that selects which settings file to load, and is Django's own — the library doesn't prescribe additional env vars. Each service's public WebSocket URL is communicated via `SHARD_URLS` (a dict on the router pointing at every shard) and `ROUTER_URL` (a single URL on each shard pointing at the router); both are documented in [shard-settings.md](shard-settings.md#url-settings-and-redirect-routing).
 
 ## Mirror property: local and production share shape
 
