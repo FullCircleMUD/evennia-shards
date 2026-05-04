@@ -100,6 +100,10 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     # vanilla-aligned for that case.
     from django.conf import settings as _django_settings
     if not getattr(_django_settings, "AUTO_PUPPET_ON_LOGIN", True):
+        logger.log_info(
+            f"[evennia-shards] shard_aware_at_post_login: AUTO_PUPPET_ON_LOGIN "
+            f"is False — short-circuit to OOC menu (account id={self.id})"
+        )
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
@@ -113,13 +117,32 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     # AttributeHandler, same idmapper, no cross-process staleness.
     # Survives session lifecycle, refresh, logout/login — honours
     # player intent over vanilla AUTO_PUPPET-on-every-connection.
-    if self.db._shards_at_ooc_menu:
+    flag_value = self.db._shards_at_ooc_menu
+    logger.log_info(
+        f"[evennia-shards] shard_aware_at_post_login: post-prelude flag "
+        f"read _shards_at_ooc_menu={flag_value!r} (account id={self.id})"
+    )
+    if flag_value:
+        logger.log_info(
+            f"[evennia-shards] shard_aware_at_post_login: flag is truthy "
+            f"→ rendering OOC menu, suppressing AUTO_PUPPET "
+            f"(account id={self.id})"
+        )
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
     last_puppet = self.db._last_puppet
+    logger.log_info(
+        f"[evennia-shards] shard_aware_at_post_login: flag falsy, "
+        f"checking _last_puppet={last_puppet!r} (account id={self.id})"
+    )
 
     if _is_redirectable_character(last_puppet):
+        logger.log_info(
+            f"[evennia-shards] shard_aware_at_post_login: _last_puppet is "
+            f"redirectable → calling _redirect_to_character_shard "
+            f"(account id={self.id})"
+        )
         _redirect_to_character_shard(self, session, last_puppet)
         return
 

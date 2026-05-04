@@ -174,6 +174,12 @@ class ShardAwareCmdOOC(CmdOOC):
             client_ip=session.address,
         )
         url = f"{get_router_url()}?ticket={token}"
+        logger.log_info(
+            f"[evennia-shards] ShardAwareCmdOOC.func: ticket created "
+            f"token={token!r} url={url!r} "
+            f"(account id={account.id} character_id={character_id} "
+            f"client_ip={session.address!r})"
+        )
         session.msg(shard_redirect=[[url], {}])
         self.msg("Redirecting to router...")
 

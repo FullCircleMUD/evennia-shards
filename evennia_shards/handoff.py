@@ -373,6 +373,13 @@ def _redirect_to_character_shard(account, session, character) -> str:
     """
     shard_id = character.shard_id
 
+    logger.log_info(
+        f"[evennia-shards] _redirect_to_character_shard: ENTERED "
+        f"account id={account.id} key={account.key} "
+        f"target_char={character} shard={shard_id!r} "
+        f"flag_before={account.db._shards_at_ooc_menu!r}"
+    )
+
     # Set _last_puppet so the destination shard's auto-puppet picks up
     # the correct character after ticket auth.
     account.db._last_puppet = character
@@ -391,11 +398,21 @@ def _redirect_to_character_shard(account, session, character) -> str:
     # to proceed. Acceptable degradation; not worth a cross-process
     # invalidation primitive.
     account.db._shards_at_ooc_menu = False
+    logger.log_info(
+        f"[evennia-shards] _redirect_to_character_shard: CLEARED "
+        f"_shards_at_ooc_menu (now "
+        f"{account.db._shards_at_ooc_menu!r}) on account id={account.id}"
+    )
 
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,
     )
     url = f"{get_shard_url(shard_id)}?ticket={token}"
+    logger.log_info(
+        f"[evennia-shards] _redirect_to_character_shard: ticket created "
+        f"token={token!r} url={url!r} (account id={account.id} "
+        f"character_id={character.id} client_ip={session.address!r})"
+    )
     session.msg(shard_redirect=[[url], {}])
 
     logger.log_sec(
