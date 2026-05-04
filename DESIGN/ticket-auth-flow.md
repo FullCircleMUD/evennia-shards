@@ -81,7 +81,7 @@ The `onOpen()` override uses a three-way auth cascade:
 
 1. **Browser session** (csessid): if the browser already has an authenticated Django session, use it. This handles page refreshes — a stale `?ticket=` in the URL is ignored, avoiding re-consumption of an already-deleted ticket.
 2. **Ticket token**: if no browser session but `?ticket=` is present in the WebSocket URL, validate and consume the ticket. Sets `uid` + `logged_in` for `portal_connect()` auto-login.
-3. **No session, no token**: role-dependent gating. Shards reject ("this shard requires a ticket"). Routers fall through to the normal login screen.
+3. **No session, no token**: role-dependent gating. **Shards** emit a `shard_redirect` OOB pointing at the router and close — orphan connections (typically stale localStorage routing after session expiry) are routed to the router's login flow rather than greeting the player with a connection error. **Routers** fall through to the normal login screen.
 
 This ordering is load-bearing: tickets are single-use, so checking them first would break page refresh (the token is already consumed on first use, but `at_login()` saved the uid to the browser session).
 
@@ -99,6 +99,20 @@ The redirect operates at the **WebSocket connection layer**, not the page-naviga
 - **Browser refresh**: refreshes the loaded webclient page (same as a vanilla Evennia refresh). The Django/csessid session continues; if the player was IC on a shard at refresh time, they reconnect to that shard via the saved csessid (no ticket needed for a re-attach).
 
 The middleware and JS plugin are auto-injected by `AppConfig.ready()` — zero consumer configuration beyond `INSTALLED_APPS`.
+
+### Refresh routing via localStorage
+
+Browser refresh while connected to a shard would reload the page from the router's URL bar (since URL never changes during a WS-level redirect) — naively, the refresh always reconnects to the router. The router has no session for a player whose active session is on a shard, so it'd treat the refresh as a fresh login and `at_post_login` would fire, potentially bouncing the player based on AUTO_PUPPET.
+
+To fix: `shard_redirect.js` writes the current target's WS endpoint URL (without the single-use ticket) to `localStorage` on every successful redirect. On page load, the JS reads the saved target and the browser's `PerformanceNavigationTiming.type`:
+
+- `type === "reload"` (browser refresh) **AND** localStorage has a saved target → emit `shard_redirect` to ourselves with the reconstructed URL (`saved_base + "?" + window.csessid + "&" + cuid + "&" + browserstr`, matching Evennia's webclient WS URL shape). This swaps the freshly-opened default WebSocket to the saved target. csessid auth (priority #1) re-attaches to the existing session; state preserved.
+- `type === "navigate"` (typed URL, link click) → no localStorage routing. Normal router-first flow with login form etc.
+- localStorage absent / unavailable (private browsing, disabled) → no routing. Falls back to default behaviour.
+
+The csessid is the Django session key, shared across all sharded processes via the shared-DB session backend, so the same value works for csessid auth on the router or any shard.
+
+**Failure mode:** if the saved target rejects the new WebSocket (csessid expired, target restarted, etc.), the JS falls back to the router-default behaviour. Player ends up at the router → either re-auths via Django session and gets redirected back via `at_post_login`'s AUTO_PUPPET path, or hits the login form if Django session also expired. Acceptable degradation.
 
 ### Why connection-level instead of page-navigation
 
@@ -165,9 +179,19 @@ The override honours the consumer's `AUTO_PUPPET_ON_LOGIN` setting as the first 
 
 ### The `SHARDS_TICKET_AUTHED` protocol flag
 
-`ShardWebSocketClient.onOpen()` sets `self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)` alongside the other `protocol_flags` assignments (`OOB`, `XTERM256`, etc.), where `token` is whatever was in the WebSocket URL's `?ticket=` parameter. Captures **URL presence**, not validation outcome — the flag tells `at_post_login` "this connection arrived via a ticket-bearing redirect, don't immediately auto-redirect them again" (which would be the infinite shard↔router loop).
+`ShardWebSocketClient.onOpen()` sets `self.protocol_flags["SHARDS_TICKET_AUTHED"] = True` inside the priority-#2 (ticket auth) branch — at the moment a session is created via ticket auth, and only there. The flag is stored in `protocol_flags` so it crosses the Portal→Server AMP sync (custom `self.*` attributes don't survive that boundary; only entries in `SESSION_SYNC_ATTRS` do, and `protocol_flags` is in that set).
 
-**Lifecycle.** The flag is per-WebSocket-connection. On a deliberate cross-shard transfer (`shard_redirect.js` swapping the WS), the new connection arrives with `?ticket=X` in its WS URL, so the flag is set on that connection — the player lands at the OOC menu (or auto-puppets, depending on path) without bouncing. The flag does NOT persist across page refresh: a refresh creates a new WebSocket without `?ticket=X` in its URL (the URL bar stays at the router's HTTP host throughout, and never carries a ticket in the new design). On refresh from the OOC menu, the flag is False → if `_last_puppet` is still set with a usable shard_id, the auto-puppet path triggers a redirect back to that character. This is acceptable — refresh is observably equivalent to a fresh login, which auto-puppets via `_last_puppet` per Evennia defaults; the player still has `@ooc` as an explicit way to return to OOC.
+**Session-durable, not per-WS.** The flag is set once at session creation and never re-written. Subsequent WS opens that re-attach to the same session via csessid (priority #1) preserve the existing flag value through Evennia's normal session retention. WS opens with no ticket on a brand-new session leave the flag at its default (False/unset).
+
+The semantics is "this *session* was born via ticket auth" — a durable property of the session, not a transient property of the current WS URL. The router's `at_post_login` consumes the flag to suppress AUTO_PUPPET-driven auto-puppet on inbound redirected sessions (otherwise the @ooc → router → bounce-back-to-shard loop would fire).
+
+**Why this shape (vs. the earlier URL-derived setting).** Under the previous full-page-navigation design, the URL bar carried the ticket across page refresh, so an `?ticket=` URL-presence check captured the right state on every WS open. Under WS-level redirect the URL bar never carries the ticket — it stays at the router's HTTP host throughout. Setting the flag from URL on every onOpen would overwrite it to False on every refresh, breaking the OOC-return suppression. Setting it once at session creation, leveraging the session's natural persistence across reconnects, is the correct shape.
+
+**Refresh from the OOC menu** under this design: localStorage routing (see *Refresh routing* in the JS plugin) reconnects directly to the router, csessid auth re-attaches to the session that was originally created via ticket auth, the flag is intact (set when the session was born), `at_post_login` (if it fires on csessid re-attach) consults the flag and skips auto-puppet → player stays at OOC menu.
+
+**Refresh from IC on a shard:** localStorage routing reconnects directly to the shard (where the player's IC session lives), csessid auth re-attaches, the player is back IC immediately. The router is not involved at all on the refresh path.
+
+**Refresh after Django session expired:** csessid no longer maps to a logged-in browser session. Priority #1 fails → priority #2 has no ticket on a refresh → falls through to login form. Player re-authenticates fresh; AUTO_PUPPET applies as the consumer configured. The flag is correctly absent (no ticket auth happened) so AUTO_PUPPET isn't suppressed.
 
 **Why `protocol_flags` and not a direct attribute on the session.** Evennia's Portal and Server are separate processes. The Portal-side WebSocket protocol instance and the Server-side `ServerSession` are distinct Python objects in distinct memory spaces; the Portal sends session state to the Server over AMP, and only attributes listed in `settings.SESSION_SYNC_ATTRS` survive that boundary. A custom attribute like `self._ticket_authed` set in the Portal's `onOpen` would be silently dropped on the Server side. `protocol_flags` is a dict in the synced set — that's how Evennia carries `OOB`, `XTERM256`, `CLIENTNAME` etc. across to the Server — so storing the flag there means the Server's `at_post_login` reads what the Portal set.
 

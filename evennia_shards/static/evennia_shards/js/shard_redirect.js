@@ -18,6 +18,12 @@
  * for context.
  */
 $(document).ready(function () {
+    // localStorage key for "where the player's session actually lives".
+    // Updated on every shard_redirect, read on page load to route
+    // refreshes directly to the right target instead of bouncing
+    // through the router.
+    var LAST_TARGET_KEY = "evennia_shards_last_target";
+
     // Track whether the next connection_close event is part of a
     // deliberate cross-shard transfer (vs. a real disconnect). Set
     // true just before we close the old WebSocket; consumed by the
@@ -51,6 +57,16 @@ $(document).ready(function () {
         return orig_emit.apply(this, arguments);
     };
 
+    // Strip the query string from a WS URL, returning just the
+    // base endpoint (scheme://host:port/path). Used to persist the
+    // "current target" without the single-use ticket — on refresh
+    // we'll reconstruct the URL with csessid params for normal
+    // re-attach auth.
+    function strip_query(url) {
+        var qmark = url.indexOf("?");
+        return qmark >= 0 ? url.substring(0, qmark) : url;
+    }
+
     Evennia.emitter.on("shard_redirect", function (args, kwargs) {
         var target_url = args[0];
         if (!target_url) {
@@ -58,6 +74,21 @@ $(document).ready(function () {
             return;
         }
         console.log("[evennia-shards] WS-level redirect to: " + target_url);
+
+        // Persist the base endpoint for refresh-routing. We store the
+        // URL without the ticket query string — on refresh the saved
+        // value is reconstructed with csessid params (csessid auth
+        // re-attaches to the existing session; the ticket itself is
+        // single-use and would be invalid by then anyway).
+        try {
+            localStorage.setItem(LAST_TARGET_KEY, strip_query(target_url));
+        } catch (e) {
+            // localStorage may be unavailable (private browsing,
+            // disabled). Refresh routing will fall back to the
+            // router-default behaviour; the redirect itself still
+            // works.
+            console.warn("[evennia-shards] localStorage unavailable:", e);
+        }
 
         // Mark this transfer as deliberate so the imminent
         // connection_close event (from the old socket's onclose) is
@@ -150,4 +181,60 @@ $(document).ready(function () {
             },
         };
     });
+
+    // ── Refresh routing ──────────────────────────────────────────────
+    //
+    // On page load: if this is a browser refresh AND we have a saved
+    // target URL from a previous redirect, swap the freshly-opened
+    // (default-router) WebSocket to the saved target. The target's
+    // csessid auth (priority #1 in onOpen) will re-attach the player
+    // to their existing session, preserving state without going
+    // through the router's at_post_login → AUTO_PUPPET path.
+    //
+    // Constructed URL shape mirrors Evennia's webclient default:
+    //   wsurl + '?' + csessid + '&' + cuid + '&' + browser
+    // The csessid is the Django session key (shared across all
+    // sharded processes via the shared-DB backend), so the same
+    // value works on the router and any shard.
+    //
+    // Gated on PerformanceNavigationTiming.type === "reload" so a
+    // genuine fresh navigation (typed URL, link click) doesn't
+    // unexpectedly route through localStorage — fresh navigations
+    // get the normal router-first flow with login form etc. Only
+    // explicit reloads attempt refresh routing.
+    function get_navigation_type() {
+        try {
+            var entries = performance.getEntriesByType("navigation");
+            return entries.length ? entries[0].type : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    var saved_base = null;
+    try {
+        saved_base = localStorage.getItem(LAST_TARGET_KEY);
+    } catch (e) {
+        // localStorage unavailable; refresh routing skipped.
+    }
+
+    if (get_navigation_type() === "reload" && saved_base) {
+        var browser_str = window.browserstr || "browser";
+        var cuid = window.cuid || "";
+        var refresh_url =
+            saved_base + "?" + window.csessid + "&" + cuid + "&" + browser_str;
+
+        console.log(
+            "[evennia-shards] browser refresh detected; routing to saved " +
+                "target: " + saved_base
+        );
+
+        // Delay slightly so Evennia's default WS has a chance to
+        // establish (Evennia.connection exists) before we swap. The
+        // swap reuses the existing shard_redirect handler — emit the
+        // event to ourselves with the reconstructed URL.
+        setTimeout(function () {
+            Evennia.emitter.emit("shard_redirect", [refresh_url], {});
+        }, 100);
+    }
 });

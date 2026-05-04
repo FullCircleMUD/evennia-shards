@@ -1813,7 +1813,7 @@ class ExtractTicketTokenTests(BaseEvenniaTestCase):
 
 class TicketAuthedFlagTests(BaseEvenniaTestCase):
     """ShardWebSocketClient.onOpen sets protocol_flags["SHARDS_TICKET_AUTHED"]
-    to ``bool(token)`` based on URL presence of ``?ticket=``.
+    when (and only when) ticket auth creates the session.
 
     The flag lives in protocol_flags (not as a custom attribute on
     ``self``) so it crosses the Portal→Server AMP sync — see
@@ -1821,30 +1821,51 @@ class TicketAuthedFlagTests(BaseEvenniaTestCase):
     router's at_post_login override (hooks.py) reads it as the
     OOC-return signal.
 
-    Captures URL presence, not validation outcome — so a refresh while
-    at the OOC menu (URL still has a stale ticket, browser session
-    reused, ticket isn't re-validated) keeps the flag set.
+    **Session-durable semantics.** The flag is set once in onOpen's
+    priority-#2 (ticket auth) branch and never re-evaluated. Subsequent
+    WS opens that re-attach to the same session via csessid (priority
+    #1) preserve the flag. WS opens with no ticket on a session that
+    didn't originate via ticket auth leave the flag at its default
+    (False/unset). This is what makes refresh-from-OOC stay at OOC: the
+    session was born via ticket and the flag persists.
 
-    onOpen requires Twisted to run end-to-end, so these tests assert the
-    contract on the substituent: given a URL, the value derived from
-    ``bool(_extract_ticket_token())`` matches what the flag will be.
+    Under the previous implementation (URL-derived, set on every WS
+    open), refresh would have overwritten the flag to False because
+    the URL bar no longer carries the ticket under WS-level redirect.
+    The session-durable shape is the fix.
+
+    onOpen end-to-end requires Twisted, so these tests cover the
+    underlying token-extraction contract that drives the auth-path
+    decision. The integration of "ticket extracted → priority-#2
+    branch → flag set True" is exercised by smoke testing rather than
+    unit tests (the auth cascade involves init_session, sessionhandler,
+    portal_connect — too much to mock for a unit test).
     """
 
-    def test_flag_truthy_when_url_contains_ticket(self):
+    def test_extract_returns_token_when_url_contains_ticket(self):
+        # When _extract_ticket_token returns a token, onOpen takes the
+        # priority-#2 branch and sets the flag.
         proto = _FakeProtocol(uri="/websocket?ticket=abc123")
         self.assertTrue(bool(proto._extract_ticket_token()))
 
-    def test_flag_falsy_when_url_has_no_ticket(self):
+    def test_extract_returns_none_when_url_has_no_ticket(self):
+        # No token → priority-#2 branch is not taken → the flag stays
+        # at its default (False/unset) for fresh connections, or
+        # whatever the existing session has set on it (preserved).
         proto = _FakeProtocol(uri="/websocket")
         self.assertFalse(bool(proto._extract_ticket_token()))
 
-    def test_flag_falsy_when_no_uri(self):
+    def test_extract_returns_none_when_no_uri(self):
         proto = _FakeProtocol(uri=None)
         self.assertFalse(bool(proto._extract_ticket_token()))
 
-    def test_flag_truthy_for_stale_or_consumed_ticket(self):
-        # Validation outcome is irrelevant — only URL presence matters.
-        # A stale token in the URL on a refresh still flags the session.
+    def test_extract_returns_token_even_for_stale_or_consumed(self):
+        # Token extraction itself doesn't validate — _validate_ticket
+        # is a separate step inside the priority-#2 branch. A stale
+        # or already-consumed token will be extracted, then rejected
+        # by _validate_ticket, and the connection closed before the
+        # flag is set. No risk of a stale ticket setting the flag on
+        # a session that wouldn't otherwise have it.
         proto = _FakeProtocol(uri="/websocket?ticket=already-consumed-token")
         self.assertTrue(bool(proto._extract_ticket_token()))
 
@@ -1967,25 +1988,44 @@ class RoleGatingTests(BaseEvenniaTestCase):
 
     These test the gating logic in isolation using _FakeProtocol rather
     than the full onOpen (which needs Twisted). The logic is: shards
-    reject connections without tickets; routers allow them.
+    redirect orphan connections to the router (so a stale localStorage
+    routing attempt after session expiry lands the player at the
+    router's login form rather than at a connection error); routers
+    fall through to their own login screen.
     """
 
-    def test_shard_no_token_sends_rejection(self):
-        """Shard with no ticket should send an error and close."""
+    @override_settings(ROUTER_URL="ws://localhost:4002/")
+    def test_shard_no_token_redirects_to_router(self):
+        """Shard with no ticket should send shard_redirect to router and close.
+
+        Simulates the new behaviour: rather than rejecting an
+        unauthenticated connection outright (orphan UX), the shard
+        emits a `shard_redirect` OOB pointing at the router so the
+        client's existing handler swaps the WebSocket and the player
+        ends up at the router's login form (or csessid auto-auth, if
+        their browser session survived).
+        """
         proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
         token = proto._extract_ticket_token()
         self.assertIsNone(token)
 
-        # Simulate Phase 1 no-token path for shard role.
         role = get_role()  # ROLE_SHARD via @override_settings
         self.assertEqual(role, ROLE_SHARD)
-        msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
-        proto._send_text(msg)
-        proto.sendClose(4001, msg)
+
+        # Simulate the shard's no-auth branch: send shard_redirect to
+        # the router URL, then close. The actual onOpen does this via
+        # self.sendLine(json.dumps([...])) + self.sendClose(...).
+        import json as _json
+        from evennia_shards import get_router_url
+        router_url = get_router_url()
+        proto.sendLine(_json.dumps(["shard_redirect", [router_url], {}]))
+        proto.sendClose(1000, "Redirecting to router for login")
 
         self.assertEqual(len(proto.sent_lines), 1)
-        self.assertIn("requires a ticket", proto.sent_lines[0])
+        self.assertIn("shard_redirect", proto.sent_lines[0])
+        self.assertIn(router_url, proto.sent_lines[0])
         self.assertEqual(len(proto.close_calls), 1)
+        self.assertEqual(proto.close_calls[0][0], 1000)  # normal close
 
     @override_settings(SHARDS_ROLE=ROLE_ROUTER)
     def test_router_no_token_proceeds(self):

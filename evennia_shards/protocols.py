@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from django.conf import settings
 from evennia.utils.utils import class_from_module
 
-from .config import ROLE_SHARD, get_role
+from .config import ROLE_SHARD, get_role, get_router_url
 
 # Resolve the base class dynamically: whatever was configured before
 # our AppConfig.ready() overwrote the setting. Falls back to Evennia's
@@ -58,11 +58,18 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         See DESIGN/library-integration-risks.md for what to diff on upgrade.
 
         Auth priority:
-        1. Existing browser session (csessid) — handles page refresh
-           with a stale ?ticket= in the URL without re-consuming it.
-        2. Ticket token in URL — fresh connection, validate and consume.
+        1. Existing browser session (csessid) — re-attach to existing
+           session, preserves state across reconnects.
+        2. Ticket token in URL — fresh session created via ticket auth,
+           validates and consumes the ticket. Sets the session-durable
+           ``protocol_flags["SHARDS_TICKET_AUTHED"]`` flag here (the
+           only place it's set).
         3. No session and no token:
-           - Shard: reject (shards are ticket-only).
+           - Shard: emit ``shard_redirect`` OOB to the router and
+             close. Orphan connections (typically stale localStorage
+             routing after session expiry) get routed to the router's
+             login form via the client's existing handler, rather
+             than greeted with a raw connection error.
            - Router: fall through to normal login screen.
         """
         # Extract ticket token from URL (if any) but don't validate yet.
@@ -107,13 +114,77 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
             self.uid = result["account_id"]
             self.logged_in = True
             self._ticket_character_id = result["character_id"]
+            # Library-namespaced flag: True iff this *session* was
+            # created via ticket auth. Set once, here, at session
+            # creation time — not on subsequent WS opens that
+            # re-attach to the same session via csessid. Persists
+            # for the lifetime of the session via Evennia's normal
+            # session retention.
+            #
+            # This is the OOC-return signal consumed by the router-
+            # side at_post_login override (hooks.py): a session
+            # born via ticket auth is one that just arrived from a
+            # cross-shard redirect, so AUTO_PUPPET-driven auto-
+            # puppet should be suppressed (otherwise we'd loop @ooc
+            # → router → bounce-back-to-shard).
+            #
+            # Under WS-level redirect, the URL bar no longer carries
+            # the ticket across page refresh, so the previous
+            # implementation's URL-presence check would have
+            # overwritten the flag to False on every refresh.
+            # Setting it once at session creation makes the flag
+            # session-durable across reconnects — the correct
+            # semantics regardless of refresh.
+            #
+            # Stored in protocol_flags (not as an attribute on
+            # `self`) so the value crosses the Portal→Server AMP
+            # sync. Plain attributes on `self` are dropped at the
+            # boundary — only entries listed in
+            # settings.SESSION_SYNC_ATTRS survive, and protocol_flags
+            # is the conventional carrier for this kind of session-
+            # level metadata.
+            self.protocol_flags["SHARDS_TICKET_AUTHED"] = True
         else:
             # No session, no token — role-dependent gating.
             role = get_role()
             if role == ROLE_SHARD:
-                msg = "[evennia-shards] Connection rejected: this shard requires a ticket"
-                self._send_text(msg)
-                self.sendClose(4001, msg)
+                # Shards aren't entry points — only the router is. A
+                # connection arriving here without a session and
+                # without a ticket is an orphan: typically a stale
+                # localStorage routing attempt (player closed the
+                # browser while IC, came back later, sessions timed
+                # out, JS routed them to the saved shard URL on
+                # refresh). Instead of leaving them with a connection
+                # error, redirect them to the router where the login
+                # form (or csessid auto-auth, if their browser
+                # session survived) puts them back on a working path.
+                #
+                # Emit a shard_redirect OOB pointing at the router's
+                # WS URL with no query params — the client's
+                # shard_redirect handler will swap the WebSocket and
+                # save the router URL to localStorage, replacing the
+                # stale shard URL. Router's onOpen with no csessid in
+                # the URL and no ticket falls through to its login-
+                # form path (or csessid auth via Django session if
+                # still valid).
+                try:
+                    router_url = get_router_url()
+                except (ValueError, AttributeError):
+                    # ROUTER_URL not configured — shard is mis-
+                    # configured. Fall back to the plain rejection
+                    # so the player at least sees an error rather
+                    # than nothing.
+                    msg = (
+                        "[evennia-shards] Connection rejected: shard is "
+                        "misconfigured (no ROUTER_URL set)"
+                    )
+                    self._send_text(msg)
+                    self.sendClose(4001, msg)
+                    return
+                self.sendLine(
+                    json.dumps(["shard_redirect", [router_url], {}])
+                )
+                self.sendClose(1000, "Redirecting to router for login")
                 return
             # Router (or any non-shard role): fall through to login screen.
 
@@ -124,31 +195,6 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         self.protocol_flags["TRUECOLOR"] = True
         self.protocol_flags["XTERM256"] = True
         self.protocol_flags["ANSI"] = True
-
-        # Library-namespaced flag: True iff this WebSocket connection
-        # arrived with ?ticket= present in its URL. Captures URL
-        # presence, not validation outcome — so a page refresh on a
-        # redirect-target URL (where a stale token won't re-validate
-        # but the browser session is reused) still carries the flag
-        # forward.
-        #
-        # This onOpen runs in the Portal of every non-monolith role,
-        # so the flag is set on shard sessions and router sessions
-        # alike. Currently, the only consumer is the router-side
-        # at_post_login override (evennia_shards/hooks.py), which
-        # reads it as the OOC-return signal to skip auto-puppet on
-        # an inbound redirected session. Other role-specific consumers
-        # may read the flag in the future and should interpret it in
-        # the context of their role and the prevailing redirect
-        # topology — e.g. shard↔shard transfers, if introduced.
-        #
-        # Stored in protocol_flags (rather than as an attribute on
-        # `self`) so the value crosses the Portal→Server AMP sync.
-        # Plain attributes on `self` are dropped at the boundary —
-        # only entries listed in settings.SESSION_SYNC_ATTRS survive,
-        # and protocol_flags is the conventional carrier for this
-        # kind of session-level metadata.
-        self.protocol_flags["SHARDS_TICKET_AUTHED"] = bool(token)
 
         # Watch for dead links.
         self.transport.setTcpKeepAlive(1)
