@@ -2015,6 +2015,10 @@ class _FakeAttributes:
     def get(self, name, default=None):
         return self._store.get(name, default)
 
+    def reset_cache(self):
+        # No-op: the fake doesn't keep a separate cache to invalidate.
+        pass
+
 
 class _FakeSessionHandler:
     """Stand-in for Evennia's per-character SessionHandler.

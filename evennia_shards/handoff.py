@@ -383,7 +383,14 @@ def _redirect_to_character_shard(account, session, character) -> str:
     # Set in ShardAwareCmdOOC; cleared here at the symmetric IC entry
     # point (covers manual @ic, login-time auto-redirect, and
     # cross_shard_character_move).
+    prev_flag = account.db._shards_at_ooc_menu
     account.db._shards_at_ooc_menu = False
+    logger.log_info(
+        f"[evennia-shards] _redirect_to_character_shard: CLEARED "
+        f"_shards_at_ooc_menu (was {prev_flag!r}, now "
+        f"{account.db._shards_at_ooc_menu!r}) on account id={account.id} "
+        f"key={account.key} target_char={character} shard={shard_id}"
+    )
 
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,

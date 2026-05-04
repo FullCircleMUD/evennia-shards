@@ -104,11 +104,33 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     # player intent over vanilla AUTO_PUPPET-on-every-connection.
     #
     # Cross-process write: the flag is set on the shard process when
-    # @ooc runs, but read here on the router. flush_from_cache +
-    # refresh_from_db to avoid a stale idmapper copy.
+    # @ooc runs, but read here on the router. The AttributeHandler
+    # keeps its own per-instance _cache dict (independent of the
+    # idmapper); flush_from_cache and refresh_from_db don't touch
+    # it. attributes.reset_cache() is the call that forces the next
+    # read to hit the DB. flush_from_cache + refresh_from_db are
+    # also kept defensively in case the cached instance has any
+    # other stale state.
+    flag_before = self.db._shards_at_ooc_menu
+    logger.log_info(
+        f"[evennia-shards] shard_aware_at_post_login: account id={self.id} "
+        f"key={self.key} _shards_at_ooc_menu BEFORE cache-bust = "
+        f"{flag_before!r}"
+    )
     self.flush_from_cache(force=True)
     self.refresh_from_db()
-    if self.db._shards_at_ooc_menu:
+    self.attributes.reset_cache()
+    flag_after = self.db._shards_at_ooc_menu
+    logger.log_info(
+        f"[evennia-shards] shard_aware_at_post_login: account id={self.id} "
+        f"key={self.key} _shards_at_ooc_menu AFTER cache-bust = "
+        f"{flag_after!r}"
+    )
+    if flag_after:
+        logger.log_info(
+            f"[evennia-shards] shard_aware_at_post_login: routing to OOC "
+            f"menu on account id={self.id} key={self.key}"
+        )
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 

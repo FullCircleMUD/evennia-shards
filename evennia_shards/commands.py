@@ -171,6 +171,12 @@ class ShardAwareCmdOOC(CmdOOC):
         # honouring the player's last expressed intent ("I went OOC")
         # over vanilla AUTO_PUPPET-on-every-login behaviour.
         account.db._shards_at_ooc_menu = True
+        logger.log_info(
+            f"[evennia-shards] ShardAwareCmdOOC.func: SET "
+            f"_shards_at_ooc_menu=True on account id={account.id} "
+            f"key={account.key} (read-back="
+            f"{account.db._shards_at_ooc_menu!r})"
+        )
 
         token = create_ticket(
             account.id, character_id, get_router_shard_id(),
