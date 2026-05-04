@@ -74,6 +74,13 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     See DESIGN/library-integration-risks.md for what to diff on Evennia
     upgrade.
     """
+    logger.log_info(
+        f"[evennia-shards] shard_aware_at_post_login: ENTERED for "
+        f"account id={getattr(self, 'id', '?')} "
+        f"key={getattr(self, 'key', '?')} "
+        f"_shards_at_ooc_menu={self.db._shards_at_ooc_menu!r}"
+    )
+
     # ── Reproduced Evennia DefaultAccount.at_post_login prelude ───────
     # Based on Evennia 6.0.0. Diff against upstream on upgrade.
     protocol_flags = self.attributes.get("_saved_protocol_flags", {})

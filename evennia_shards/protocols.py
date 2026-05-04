@@ -270,14 +270,31 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         and ``sessionhandler.connect`` will fail downstream the same
         way it would have without the flag write.
         """
-        if get_role() != ROLE_ROUTER:
+        from evennia.utils import logger
+
+        role = get_role()
+        if role != ROLE_ROUTER:
+            logger.log_info(
+                f"[evennia-shards] _mark_ooc_arrival_if_router: skipping "
+                f"(role={role!r}, not ROLE_ROUTER) account_id={account_id}"
+            )
             return
         from evennia.accounts.models import AccountDB
         try:
             account = AccountDB.objects.get(pk=account_id)
         except AccountDB.DoesNotExist:
+            logger.log_info(
+                f"[evennia-shards] _mark_ooc_arrival_if_router: account "
+                f"pk={account_id} not found; no-op"
+            )
             return
         account.db._shards_at_ooc_menu = True
+        logger.log_info(
+            f"[evennia-shards] _mark_ooc_arrival_if_router: SET "
+            f"_shards_at_ooc_menu=True on account id={account.id} "
+            f"key={account.key} (read-back="
+            f"{account.db._shards_at_ooc_menu!r})"
+        )
 
 
 # CLOSE_NORMAL is used in the browser-session cleanup path (reproduced

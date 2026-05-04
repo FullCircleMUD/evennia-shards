@@ -147,6 +147,12 @@ class ShardAwareCmdOOC(CmdOOC):
         account = self.account
         session = self.session
 
+        logger.log_info(
+            f"[evennia-shards] ShardAwareCmdOOC.func: ENTERED "
+            f"(account id={account.id} key={account.key}, "
+            f"session={getattr(session, 'sessid', '?')})"
+        )
+
         # Resolve the best character_id for the ticket.
         old_char = account.get_puppet(session)
         if old_char:
