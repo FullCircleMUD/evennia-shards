@@ -107,6 +107,17 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
                 ):
                     self.sessid = old_session.sessid
                     self.sessionhandler.disconnect(old_session)
+
+            # OOC-arrival signal. The browser landed back at the router
+            # carrying both a csessid cookie (Django session still valid
+            # from a recent login) and a ?ticket= in the URL. csessid
+            # auth above wins for authentication, but the ticket is
+            # what tells us this is an @ooc redirect — IC tickets
+            # target shards, not the router, so any ticket arriving at
+            # the router is implicitly an @ooc arrival regardless of
+            # which auth branch resolves the identity. Stamp the flag.
+            if token:
+                self._mark_ooc_arrival_if_router(uid)
         elif token:
             # No session — try ticket auth.
             valid, result = self._validate_ticket(token, client_address)
