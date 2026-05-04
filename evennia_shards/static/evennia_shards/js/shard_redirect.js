@@ -31,6 +31,14 @@ $(document).ready(function () {
     var deliberate_transfer = false;
     var deliberate_transfer_timeout = null;
 
+    // Track whether the shard_redirect handler has fired since page
+    // load. Used by the refresh-routing setTimeout below to skip
+    // re-routing if the natural at_post_login flow has already moved
+    // the WebSocket to the right place — without this guard, our
+    // setTimeout fires after the player is already IC and triggers
+    // an unnecessary swap that ends up bouncing them to the router.
+    var swap_already_happened = false;
+
     // Wrap Evennia.emitter.emit so that connection_close events
     // arising from a deliberate cross-shard transfer are swallowed
     // silently — without this, webclient_gui's onConnectionClose
@@ -74,6 +82,11 @@ $(document).ready(function () {
             return;
         }
         console.log("[evennia-shards] WS-level redirect to: " + target_url);
+
+        // Mark that a swap has occurred. The refresh-routing
+        // setTimeout below checks this and skips its own emit if the
+        // natural flow has already moved the WS to the right place.
+        swap_already_happened = true;
 
         // Persist the base endpoint for refresh-routing. We store the
         // URL without the ticket query string — on refresh the saved
@@ -230,10 +243,21 @@ $(document).ready(function () {
         );
 
         // Delay slightly so Evennia's default WS has a chance to
-        // establish (Evennia.connection exists) before we swap. The
-        // swap reuses the existing shard_redirect handler — emit the
-        // event to ourselves with the reconstructed URL.
+        // establish (Evennia.connection exists) before we swap. If
+        // during that window a server-emitted shard_redirect has
+        // already fired (e.g. router's at_post_login redirected the
+        // player back to their last shard), our swap is unnecessary
+        // — and worse than unnecessary, it'd construct a no-ticket
+        // csessid-only URL that lands at a duplicate session and
+        // gets bounced through the orphan-redirect path. Skip it.
         setTimeout(function () {
+            if (swap_already_happened) {
+                console.log(
+                    "[evennia-shards] skipping refresh routing — server " +
+                        "already redirected"
+                );
+                return;
+            }
             Evennia.emitter.emit("shard_redirect", [refresh_url], {});
         }, 100);
     }
