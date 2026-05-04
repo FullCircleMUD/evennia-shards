@@ -40,3 +40,12 @@ START_LOCATION = "#2"
 WEBSERVER_PORTS = [(4011, 4015)]
 WEBSOCKET_CLIENT_PORT = 4012
 AMP_PORT = 4016
+
+# Shards exist to host player sessions, nothing else. They never
+# render the webclient page, never serve static assets, never run
+# the website. evennia_shards.portal_services registers the
+# webclient WebSocket independently when WEBSERVER_ENABLED=False, so
+# disabling the webserver here drops the unused HTTP stack
+# (reverse-proxy, AJAX webclient, Django views, WEB_PLUGINS_MODULE
+# hook chain) without affecting WebSocket sessions.
+WEBSERVER_ENABLED = False

@@ -127,6 +127,20 @@ Each instance starts with `evennia start --settings settings_router.py` (or `set
 
 Telnet is disabled for all sharded instances (`TELNET_ENABLED = False` in the common config). The ticket-based auth flow is websocket-only — telnet has no mechanism to carry a ticket token (no URL, no query parameters). Wiring telnet into the ticket system is future work.
 
+## HTTP webserver: router-only by default
+
+The library assumes exactly one HTTP webserver in the deployment, hosting the webclient page, the website, and the static-asset pipeline. By default it's the router:
+
+| Setting | Router | Shard |
+|---|---|---|
+| `WEBSERVER_ENABLED` | `True` | `False` |
+
+Shards exist to host player sessions, not to serve web pages. Disabling the webserver on shards drops the entire HTTP stack on those processes (reverse-proxy, AJAX webclient, Django views, `WEB_PLUGINS_MODULE` hook chain) — they listen on the AMP port and the WebSocket port, nothing else.
+
+This requires a small library workaround because Evennia 6.0.0 bundles the WebSocket registration inside `register_webserver` (see [deployment-topology.md](deployment-topology.md#a-note-on-evennias-coupling)). The library's Portal-services plugin (`evennia_shards/portal_services.py`) registers the WebSocket independently when `WEBSERVER_ENABLED = False`. Auto-installed by `AppConfig.ready()`; no consumer wiring required.
+
+Consumers running their website on a separate service (Next.js, static site host, separate Django, etc.) can flip `WEBSERVER_ENABLED = False` on the router as well — the same plugin keeps the WebSocket running with no HTTP serving on the Evennia process at all.
+
 ## Localhost multi-instance ports
 
 Each Evennia instance binds several ports. When running multiple instances on localhost for testing, each needs its own set to avoid collisions. The demo game offsets shard ports by 10 from the router's defaults:

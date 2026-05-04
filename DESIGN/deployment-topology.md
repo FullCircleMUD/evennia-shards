@@ -59,6 +59,22 @@ When a commit is pushed, the platform redeploys all services in parallel from th
 
 The shape is identical; the scale differs. Local dev is the same topology as production, not a simplified approximation.
 
+## HTTP webserver topology: one webserver, somewhere
+
+The library assumes the consumer game has **exactly one HTTP webserver** in the deployment, hosting the webclient page, the website, the static-asset pipeline, and the Django admin. By default that webserver lives on the **router** process — turn it on with `WEBSERVER_ENABLED = True` in the router's settings, leave it off (`WEBSERVER_ENABLED = False`) on every shard.
+
+**Shards never serve HTTP.** They exist to host player sessions; the only network ports they need are the WebSocket (now), and telnet/SSH (when those land). Running a full HTTP stack on every shard — reverse-proxy from Portal to Server, Django webclient view, static-asset serving, the AJAX webclient fallback, the `WEB_PLUGINS_MODULE` hook chain — is gratuitous when no browser ever loads a page from the shard.
+
+**External-website case.** A consumer running their website on a separate service entirely (Next.js, static site host, separate Django, whatever) can flip `WEBSERVER_ENABLED = False` on the router as well. The library treats router and shard symmetrically: any process with `WEBSERVER_ENABLED = False` runs WebSocket-only. The library doesn't care where the consumer's website actually lives — only that exactly one place renders the webclient page and serves the static assets that page references.
+
+### A note on Evennia's coupling
+
+Achieving "WebSocket-only" mode required some unpicking on the library's part. Evennia 6.0.0 (and earlier) registers the webclient WebSocket service **inside** the HTTP webserver setup — specifically nested in the loop that builds the reverse-proxy in [`PortalServerFactory.register_webserver`](../../venv/Lib/site-packages/evennia/server/portal/service.py#L177). Setting `WEBSERVER_ENABLED = False` cleanly disables the HTTP stack but takes the WebSocket down with it.
+
+The WebSocket has no architectural reason to be coupled to the HTTP webserver — it's a separate Twisted `TCPServer` on a separate port, listening for an entirely different protocol, sharing no state with the HTTP reverse-proxy, the AJAX webclient, or the Django views. The bundling appears to be incidental to the way `register_webserver` was originally laid out, not a deliberate design choice. (Compare the telnet and SSH protocols, which Evennia registers as top-level services on the Portal factory directly — exactly the level the WebSocket should be at.)
+
+To work around this, the library provides a Portal-services plugin (`evennia_shards/portal_services.py`) that registers the WebSocket independently when `WEBSERVER_ENABLED = False`. The plugin is a no-op when the webserver *is* enabled (Evennia's normal flow registers the WS, doing it twice would EADDRINUSE). See [library-integration-risks.md](library-integration-risks.md#portal-services-plugin) for the full coupling write-up.
+
 ## Why one repo, not N
 
 Discussed and agreed: maintaining N repositories for N roles re-introduces the failure mode the architecture exists to prevent — divergent commits across services causing inconsistent behaviour at shard boundaries. One repo means one commit hash describes the system, one CI pipeline gates every deploy, and reverts are atomic.

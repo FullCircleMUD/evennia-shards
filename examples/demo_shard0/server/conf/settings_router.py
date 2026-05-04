@@ -34,3 +34,16 @@ AUTO_PUPPET_ON_LOGIN = False
 WEBSERVER_PORTS = [(4001, 4005)]
 WEBSOCKET_CLIENT_PORT = 4002
 AMP_PORT = 4006
+
+# Default deployment shape: the router serves the library's webclient
+# page, the website, and the static-asset pipeline; shards run the
+# WebSocket only. Set explicitly here for symmetry with the shards
+# (which set this to False) — the value matches Evennia's default but
+# the explicit declaration documents the intent.
+#
+# A consumer running their website on a separate service entirely
+# (Next.js, static site, separate Django, etc.) can flip this to
+# False on the router as well; evennia_shards.portal_services will
+# register the WebSocket independently. See
+# DESIGN/deployment-topology.md.
+WEBSERVER_ENABLED = True

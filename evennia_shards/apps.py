@@ -40,6 +40,21 @@ class EvenniaShardsConfig(AppConfig):
                     _middleware_path
                 ]
 
+            # Register the Portal-side services plugin so we can
+            # register the webclient WebSocket independently when
+            # WEBSERVER_ENABLED=False. See evennia_shards/portal_services.py
+            # for why this exists (Evennia bundles WS registration
+            # inside register_webserver, forcing webserver+WS as a
+            # combined unit; we untangle them).
+            _portal_plugin_path = "evennia_shards.portal_services"
+            _existing_plugins = list(
+                getattr(settings, "PORTAL_SERVICES_PLUGIN_MODULES", []) or []
+            )
+            if _portal_plugin_path not in _existing_plugins:
+                settings.PORTAL_SERVICES_PLUGIN_MODULES = (
+                    _existing_plugins + [_portal_plugin_path]
+                )
+
             # Replace CmdIC with shard-aware version that redirects on
             # routers and blocks on shards. The AccountCmdSet references
             # account.CmdIC via module attribute, so patching the module

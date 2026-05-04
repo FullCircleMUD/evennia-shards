@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-04 — Shards run WebSocket-only: HTTP webserver router-only by default
+
+Shards no longer run an HTTP webserver. Default deployment shape is now:
+
+- Router: `WEBSERVER_ENABLED = True` — serves the webclient page, the website, the static-asset pipeline, the Django admin.
+- Shards: `WEBSERVER_ENABLED = False` — only the AMP and WebSocket ports listen.
+
+Reason this was non-trivial: Evennia 6.0.0 registers the webclient WebSocket *inside* `PortalServerFactory.register_webserver` (nested in the loop that builds the HTTP reverse-proxy). Setting `WEBSERVER_ENABLED = False` cleanly disables the HTTP stack but takes the WebSocket down with it. The WebSocket has no architectural reason to be coupled to the HTTP webserver — it's a separate Twisted service on a separate port speaking a different protocol — so the library extracts the WS-registration block and runs it independently via the `PORTAL_SERVICES_PLUGIN_MODULES` hook.
+
+**Library piece:** `evennia_shards/portal_services.py` exposes `start_plugin_services(portal)` which registers the WebSocket factory standalone when `WEBSERVER_ENABLED = False`. No-op when the webserver is enabled (Evennia's normal flow handles it). `AppConfig.ready()` auto-appends the plugin module to the setting; consumer needs no wiring.
+
+**Generalises symmetrically.** Same plugin works on the router too: a consumer running their website on a separate service entirely (Next.js, static site host, separate Django) can flip `WEBSERVER_ENABLED = False` on the router as well. Library treats router and shard symmetrically; the only invariant is "exactly one place serves the webclient page somewhere."
+
+**Settings shape:**
+- Router (`settings_router.py`): `WEBSERVER_ENABLED = True` (explicit, matches Evennia default; documents intent).
+- Shards (`settings_shard0.py`, `settings_shard1.py`): `WEBSERVER_ENABLED = False`.
+
+**204 tests passing** (199 prior + 5 new in `StartPluginServicesTests`): no-op when webserver enabled, no-op when WS deliberately disabled, no-op when port missing, registers WS standalone in the happy case, honours `LOCKDOWN_MODE` for interface forcing.
+
+**Files:** new `evennia_shards/portal_services.py`; `evennia_shards/apps.py` appends to `PORTAL_SERVICES_PLUGIN_MODULES`; demo `settings_router.py` / `settings_shard0.py` / `settings_shard1.py` set `WEBSERVER_ENABLED` explicitly. Doc updates in `DESIGN/deployment-topology.md` (new "HTTP webserver topology" section), `DESIGN/library-integration-risks.md` (new coupling section for the plugin), `DESIGN/shard-settings.md` (recommended `WEBSERVER_ENABLED` per role).
+
 ### 2026-05-04 — Refresh handling completed (refresh-while-IC, refresh-while-OOC, post-restart)
 
 Follow-on to the WebSocket-level redirect milestone below. The PoC ship covered IC/OOC transitions but left refresh handling broken in several modes. This milestone closes those out and lands a clean architecture for OOC-intent persistence.

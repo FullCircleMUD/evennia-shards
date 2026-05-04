@@ -3231,3 +3231,164 @@ class WarnIfAtPostLoginOverriddenTests(BaseEvenniaTestCase):
         self.assertTrue(
             warn_if_at_post_login_overridden(CooperativeAccount, "router")
         )
+
+
+# =============================================================================
+# Portal services plugin (start_plugin_services)
+# =============================================================================
+
+
+class _FakePortalService:
+    """Minimal stand-in for Evennia's PortalServerFactory.
+
+    The plugin only ever calls ``setServiceParent`` on the services
+    it builds; we capture those calls (and any info_dict updates) so
+    tests can assert on what was registered.
+    """
+
+    def __init__(self):
+        self.children = []
+        self.info_dict = {}
+
+
+class StartPluginServicesTests(BaseEvenniaTestCase):
+    """``portal_services.start_plugin_services`` registers WS only when needed.
+
+    The function exists to work around an Evennia coupling: the
+    webclient WebSocket is registered inside ``register_webserver``
+    rather than as a top-level Portal service. This forces the
+    library to extract the WS portion when ``WEBSERVER_ENABLED`` is
+    False — i.e. on every shard.
+
+    The plugin is a no-op when:
+
+    - ``WEBSERVER_ENABLED`` is True (Evennia's normal flow registered
+      the WS already; doing it again would duplicate the listener).
+    - The webclient WS is itself disabled (``WEBSOCKET_CLIENT_ENABLED``
+      False or port/interface settings missing).
+
+    It registers a single Twisted ``TCPServer`` on the Portal factory
+    when ``WEBSERVER_ENABLED`` is False *and* WS settings are present.
+    """
+
+    @override_settings(
+        WEBSERVER_ENABLED=True,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4002,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_webserver_enabled(self):
+        """WEBSERVER_ENABLED=True → plugin is a no-op (Evennia handles it)."""
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        # Patch out setServiceParent to detect any registration. Use a
+        # subclass to record calls because TCPServer.setServiceParent
+        # would fire if the plugin actually built a service.
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+        self.assertNotIn("webclient", portal.info_dict)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=False,
+        WEBSOCKET_CLIENT_PORT=4002,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_websocket_client_disabled(self):
+        """Webclient WS deliberately disabled → plugin is a no-op."""
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=None,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_websocket_port_missing(self):
+        """Missing port → plugin is a no-op (defensive against bad config)."""
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4012,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_registers_websocket_when_webserver_disabled(self):
+        """The happy path: standalone WS registration on a shard."""
+        from twisted.application import internet
+
+        from evennia_shards.portal_services import start_plugin_services
+
+        # Patch setServiceParent to record without actually starting
+        # the reactor service.
+        registered = []
+
+        original = internet.TCPServer.setServiceParent
+        try:
+            def _record(self, parent):
+                registered.append((self, parent))
+
+            internet.TCPServer.setServiceParent = _record
+            portal = _FakePortalService()
+            start_plugin_services(portal)
+        finally:
+            internet.TCPServer.setServiceParent = original
+
+        self.assertEqual(len(registered), 1)
+        ws_service, parent = registered[0]
+        self.assertIs(parent, portal)
+        # Service should be named with the interface and port.
+        self.assertIn("4012", ws_service.name)
+
+        # info_dict updated with the registration record.
+        self.assertIn("webclient", portal.info_dict)
+        self.assertEqual(len(portal.info_dict["webclient"]), 1)
+        self.assertIn("4012", portal.info_dict["webclient"][0])
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4012,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=True,
+    )
+    def test_lockdown_mode_forces_localhost_interface(self):
+        """LOCKDOWN_MODE → bind to 127.0.0.1 regardless of configured interface.
+
+        Mirrors Evennia's own ``check_lockdown`` helper. A regression
+        that bound to 0.0.0.0 in lockdown mode would silently expose
+        the WS port to the network.
+        """
+        from twisted.application import internet
+
+        from evennia_shards.portal_services import start_plugin_services
+
+        registered = []
+        original = internet.TCPServer.setServiceParent
+        try:
+            def _record(self, parent):
+                registered.append((self, parent))
+
+            internet.TCPServer.setServiceParent = _record
+            portal = _FakePortalService()
+            start_plugin_services(portal)
+        finally:
+            internet.TCPServer.setServiceParent = original
+
+        self.assertEqual(len(registered), 1)
+        ws_service, _ = registered[0]
+        self.assertIn("127.0.0.1", ws_service.name)
