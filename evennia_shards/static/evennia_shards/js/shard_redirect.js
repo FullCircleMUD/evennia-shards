@@ -31,14 +31,6 @@ $(document).ready(function () {
     var deliberate_transfer = false;
     var deliberate_transfer_timeout = null;
 
-    // Track whether the shard_redirect handler has fired since page
-    // load. Used by the refresh-routing setTimeout below to skip
-    // re-routing if the natural at_post_login flow has already moved
-    // the WebSocket to the right place — without this guard, our
-    // setTimeout fires after the player is already IC and triggers
-    // an unnecessary swap that ends up bouncing them to the router.
-    var swap_already_happened = false;
-
     // Wrap Evennia.emitter.emit so that connection_close events
     // arising from a deliberate cross-shard transfer are swallowed
     // silently — without this, webclient_gui's onConnectionClose
@@ -139,11 +131,6 @@ $(document).ready(function () {
             );
         }
         console.log("[evennia-shards] WS-level redirect to: " + target_url);
-
-        // Mark that a swap has occurred. The refresh-routing
-        // setTimeout below checks this and skips its own emit if the
-        // natural flow has already moved the WS to the right place.
-        swap_already_happened = true;
 
         // Persist the base endpoint for refresh-routing. We store the
         // URL without the ticket query string — on refresh the saved
@@ -254,18 +241,25 @@ $(document).ready(function () {
 
     // ── Refresh routing ──────────────────────────────────────────────
     //
-    // On page load: if this is a browser refresh AND we have a saved
-    // target URL from a previous redirect, swap the freshly-opened
-    // (default-router) WebSocket to the saved target. The target's
-    // csessid auth (priority #1 in onOpen) will re-attach the player
-    // to their existing session, preserving state without going
-    // through the router's at_post_login → AUTO_PUPPET path.
+    // On a browser refresh, override window.wsurl so that Evennia's
+    // own default-connection logic opens directly to the saved shard
+    // target instead of the router. evennia.js reads window.wsurl
+    // inside its WebsocketConnection constructor, which Evennia.init
+    // calls 500ms after $(document).ready (line 475-481 of evennia.js
+    // in Evennia 6.0.0). $(document).ready callbacks run before that
+    // setTimeout fires, so we have a clean window to substitute the
+    // URL before the WS opens at all.
     //
-    // Constructed URL shape mirrors Evennia's webclient default:
-    //   wsurl + '?' + csessid + '&' + cuid + '&' + browser
-    // The csessid is the Django session key (shared across all
-    // sharded processes via the shared-DB backend), so the same
-    // value works on the router and any shard.
+    // Compared to the previous "open default WS to router, then swap
+    // 100ms later" approach: no router round-trip, no fleeting
+    // at_post_login render on the router during refresh, no
+    // disconnect-clear race wiping webclient_authenticated_uid.
+    //
+    // The destination's csessid auth (priority #1 in onOpen)
+    // re-attaches the player to their existing session. The csessid
+    // is the Django session key, shared across all sharded processes
+    // via the shared-DB backend, so the same value works on the
+    // router or any shard.
     //
     // Gated on PerformanceNavigationTiming.type === "reload" so a
     // genuine fresh navigation (typed URL, link click) doesn't
@@ -289,33 +283,14 @@ $(document).ready(function () {
     }
 
     if (get_navigation_type() === "reload" && saved_base) {
-        var browser_str = window.browserstr || "browser";
-        var cuid = window.cuid || "";
-        var refresh_url =
-            saved_base + "?" + window.csessid + "&" + cuid + "&" + browser_str;
-
-        console.log(
-            "[evennia-shards] browser refresh detected; routing to saved " +
-                "target: " + saved_base
-        );
-
-        // Delay slightly so Evennia's default WS has a chance to
-        // establish (Evennia.connection exists) before we swap. If
-        // during that window a server-emitted shard_redirect has
-        // already fired (e.g. router's at_post_login redirected the
-        // player back to their last shard), our swap is unnecessary
-        // — and worse than unnecessary, it'd construct a no-ticket
-        // csessid-only URL that lands at a duplicate session and
-        // gets bounced through the orphan-redirect path. Skip it.
-        setTimeout(function () {
-            if (swap_already_happened) {
-                console.log(
-                    "[evennia-shards] skipping refresh routing — server " +
-                        "already redirected"
-                );
-                return;
-            }
-            Evennia.emitter.emit("shard_redirect", [refresh_url], {});
-        }, 100);
+        var original_wsurl = window.wsurl;
+        if (original_wsurl !== saved_base) {
+            window.wsurl = saved_base;
+            console.log(
+                "[evennia-shards] browser refresh detected; overriding " +
+                    "window.wsurl to saved target: " + saved_base +
+                    " (was " + original_wsurl + ")"
+            );
+        }
     }
 });
