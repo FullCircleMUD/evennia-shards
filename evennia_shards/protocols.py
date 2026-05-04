@@ -127,6 +127,43 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         csession = self.get_client_session()  # sets self.csessid
         csessid = self.csessid
 
+        # Restore webclient_authenticated_uid from Django auth's
+        # _auth_user_id if it's missing.
+        #
+        # Evennia's WebSocketClient.disconnect() unconditionally
+        # clears webclient_authenticated_uid on every WS close. That's
+        # fine for vanilla Evennia (one-process, one-WS) but breaks
+        # sharded refresh-while-IC: the chain of WS swaps that gets
+        # the player from router to shard wipes the uid before the
+        # shard's onOpen can read it, and the next reconnect sees
+        # uid=None and falls through to priority #3 (orphan-redirect),
+        # eventually landing the player at the login form.
+        #
+        # _auth_user_id is Django's own logged-in marker, set by
+        # contrib.auth.login() during form submission. It's untouched
+        # by Evennia's disconnect handler — only logout() or
+        # session.flush() clear it. So if the user is still logged in
+        # at the Django auth layer, we can safely re-derive
+        # webclient_authenticated_uid from _auth_user_id, which is
+        # exactly what the SharedLoginMiddleware does on every HTTP
+        # request through Django's middleware stack. Same trust
+        # model: possession of the csessid grants access.
+        if csession:
+            existing_uid = csession.get("webclient_authenticated_uid", None)
+            auth_uid = csession.get("_auth_user_id")
+            if not existing_uid and auth_uid:
+                csession["webclient_authenticated_uid"] = int(auth_uid)
+                csession["webclient_authenticated_nonce"] = (
+                    csession.get("webclient_authenticated_nonce", 0) + 1
+                )
+                csession.save()
+                _shards_log.log_info(
+                    f"[evennia-shards] onOpen: restored "
+                    f"webclient_authenticated_uid={auth_uid!r} from "
+                    f"Django _auth_user_id (was None — disconnect "
+                    f"handler had cleared it)"
+                )
+
         # Auth: browser session first, then ticket, then role gate.
         uid = csession and csession.get("webclient_authenticated_uid", None)
         nonce = csession and csession.get("webclient_authenticated_nonce", 0)
