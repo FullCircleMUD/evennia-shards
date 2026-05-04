@@ -239,58 +239,13 @@ $(document).ready(function () {
         };
     });
 
-    // ── Refresh routing ──────────────────────────────────────────────
+    // Refresh routing lives elsewhere.
     //
-    // On a browser refresh, override window.wsurl so that Evennia's
-    // own default-connection logic opens directly to the saved shard
-    // target instead of the router. evennia.js reads window.wsurl
-    // inside its WebsocketConnection constructor, which Evennia.init
-    // calls 500ms after $(document).ready (line 475-481 of evennia.js
-    // in Evennia 6.0.0). $(document).ready callbacks run before that
-    // setTimeout fires, so we have a clean window to substitute the
-    // URL before the WS opens at all.
-    //
-    // Compared to the previous "open default WS to router, then swap
-    // 100ms later" approach: no router round-trip, no fleeting
-    // at_post_login render on the router during refresh, no
-    // disconnect-clear race wiping webclient_authenticated_uid.
-    //
-    // The destination's csessid auth (priority #1 in onOpen)
-    // re-attaches the player to their existing session. The csessid
-    // is the Django session key, shared across all sharded processes
-    // via the shared-DB backend, so the same value works on the
-    // router or any shard.
-    //
-    // Gated on PerformanceNavigationTiming.type === "reload" so a
-    // genuine fresh navigation (typed URL, link click) doesn't
-    // unexpectedly route through localStorage — fresh navigations
-    // get the normal router-first flow with login form etc. Only
-    // explicit reloads attempt refresh routing.
-    function get_navigation_type() {
-        try {
-            var entries = performance.getEntriesByType("navigation");
-            return entries.length ? entries[0].type : null;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    var saved_base = null;
-    try {
-        saved_base = localStorage.getItem(LAST_TARGET_KEY);
-    } catch (e) {
-        // localStorage unavailable; refresh routing skipped.
-    }
-
-    if (get_navigation_type() === "reload" && saved_base) {
-        var original_wsurl = window.wsurl;
-        if (original_wsurl !== saved_base) {
-            window.wsurl = saved_base;
-            console.log(
-                "[evennia-shards] browser refresh detected; overriding " +
-                    "window.wsurl to saved target: " + saved_base +
-                    " (was " + original_wsurl + ")"
-            );
-        }
-    }
+    // On a browser refresh, window.wsurl is overridden in an inline
+    // script tag injected by ShardRedirectScriptMiddleware just
+    // before the evennia.js <script> tag, so it runs before evennia.js
+    // loads and Evennia.init opens the default WS. This file is
+    // injected at the end of <body> and runs much later — too late to
+    // override window.wsurl. See evennia_shards/middleware.py for the
+    // override.
 });

@@ -35,12 +35,39 @@ class ShardRedirectScriptMiddleware(MiddlewareMixin):
         rb"<script\b[^>]*\bsrc=[^>]*evennia\.js[^>]*>\s*</script>"
     )
 
-    _EARLY_PROBE = (
+    # Refresh-routing override of window.wsurl. Runs synchronously
+    # between the inline `var wsurl = ...` block and the evennia.js
+    # <script> tag that loads the webclient runtime. By the time
+    # Evennia.init reads window.wsurl (~500ms later, inside the
+    # WebsocketConnection constructor), our override has already
+    # taken effect.
+    #
+    # If this is a refresh (PerformanceNavigationTiming.type ===
+    # "reload") AND localStorage has a saved target URL from a
+    # previous shard_redirect, replace window.wsurl with that target.
+    # evennia.js then opens its default connection directly to the
+    # shard, no router round-trip, no flash through the router OOC
+    # menu, no disconnect-clear race.
+    #
+    # Fresh navigations (typed URL, link click) report navigation
+    # type as "navigate" and skip the override → default router-first
+    # flow with login form etc.
+    _EARLY_OVERRIDE = (
         b"<script>"
-        b"console.log("
-        b"'[evennia-shards] EARLY probe: window.wsurl=' + window.wsurl + "
-        b"' window.csessid=' + window.csessid"
-        b");"
+        b"(function(){"
+        b"try{"
+        b"var nav=performance.getEntriesByType('navigation');"
+        b"if(!nav.length||nav[0].type!=='reload')return;"
+        b"var saved=localStorage.getItem('evennia_shards_last_target');"
+        b"if(saved&&window.wsurl!==saved){"
+        b"console.log('[evennia-shards] refresh: overrode window.wsurl '+"
+        b"window.wsurl+' \\u2192 '+saved);"
+        b"window.wsurl=saved;"
+        b"}"
+        b"}catch(e){"
+        b"console.warn('[evennia-shards] refresh override failed:',e);"
+        b"}"
+        b"})();"
         b"</script>"
     )
 
@@ -52,14 +79,16 @@ class ShardRedirectScriptMiddleware(MiddlewareMixin):
         if "/webclient" not in request.path:
             return response
 
-        # Inject the EARLY probe right before evennia.js's <script>
-        # tag so we can confirm load/execution order in the browser
-        # console relative to evennia.js's "Trying websocket..." log.
+        # Inject the EARLY override right before evennia.js's <script>
+        # tag. The inline JS runs synchronously after the template's
+        # `var wsurl = ...` block but before evennia.js loads, so the
+        # override takes effect before WebsocketConnection reads
+        # window.wsurl.
         match = self._EVENNIA_JS_TAG.search(response.content)
-        if match and self._EARLY_PROBE not in response.content:
+        if match and self._EARLY_OVERRIDE not in response.content:
             response.content = (
                 response.content[: match.start()]
-                + self._EARLY_PROBE
+                + self._EARLY_OVERRIDE
                 + b"\n"
                 + response.content[match.start():]
             )
