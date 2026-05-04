@@ -12,7 +12,7 @@ Each coupling section follows the same template:
 - **Risk on Evennia upgrade** — what to diff in the new Evennia version.
 - **Risk in consumer override** — what consumer-side customisation would collide, and the recommended pattern.
 
-This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `CmdIC` / `CmdOOC` (hard overrides — library territory), `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`. Other library couplings (`ObjectDB.from_db`, `pre_save`/`pre_delete` signals, `QuerySet.update`, `WEBSOCKET_PROTOCOL_CLASS` rewiring, middleware injection) will be backfilled as we revisit them.
+This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `CmdIC` / `CmdOOC` (hard overrides — library territory), `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`, webclient HTML injection (middleware regex match against the rendered template). Other library couplings (`ObjectDB.from_db`, `pre_save`/`pre_delete` signals, `QuerySet.update`, `WEBSOCKET_PROTOCOL_CLASS` rewiring) will be backfilled as we revisit them.
 
 ## WebSocketClient.onOpen() override
 
@@ -162,3 +162,44 @@ A consumer that subclasses `CharacterCmdSet` and calls `super().at_cmdset_creati
 A consumer that points `CMDSET_CHARACTER` at a class that doesn't derive from `evennia.commands.default.cmdset_character.CharacterCmdSet` won't get the library commands. They'd need to manually add them (`from evennia_shards.commands import CmdShardCheck, CmdCrossShardDig`) — the library exposes them as part of its public command surface for exactly that case.
 
 The test runner depends on this wrap behaving — `runtests.py` calls `evennia._init()` explicitly so the deferred patch installation runs in time for tests. Real-runtime startup paths already call `evennia._init()` after `django.setup()`, so no additional integration is needed there.
+
+## Webclient HTML injection (`ShardRedirectScriptMiddleware`)
+
+**What we patch / extend:** Django response middleware that rewrites the rendered HTML of `/webclient*` responses to inject library-side JS. Library code: `evennia_shards/middleware.py` → `ShardRedirectScriptMiddleware`. Auto-installed into `settings.MIDDLEWARE` by `AppConfig.ready()` when `get_role() != ROLE_MONOLITH`. Based on Evennia 6.0.0's webclient template (`evennia/web/templates/webclient/base.html`).
+
+**Why:**
+
+Two pieces of JS need to load in the webclient:
+
+1. **An early inline `<script>`** that runs synchronously *after* the template's inline `var wsurl = ...` block but *before* `evennia.js` loads. This implements refresh routing — read `localStorage` and `PerformanceNavigationTiming.type`, override `window.wsurl` if the page-load is a refresh and a saved shard target exists. The override has to take effect before `evennia.js`'s `WebsocketConnection` reads `window.wsurl` (~500ms later inside `Evennia.init`); any later seam (e.g. `$(document).ready` in `shard_redirect.js`, which fires at end-of-body) misses the read. See [ticket-auth-flow.md](ticket-auth-flow.md#refresh-routing-via-localstorage).
+
+2. **The `shard_redirect.js` script tag**, appended just before `</body>`, for the OOB `shard_redirect` handler (server-emitted `@ic` / `@ooc` / cross-shard redirects). This is allowed to load late because it just registers a listener for server messages.
+
+A consumer-side template edit (`{% block extrascripts %}` or similar) was rejected as a configuration burden — the library's invariant is "drop into INSTALLED_APPS and it works." Middleware injection achieves that.
+
+The early-injection seam is found by regex match on the `<script src="...evennia.js"...>` tag in the rendered HTML (`re.compile(rb"<script\b[^>]*\bsrc=[^>]*evennia\.js[^>]*>\s*</script>")`). The override script is inserted immediately before that tag.
+
+The middleware also has a legacy ticket-injection path (`?ticket=` in the page URL → inline `<script>` appending `&ticket=TOKEN` to `window.csessid`), kept for the manual-paste / bookmark edge case where a webclient page is loaded directly with a ticket query parameter.
+
+**Risk on Evennia upgrade:**
+
+- **Webclient template restructured.** The injection is keyed on the template's `<script src=...evennia.js...>` tag. If a future Evennia version inlines `evennia.js`, bundles it via webpack / ES modules, renames the file, or removes the explicit `<script>` tag in favour of an import map, the regex won't match and the override won't be injected. Failure mode: refresh routing stops working (player goes to router on every refresh), but core auth and IC/OOC flows continue to work because they use OOB `shard_redirect`. Detection: the inline override script's `console.log` line goes silent in the browser console.
+- **`var wsurl = ...` removed from template.** The override mutates `window.wsurl`; if the template stops setting it (e.g. `evennia.js` reads connection URL from a `<meta>` tag or computed at init time), the override becomes a no-op. Same failure mode as above.
+- **Middleware ordering changes.** The middleware is appended to `settings.MIDDLEWARE` in `AppConfig.ready()`. If Evennia ever moves `SharedLoginMiddleware` (or another middleware) such that our injection runs before HTML is fully rendered, `process_response` could miss the response. Currently it runs after the view, so this hasn't been an issue.
+- **Content-Length header semantics.** We update `Content-Length` after injection — if Evennia switches to chunked encoding by default, this becomes a no-op (which is fine), but a regression where Content-Length is required and we mismatch it would truncate the response. Detection: webclient page fails to fully load.
+
+How to check: render `/webclient` from a router gamedir, view source, confirm the early inline override script appears immediately before the `evennia.js` script tag. Verify `shard_redirect.js` is referenced before `</body>`.
+
+**Risk in consumer override:**
+
+A consumer that supplies their own webclient template (e.g. via `{% extends %}` or a custom Django app providing `webclient/base.html`) is the main hazard. The middleware's regex matches "any `<script>` tag whose `src` attribute mentions `evennia.js`," which is robust against attribute order and whitespace variations but assumes the tag exists. A consumer template that:
+
+- Inlines `evennia.js` directly with `<script>...</script>` (no `src=`) would not match. Override is skipped.
+- Renames the file to a custom path (`<script src="my-evennia.js">`) would not match either.
+- Bundles `evennia.js` into a single bundle with no separate tag — same.
+
+Recommended pattern: consumer templates should keep the `<script src="...evennia.js"...>` form recognisable to the regex. If a consumer needs a fundamentally different webclient bundling strategy, the library's middleware injection is not the right seam — they'd need to inject the early override themselves at the right point in their bundle.
+
+A consumer that strips the `<script src=...shard_redirect.js...>` injection from their pipeline (e.g. with their own response-rewriting middleware that runs after ours) breaks server-side `shard_redirect` OOBs entirely. No documented detection — the library trusts that custom middleware doesn't actively undo our work.
+
+**Note on file scope.** This middleware is scoped to URLs containing `/webclient` — see `process_response`'s early return. It does not touch the website pages, admin, or other Django-served URLs. Evennia's webclient view path is currently `/webclient` (and variants); a future rename would require updating the path filter.

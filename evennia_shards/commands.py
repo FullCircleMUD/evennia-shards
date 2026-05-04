@@ -67,11 +67,6 @@ class ShardAwareCmdIC(CmdIC):
         # process that reads the flag in shard_aware_at_post_login on
         # subsequent connections. No cross-process write.
         self.account.db._shards_at_ooc_menu = False
-        logger.log_info(
-            f"[evennia-shards] ShardAwareCmdIC.func: CLEARED "
-            f"_shards_at_ooc_menu=False on account id={self.account.id} "
-            f"key={self.account.key}"
-        )
 
         _redirect_to_character_shard(self.account, self.session, new_character)
         self.msg(f"Redirecting to {shard_id}...")
@@ -160,12 +155,6 @@ class ShardAwareCmdOOC(CmdOOC):
         account = self.account
         session = self.session
 
-        logger.log_info(
-            f"[evennia-shards] ShardAwareCmdOOC.func: ENTERED "
-            f"(account id={account.id} key={account.key}, "
-            f"session={getattr(session, 'sessid', '?')})"
-        )
-
         # Resolve the best character_id for the ticket.
         old_char = account.get_puppet(session)
         if old_char:
@@ -187,12 +176,6 @@ class ShardAwareCmdOOC(CmdOOC):
             client_ip=session.address,
         )
         url = f"{get_router_url()}?ticket={token}"
-        logger.log_info(
-            f"[evennia-shards] ShardAwareCmdOOC.func: ticket created "
-            f"token={token!r} url={url!r} "
-            f"(account id={account.id} character_id={character_id} "
-            f"client_ip={session.address!r})"
-        )
         session.msg(shard_redirect=[[url], {}])
         self.msg("Redirecting to router...")
 

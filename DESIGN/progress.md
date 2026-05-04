@@ -6,6 +6,27 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-04 — Refresh handling completed (refresh-while-IC, refresh-while-OOC, post-restart)
+
+Follow-on to the WebSocket-level redirect milestone below. The PoC ship covered IC/OOC transitions but left refresh handling broken in several modes. This milestone closes those out and lands a clean architecture for OOC-intent persistence.
+
+**Two-flag OOC-intent mechanism.** The naive single-flag design (Portal writes `account.db._shards_at_ooc_menu` on ticket auth, Server reads it in `at_post_login`) failed silently because Portal and Server are separate processes with independent `AccountDB` / `Attribute` idmappers — Portal's write was invisible to Server's read. Fixed by splitting:
+
+- `protocol_flags["SHARDS_TICKET_AUTHED"]` — transient Portal→Server bridge. Portal sets it on ticket-bearing connections to the router; Evennia AMP-syncs it onto the Server's session.
+- `account.db._shards_at_ooc_menu` — persistent intent. Server-only writer in two places: `shard_aware_at_post_login` (sets True when it sees the protocol flag) and `ShardAwareCmdIC.func` (sets False on `@ic`). Same Server process owns both write-points and the read in subsequent `at_post_login`s, so coherent.
+
+`_redirect_to_character_shard` is now flag-neutral — it can run from a shard's Server during `cross_shard_character_move` without creating a cross-process write the router would never see.
+
+**Refresh-while-IC routes directly to the shard.** Browser refresh re-fetches the webclient page from the router, but the JS opens its WebSocket directly to the shard via localStorage routing. `ShardRedirectScriptMiddleware` injects an inline `<script>` immediately before `evennia.js`'s `<script>` tag (regex match on the rendered HTML); the inline script reads `localStorage["evennia_shards_last_target"]` and `PerformanceNavigationTiming.type === "reload"` synchronously, then overrides `window.wsurl` directly. `Evennia.init` reads `window.wsurl` ~500ms later inside `WebsocketConnection`, by which time our override has taken effect. No router round-trip on refresh, no flash through the router OOC menu.
+
+**Earlier failed approaches captured for the next session bumping into them:** an `_auth_user_id`-based restoration of `webclient_authenticated_uid` in our `onOpen` was tried and shipped, then deleted once the early `window.wsurl` override made it redundant. The Django HTTP middleware's `make_shared_login` already populates `webclient_authenticated_uid` on every page-load HTTP request to the webclient; with refresh routing direct to the shard, the shard reads that just-written value. WS-side restoration was working around a problem the early-override eliminates upstream.
+
+**JS-side URL augmentation.** The OOB `shard_redirect` URLs the server emits are `?ticket=XXX` only, but Evennia parses the first `&`-separated chunk as csessid — for `?ticket=XXX` URLs, that gives the literal string `'ticket=XXX'` as csessid, which fails the destination's csession lookup. Added an `ensure_csessid_in_url` helper in `shard_redirect.js` that prefixes `<csessid>&<cuid>&<browserstr>` before the existing query, so the destination's csessid auth has a real Django session key to look up. Idempotent: refresh-routing URLs (already built with csessid first) skip the augmentation cleanly.
+
+**Outcome.** Full IC ↔ OOC ↔ refresh matrix verified live: `@ic`, `@ooc`, refresh-while-IC, refresh-while-OOC, refresh-after-server-restart, both `AUTO_PUPPET_ON_LOGIN=True` and `False`. 199 tests passing.
+
+**Files:** `evennia_shards/protocols.py`, `evennia_shards/hooks.py`, `evennia_shards/commands.py`, `evennia_shards/handoff.py`, `evennia_shards/middleware.py` (early inline `window.wsurl` override injection), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (URL augmentation helper, removed obsolete late refresh-routing block), `evennia_shards/tests.py` (199 tests). Doc updates in `DESIGN/ticket-auth-flow.md`. Branch: `websocket-level-redirect-poc`.
+
 ### 2026-05-04 — WebSocket-level cross-shard redirect (replaces page navigation)
 
 Cross-shard transitions (`@ic`, `@ooc`, `cross_shard_character_move`) now operate at the WebSocket connection layer instead of via full-page navigation. When the server emits a `shard_redirect` OOB, the JS plugin closes the current WebSocket and opens a new one to the destination's WS URL with the ticket as a query parameter; the browser page itself does not reload. UI state, scrollback, plugins, command history all persist across the transition.
@@ -18,9 +39,9 @@ Architectural rationale beyond the immediate UX win:
 
 **Connection-lost flash polish.** A naive WS swap fires the `connection_close` event, which webclient_gui handles with a misleading "The connection was closed or lost." message. Suppressed by wrapping `Evennia.emitter.emit` once at module load: a `deliberate_transfer` flag is set just before the deliberate close, and the wrapper swallows the next `connection_close` event when the flag is set. Real disconnects continue to render normally — the flag is consumed on first use, with a 5s safety timeout.
 
-**Behaviour change worth documenting:** with the URL bar no longer carrying the ticket post-redirect, the `SHARDS_TICKET_AUTHED` per-WebSocket flag does not persist across page refresh. Refresh from the OOC menu now auto-puppets back to `_last_puppet` (matching vanilla "fresh login" behaviour) instead of staying at the OOC menu. `@ooc` remains the explicit OOC return.
+**Behaviour change at PoC ship time:** with the URL bar no longer carrying the ticket post-redirect, the original `SHARDS_TICKET_AUTHED` per-WebSocket flag did not persist across page refresh. The follow-on milestone above resolves this with the two-flag OOC-intent mechanism (transient `protocol_flags["SHARDS_TICKET_AUTHED"]` Portal→Server bridge + persistent `account.db._shards_at_ooc_menu` Server-only attribute) — `@ooc` remains a sticky preference across refresh / reconnect / next-day login until cleared by `@ic`.
 
-196 tests passing on the PoC branch (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_character_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message.
+196 tests passing on the PoC branch at this checkpoint (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_character_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message. Refresh handling completed in the follow-on milestone above.
 
 **Files:** `evennia_shards/handoff.py` (`_redirect_to_character_shard` builds WS URL), `evennia_shards/commands.py` (`ShardAwareCmdOOC` builds WS URL), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (rewritten for WS swap + emit-wrap suppression), demo gamedirs settings updated to `ws://` URLs. Docs: `DESIGN/shard-settings.md`, `DESIGN/ticket-auth-flow.md`, `DESIGN/library-integration-risks.md` updated for the new mechanism. Branch: `websocket-level-redirect-poc`.
 

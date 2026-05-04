@@ -95,24 +95,31 @@ The redirect operates at the **WebSocket connection layer**, not the page-naviga
   2. Calls `Evennia.connection.close()` on the current WebSocket-backed connection.
   3. Constructs a new `WebSocket(target_url)` and replaces `Evennia.connection` with a wrapper exposing the standard `{connect, msg, close, isOpen}` contract — mirroring Evennia's own `WebsocketConnection` event-emit shape so other plugins continue working unchanged.
   4. Wraps `Evennia.emitter.emit` once at module load to swallow the `connection_close` event triggered by step 2 (otherwise webclient_gui's `onConnectionClose` would print a misleading "connection was closed or lost" message). Real disconnects continue to render normally — the flag is consumed on the first `connection_close` after each deliberate transfer, with a 5s safety timeout.
-- **Middleware** (`ShardRedirectScriptMiddleware`): injects the `shard_redirect.js` script tag into webclient HTML responses. This is what gets the JS plugin loaded into the page in the first place. The middleware also has a legacy ticket-injection path (`?ticket=` in the page URL → inline `<script>` appending `&ticket=TOKEN` to `window.csessid`); that path is now only relevant if someone loads a webclient page directly with `?ticket=` in the URL — an edge case (manual paste, bookmark) that the WS-level redirect doesn't otherwise traverse.
-- **Browser refresh**: refreshes the loaded webclient page (same as a vanilla Evennia refresh). The Django/csessid session continues; if the player was IC on a shard at refresh time, they reconnect to that shard via the saved csessid (no ticket needed for a re-attach).
+- **Middleware** (`ShardRedirectScriptMiddleware`): injects two script tags into webclient HTML responses:
+  - An **early inline `<script>`** placed immediately before `evennia.js`'s `<script>` tag, by regex match on the rendered HTML. This runs synchronously after the template's inline `var wsurl = ...` block but before evennia.js loads, and provides the refresh-routing override of `window.wsurl` (see [Refresh routing via localStorage](#refresh-routing-via-localstorage) below). Critical that it runs early — by the time evennia.js's `WebsocketConnection` reads `window.wsurl` (~500ms later inside `Evennia.init`), the override has already taken effect.
+  - The **late `shard_redirect.js` script tag** appended just before `</body>` for the OOB `shard_redirect` handler (server-emitted `@ic` / `@ooc` / cross-shard redirects). This is allowed to load late because it just registers a listener for server messages.
+  - The middleware also has a legacy ticket-injection path (`?ticket=` in the page URL → inline `<script>` appending `&ticket=TOKEN` to `window.csessid`); that path is now only relevant if someone loads a webclient page directly with `?ticket=` in the URL — an edge case (manual paste, bookmark) that the WS-level redirect doesn't otherwise traverse.
 
 The middleware and JS plugin are auto-injected by `AppConfig.ready()` — zero consumer configuration beyond `INSTALLED_APPS`.
 
 ### Refresh routing via localStorage
 
-Browser refresh while connected to a shard would reload the page from the router's URL bar (since URL never changes during a WS-level redirect) — naively, the refresh always reconnects to the router. The router has no session for a player whose active session is on a shard, so it'd treat the refresh as a fresh login and `at_post_login` would fire, potentially bouncing the player based on AUTO_PUPPET.
+Browser refresh while connected to a shard would reload the page from the router's URL bar (since the URL never changes during a WS-level redirect) — naively, the refresh always reconnects to the router. The router has no session for a player whose active session is on a shard, so it'd treat the refresh as a fresh login and `at_post_login` would fire, potentially bouncing the player based on AUTO_PUPPET.
 
-To fix: `shard_redirect.js` writes the current target's WS endpoint URL (without the single-use ticket) to `localStorage` on every successful redirect. On page load, the JS reads the saved target and the browser's `PerformanceNavigationTiming.type`:
+To fix:
 
-- `type === "reload"` (browser refresh) **AND** localStorage has a saved target → emit `shard_redirect` to ourselves with the reconstructed URL (`saved_base + "?" + window.csessid + "&" + cuid + "&" + browserstr`, matching Evennia's webclient WS URL shape). This swaps the freshly-opened default WebSocket to the saved target. csessid auth (priority #1) re-attaches to the existing session; state preserved.
-- `type === "navigate"` (typed URL, link click) → no localStorage routing. Normal router-first flow with login form etc.
-- localStorage absent / unavailable (private browsing, disabled) → no routing. Falls back to default behaviour.
+1. **Save**: `shard_redirect.js` writes the current target's WS endpoint URL (without the single-use ticket) to `localStorage["evennia_shards_last_target"]` on every successful `shard_redirect` it processes.
+2. **Override**: an inline `<script>` injected by `ShardRedirectScriptMiddleware` immediately before evennia.js's `<script>` tag reads `localStorage` and `PerformanceNavigationTiming.type` synchronously and overrides `window.wsurl` directly:
 
-The csessid is the Django session key, shared across all sharded processes via the shared-DB session backend, so the same value works for csessid auth on the router or any shard.
+   - `type === "reload"` (browser refresh) **AND** localStorage has a saved target → set `window.wsurl = saved_target`. evennia.js's `WebsocketConnection` constructor reads `window.wsurl` ~500ms later inside `Evennia.init`, by which time our override has taken effect, and opens the default WebSocket directly to the saved target (no router round-trip).
+   - `type === "navigate"` (typed URL, link click) → no override. Normal router-first flow with login form etc.
+   - localStorage absent / unavailable (private browsing, disabled) → no override. Default behaviour.
 
-**Failure mode:** if the saved target rejects the new WebSocket (csessid expired, target restarted, etc.), the JS falls back to the router-default behaviour. Player ends up at the router → either re-auths via Django session and gets redirected back via `at_post_login`'s AUTO_PUPPET path, or hits the login form if Django session also expired. Acceptable degradation.
+The destination's csessid auth (priority #1 in `onOpen`) re-attaches the player to their existing session. csessid is the Django session key, shared across all sharded processes via the shared-DB session backend, so the same value works for csessid auth on the router or any shard.
+
+The override has to run *early* — before evennia.js's `WebsocketConnection` reads `window.wsurl`. Injecting before the `evennia.js` script tag is the latest safe seam: synchronously after the template's `var wsurl = ...` block but before evennia.js loads. Anything later (e.g. `$(document).ready` in `shard_redirect.js`, which fires at end-of-body) misses the read.
+
+**Failure mode:** if the saved target rejects the new WebSocket (csessid expired, target restarted, etc.), the destination's `onOpen` falls through to priority #3 (orphan-redirect) which sends the player to the router. There the Django session either re-auths and `at_post_login`'s AUTO_PUPPET path redirects them back, or the login form is shown if the Django session also expired. Acceptable degradation.
 
 ### Why connection-level instead of page-navigation
 
@@ -140,7 +147,7 @@ A thin wrapper (`make_shard_at_post_login` in `hooks.py`) is installed around Ev
 
 `ShardAwareCmdIC` (in `evennia_shards/commands.py`) replaces Evennia's `CmdIC` via monkey-patch in `AppConfig.ready()`. Injected when `get_role() != "monolith"`.
 
-- **Router** (`AUTO_PUPPET_ON_LOGIN = False` path): resolves the character using the same logic as Evennia's `CmdIC` (playable characters search, Builder+ global search, `_last_puppet` fallback). Instead of calling `puppet_object()`, it sets `account.db._last_puppet` to the chosen character, creates a ticket via `create_ticket()`, and sends a `shard_redirect` OOB to the client. The shard then ticket-auths, auto-puppets via `_last_puppet`, and the player is IC.
+- **Router** (`AUTO_PUPPET_ON_LOGIN = False` path): resolves the character using the same logic as Evennia's `CmdIC` (playable characters search, Builder+ global search, `_last_puppet` fallback). Instead of calling `puppet_object()`, it: (a) clears `account.db._shards_at_ooc_menu = False` (the only IC entry point where the flag is plausibly True at the moment of redirect — player at OOC menu typing `@ic`), and (b) calls `_redirect_to_character_shard()` which sets `_last_puppet`, creates a ticket via `create_ticket()`, and sends a `shard_redirect` OOB. The shard then ticket-auths, auto-puppets via `_last_puppet`, and the player is IC.
 - **Shard**: tells the player "Leave this character before trying to enter another one." IC always goes through the router — no same-shard shortcut.
 - **Monolith**: original `CmdIC` stays; the override is never injected.
 
@@ -185,7 +192,7 @@ The `@ooc` → router → bounce-back-to-shard loop is broken by a **two-flag me
 
 #### `protocol_flags["SHARDS_TICKET_AUTHED"]` — Portal→Server bridge
 
-- **Set** by `ShardWebSocketClient._mark_ooc_arrival_if_router` (`protocols.py`), called from `onOpen` priority #2 (ticket auth) on the router. Gated on `get_role() == ROLE_ROUTER` — IC tickets target shards and are validated there, never on the router, so on the router any inbound ticket is implicitly an `@ooc` arrival.
+- **Set** by `ShardWebSocketClient._mark_ooc_arrival_if_router` (`protocols.py`), called from `onOpen` whenever a `?ticket=` is in the URL on the router — from priority #2 (ticket auth) and also from priority #1 (csessid auth) when the browser carries both a valid Django session and a ticket. The signal is "ticket-in-URL on the router," not "ticket-auth path won." Gated on `get_role() == ROLE_ROUTER` — IC tickets target shards and are validated there, never on the router, so on the router any inbound ticket is implicitly an `@ooc` arrival regardless of which auth branch authenticates the session.
 - **Read** by `shard_aware_at_post_login` (`hooks.py`) on the Server. Evennia AMP-syncs `protocol_flags` from Portal to Server as part of the standard session handover.
 - **Lifetime** is the WebSocket connection. Refresh discards it. Reconnect creates a new session that does not carry the old flag.
 
@@ -211,13 +218,7 @@ Two and only two places write `account.db._shards_at_ooc_menu`: `shard_aware_at_
 
 **Trade-off: cross-shard forced moves don't clear the flag.** If an admin moves a player who was at the OOC menu (flag=True), the player ends up IC on the destination shard via the move's ticket auth. The router-side flag remains True. On the player's next connection to the router (refresh, etc.), they land at the OOC menu and have to type `@ic` to return to the moved character. Acceptable degradation; not worth a cross-process invalidation primitive for this edge case.
 
-**Why account-level, persistent.**
-
-- **Per-session protocol_flags doesn't survive the refresh case** under WS-level redirect. The previous design used `protocol_flags["SHARDS_TICKET_AUTHED"]` set in `onOpen` from URL `?ticket=` presence. Under page-navigation redirect this worked because the URL bar carried the ticket across refresh; under WS-level redirect the URL bar never carries the ticket, so the flag would be lost on the first refresh.
-- **Account-level state survives session lifecycle.** Refresh, reconnect, full logout-and-login next day — all preserve the flag. Refresh from the OOC menu correctly stays at OOC. Logout-and-login by a player who was last at OOC also lands them at OOC (rather than auto-puppeting to `_last_puppet`).
-- **Reads as player intent.** A player who explicitly typed `@ooc` is saying "I want to be at the OOC menu." Honouring that across reconnects matches expectation better than vanilla AUTO_PUPPET-on-every-login. The escape valve is `@ic` (or character selection) — both clear the flag.
-
-**Behaviour shift vs. vanilla AUTO_PUPPET.** A vanilla Evennia game with AUTO_PUPPET=True auto-puppets `_last_puppet` on every login. A sharded game treats `@ooc` as a sticky preference that survives until `@ic`. Players wanting vanilla "always auto-puppet" don't use `@ooc` — but in a sharded game they realistically would, so honouring that intent is the right default.
+**Behaviour shift vs. vanilla AUTO_PUPPET.** A vanilla Evennia game with `AUTO_PUPPET_ON_LOGIN = True` auto-puppets `_last_puppet` on every login. A sharded game treats `@ooc` as a sticky preference that survives until `@ic`. Players wanting vanilla "always auto-puppet" don't use `@ooc` — but in a sharded game they realistically would, so honouring that intent is the right default. The escape valve is `@ic` (or character selection) — both clear the flag.
 
 ### Scope
 

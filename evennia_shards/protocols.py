@@ -31,22 +31,6 @@ _BASE_WS_CLASS = class_from_module(
 
 _UPSTREAM_IPS = settings.UPSTREAM_IPS
 
-# Module-load trace — fires whichever process imports this module.
-# If onOpen logs never appear but this line does, the module loaded
-# but the protocol class wasn't actually wired into the WS factory.
-# If neither appears, the module never loaded in that process at all.
-try:  # pragma: no cover — startup-time diagnostic
-    from evennia.utils import logger as _shards_startup_log
-
-    _shards_startup_log.log_info(
-        f"[evennia-shards] protocols.py module loaded; "
-        f"_BASE_WS_CLASS={_BASE_WS_CLASS!r} "
-        f"WEBSOCKET_PROTOCOL_CLASS setting="
-        f"{getattr(settings, 'WEBSOCKET_PROTOCOL_CLASS', '<unset>')!r}"
-    )
-except Exception:
-    pass
-
 
 class ShardWebSocketClient(_BASE_WS_CLASS):
     """WebSocket protocol with ticket-based auth support.
@@ -106,66 +90,22 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         invisible to the Server; the protocol flag is the bridge.
         See DESIGN/ticket-auth-flow.md for the full state machine.
         """
-        from evennia.utils import logger as _shards_log
-
         token = self._extract_ticket_token()
-        _shards_log.log_info(
-            f"[evennia-shards] onOpen: ENTERED uri="
-            f"{getattr(self, 'http_request_uri', None)!r} "
-            f"token_present={bool(token)} role={get_role()!r}"
-        )
 
         # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
         # Based on Evennia 6.0.0. See DESIGN/library-integration-risks.md.
         client_address = self._get_client_address()
-        _shards_log.log_info(
-            f"[evennia-shards] onOpen: client_address={client_address!r}"
-        )
 
         self.init_session("websocket", client_address, self.factory.sessionhandler)
 
         csession = self.get_client_session()  # sets self.csessid
         csessid = self.csessid
 
-        # NOTE — _auth_user_id restoration disabled for this smoke pass.
-        # If refresh-while-IC still works without it, the restoration
-        # was redundant given the early window.wsurl override (which
-        # routes refresh directly to the shard, where Django's
-        # SharedLoginMiddleware on the page-load HTTP request has
-        # already populated webclient_authenticated_uid before our
-        # shard's onOpen reads it). If refresh breaks again, restore
-        # this block.
-        #
-        # if csession:
-        #     existing_uid = csession.get("webclient_authenticated_uid", None)
-        #     auth_uid = csession.get("_auth_user_id")
-        #     if not existing_uid and auth_uid:
-        #         csession["webclient_authenticated_uid"] = int(auth_uid)
-        #         csession["webclient_authenticated_nonce"] = (
-        #             csession.get("webclient_authenticated_nonce", 0) + 1
-        #         )
-        #         csession.save()
-        #         _shards_log.log_info(
-        #             f"[evennia-shards] onOpen: restored "
-        #             f"webclient_authenticated_uid={auth_uid!r} from "
-        #             f"Django _auth_user_id (was None — disconnect "
-        #             f"handler had cleared it)"
-        #         )
-
         # Auth: browser session first, then ticket, then role gate.
         uid = csession and csession.get("webclient_authenticated_uid", None)
         nonce = csession and csession.get("webclient_authenticated_nonce", 0)
-        _shards_log.log_info(
-            f"[evennia-shards] onOpen: pre-auth state csessid={csessid!r} "
-            f"uid_from_csession={uid!r} nonce={nonce!r} "
-            f"token_present={bool(token)}"
-        )
         if uid:
             # Existing browser session — use it, ignore any stale token.
-            _shards_log.log_info(
-                f"[evennia-shards] onOpen: BRANCH=priority#1 (csessid) "
-                f"uid={uid!r} token_present={bool(token)}"
-            )
             self.uid = uid
             self.nonce = nonce
             self.logged_in = True
@@ -187,27 +127,10 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
             # the router is implicitly an @ooc arrival regardless of
             # which auth branch resolves the identity. Stamp the flag.
             if token:
-                _shards_log.log_info(
-                    f"[evennia-shards] onOpen: priority#1 + token → "
-                    f"calling _mark_ooc_arrival_if_router(uid={uid!r})"
-                )
                 self._mark_ooc_arrival_if_router(uid)
-            else:
-                _shards_log.log_info(
-                    f"[evennia-shards] onOpen: priority#1 NO token — "
-                    f"OOC-arrival stamp NOT called"
-                )
         elif token:
             # No session — try ticket auth.
-            _shards_log.log_info(
-                f"[evennia-shards] onOpen: BRANCH=priority#2 (ticket) "
-                f"about to validate token"
-            )
             valid, result = self._validate_ticket(token, client_address)
-            _shards_log.log_info(
-                f"[evennia-shards] onOpen: priority#2 ticket validation "
-                f"valid={valid!r} result={result!r}"
-            )
             if not valid:
                 self._send_text(result)
                 self.sendClose(4001, result)
@@ -215,19 +138,10 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
             self.uid = result["account_id"]
             self.logged_in = True
             self._ticket_character_id = result["character_id"]
-            _shards_log.log_info(
-                f"[evennia-shards] onOpen: priority#2 → "
-                f"calling _mark_ooc_arrival_if_router(account_id="
-                f"{result['account_id']!r})"
-            )
             self._mark_ooc_arrival_if_router(result["account_id"])
         else:
             # No session, no token — role-dependent gating.
             role = get_role()
-            _shards_log.log_info(
-                f"[evennia-shards] onOpen: BRANCH=priority#3 (no auth) "
-                f"role={role!r}"
-            )
             if role == ROLE_SHARD:
                 # Shards aren't entry points — only the router is. A
                 # connection arriving here without a session and
@@ -279,17 +193,8 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
 
         # Watch for dead links.
         self.transport.setTcpKeepAlive(1)
-        _shards_log.log_info(
-            f"[evennia-shards] onOpen: about to call sessionhandler.connect "
-            f"uid={getattr(self, 'uid', None)!r} "
-            f"logged_in={getattr(self, 'logged_in', None)!r} "
-            f"sessid={getattr(self, 'sessid', None)!r}"
-        )
         # Actually do the connection.
         self.sessionhandler.connect(self)
-        _shards_log.log_info(
-            f"[evennia-shards] onOpen: sessionhandler.connect returned"
-        )
 
     # -- Helpers --------------------------------------------------------
 
@@ -321,22 +226,12 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         Returns the token string if ``?ticket=<value>`` is present,
         or None otherwise.
         """
-        from evennia.utils import logger as _shards_log
-
         uri = getattr(self, "http_request_uri", None)
         if not uri:
-            _shards_log.log_info(
-                f"[evennia-shards] _extract_ticket_token: no http_request_uri"
-            )
             return None
 
-        parsed = urlparse(uri)
-        query = parse_qs(parsed.query)
+        query = parse_qs(urlparse(uri).query)
         tokens = query.get("ticket")
-        _shards_log.log_info(
-            f"[evennia-shards] _extract_ticket_token: uri={uri!r} "
-            f"parsed_query={parsed.query!r} tokens={tokens!r}"
-        )
         if tokens:
             return tokens[0]
         return None
@@ -349,15 +244,9 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         ticket only on success — failed validations leave the ticket
         intact.
         """
-        from evennia.utils import logger as _shards_log
-
         from .tickets import delete_ticket, get_ticket
 
         found, data = get_ticket(token)
-        _shards_log.log_info(
-            f"[evennia-shards] _validate_ticket: lookup token={token!r} "
-            f"found={found!r} data={data!r}"
-        )
         if not found:
             return False, (
                 f"[evennia-shards] Ticket not found or wrong shard: "
@@ -368,10 +257,6 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         # connecting client's IP doesn't match.
         if data["client_ip"]:
             if client_address != data["client_ip"]:
-                _shards_log.log_info(
-                    f"[evennia-shards] _validate_ticket: IP mismatch "
-                    f"expected={data['client_ip']!r} got={client_address!r}"
-                )
                 return False, (
                     f"[evennia-shards] Ticket rejected: IP mismatch "
                     f"(expected {data['client_ip']}, got {client_address})"
@@ -379,12 +264,6 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
 
         # Consume the ticket (single-use).
         delete_ticket(token)
-        _shards_log.log_info(
-            f"[evennia-shards] _validate_ticket: SUCCESS — ticket consumed "
-            f"account_id={data.get('account_id')!r} "
-            f"character_id={data.get('character_id')!r} "
-            f"to_shard={data.get('to_shard')!r}"
-        )
 
         return True, data
 
@@ -416,21 +295,9 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         symmetry with priority #2's available data and easy revival
         if the design ever needs it.
         """
-        from evennia.utils import logger
-
-        role = get_role()
-        if role != ROLE_ROUTER:
-            logger.log_info(
-                f"[evennia-shards] _mark_ooc_arrival_if_router: skipping "
-                f"(role={role!r}, not ROLE_ROUTER) account_id={account_id}"
-            )
+        if get_role() != ROLE_ROUTER:
             return
         self.protocol_flags["SHARDS_TICKET_AUTHED"] = True
-        logger.log_info(
-            f"[evennia-shards] _mark_ooc_arrival_if_router: SET "
-            f"protocol_flags['SHARDS_TICKET_AUTHED']=True "
-            f"(account_id={account_id!r})"
-        )
 
 
 # CLOSE_NORMAL is used in the browser-session cleanup path (reproduced
