@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from django.conf import settings
 from evennia.utils.utils import class_from_module
 
-from .config import ROLE_SHARD, get_role, get_router_url
+from .config import ROLE_ROUTER, ROLE_SHARD, get_role, get_router_url
 
 # Resolve the base class dynamically: whatever was configured before
 # our AppConfig.ready() overwrote the setting. Falls back to Evennia's
@@ -72,9 +72,10 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
 
         The OOC-return signal that prevents the @ooc → router →
         bounce-back-to-shard loop lives at the account level
-        (``account.db._shards_at_ooc_menu``) — set by
-        ``ShardAwareCmdOOC``, cleared by
-        ``_redirect_to_character_shard``, read by
+        (``account.db._shards_at_ooc_menu``) — set on the router by
+        ``_mark_ooc_arrival_if_router`` in priority #2 below (an
+        inbound ticket on the router is implicitly an @ooc arrival),
+        cleared by ``_redirect_to_character_shard``, read by
         ``shard_aware_at_post_login``. Persistent across session
         lifecycle, so refresh and logout-login both honour the
         player's last expressed intent.
@@ -116,6 +117,7 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
             self.uid = result["account_id"]
             self.logged_in = True
             self._ticket_character_id = result["character_id"]
+            self._mark_ooc_arrival_if_router(result["account_id"])
         else:
             # No session, no token — role-dependent gating.
             role = get_role()
@@ -247,6 +249,35 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
     def _send_text(self, text):
         """Send a text message to the client via the Evennia webclient protocol."""
         self.sendLine(json.dumps(["text", [text], {}]))
+
+    def _mark_ooc_arrival_if_router(self, account_id):
+        """On the router, stamp the account's OOC-menu flag.
+
+        An inbound ticket auth on the router is implicitly an @ooc
+        arrival from a shard — ``ShardAwareCmdOOC`` is the only path
+        that sends a player session from a shard back to the router.
+        IC tickets target a specific shard and are validated by that
+        shard, never by the router; the role gate here keeps shard-
+        side ticket auths from touching this flag.
+
+        Setting the flag here (router process, same idmapper as the
+        eventual read in ``shard_aware_at_post_login``) keeps the
+        write/read pair inside one process — no cross-process
+        Attribute cache coherency to manage.
+
+        A missing Account is treated as a no-op rather than an error:
+        the rest of ``onOpen`` will still proceed with ``uid`` set,
+        and ``sessionhandler.connect`` will fail downstream the same
+        way it would have without the flag write.
+        """
+        if get_role() != ROLE_ROUTER:
+            return
+        from evennia.accounts.models import AccountDB
+        try:
+            account = AccountDB.objects.get(pk=account_id)
+        except AccountDB.DoesNotExist:
+            return
+        account.db._shards_at_ooc_menu = True
 
 
 # CLOSE_NORMAL is used in the browser-session cleanup path (reproduced

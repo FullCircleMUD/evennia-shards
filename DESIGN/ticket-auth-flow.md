@@ -152,8 +152,8 @@ The injection uses the same pattern as the WebSocket protocol and middleware ove
 
 - **Shard**: creates a ticket targeting the router (`to_shard = get_router_shard_id()`, always `"router"`) and sends a `shard_redirect` OOB to redirect the client back to the router's webclient. Always redirects — even if no puppet (error state), because a player should never be OOC on a shard.
 - **Character ID in ticket**: `old_char.id` (current puppet) → `account.db._last_puppet.id` (fallback) → `0` (sentinel for truly broken state, with `logger.log_warn`).
-- **`_last_puppet` is left alone.** The library does not mutate Evennia's `_last_puppet` attribute — vanilla semantics preserved. The OOC redirect loop on routers running `AUTO_PUPPET_ON_LOGIN = True` is broken instead by the account-level `account.db._shards_at_ooc_menu` flag set here in `ShardAwareCmdOOC.func` and read by the router's `at_post_login` (see "Auto-puppet on login" below).
-- **Sets `account.db._shards_at_ooc_menu = True`.** Persistent OOC-return signal — survives session lifecycle, refresh, and logout/login. Cleared by `_redirect_to_character_shard` on any IC entry.
+- **`_last_puppet` is left alone.** The library does not mutate Evennia's `_last_puppet` attribute — vanilla semantics preserved. The OOC redirect loop on routers running `AUTO_PUPPET_ON_LOGIN = True` is broken instead by the account-level `account.db._shards_at_ooc_menu` flag — written on the **router** when the redirect's ticket auth completes, and read by the router's `at_post_login` (see "Auto-puppet on login" below).
+- **Does NOT touch `account.db._shards_at_ooc_menu`.** The shard process never writes the OOC-menu flag. The flag is router-owned: written by `protocols.py` priority #2 ticket auth on the router (see "The `account.db._shards_at_ooc_menu` flag" below), read and cleared on the router. Keeping the write on the router avoids a cross-process AttributeHandler cache problem — the router's idmapper would otherwise hold a stale Attribute instance and the read would never see the shard's write.
 - **No explicit unpuppet**: the redirect closes the existing WebSocket connection (the JS plugin's first step before opening the new one). Evennia's disconnect handler (`sessionhandler.disconnect()` → `account.unpuppet_object()`) automatically releases the character on the shard when the connection drops.
 - **Router**: vanilla `CmdOOC` stays — normal unpuppet, player stays on the router OOC.
 - **Monolith**: vanilla `CmdOOC` stays; the override is never injected.
@@ -182,13 +182,15 @@ The override honours the consumer's `AUTO_PUPPET_ON_LOGIN` setting as the first 
 
 The OOC-return signal that prevents the `@ooc` → router → bounce-back-to-shard loop is an **account-level persistent attribute**, not session state:
 
-- **Set** by `ShardAwareCmdOOC.func` on the shard, immediately before sending the OOC redirect OOB.
+- **Set** by `ShardWebSocketClient._mark_ooc_arrival_if_router` (`protocols.py`), called from priority #2 of `onOpen` after a successful ticket validation, gated on `get_role() == ROLE_ROUTER`. An inbound ticket on the router is implicitly an `@ooc` arrival — the only path that returns a player session from a shard to the router is `ShardAwareCmdOOC`. IC tickets target a specific shard and are validated by that shard, never by the router; the role gate keeps shard-side ticket auths from touching this flag.
 - **Cleared** by `_redirect_to_character_shard` (the shared IC redirect helper used by `ShardAwareCmdIC`, the router's `at_post_login` auto-puppet branch, and `cross_shard_character_move`).
 - **Read** by the router's `shard_aware_at_post_login` (`hooks.py`) on every connection where AUTO_PUPPET would otherwise apply. If True → render OOC menu, suppress AUTO_PUPPET. If False → standard AUTO_PUPPET behaviour (auto-puppet via `_last_puppet`).
 
-The flag's semantics is "the player has explicitly chosen to be at the OOC menu." It's set once when they type `@ooc`, cleared once when any IC entry fires.
+The flag's semantics is "the player has explicitly chosen to be at the OOC menu." It's set once when their @ooc redirect arrives at the router, cleared once when any IC entry fires.
 
-**Cross-process write/read.** The flag is written on the shard process (during `@ooc`) and read on the router process (during `at_post_login`). Both processes share the Postgres backend via Evennia's AttributeHandler, so the write is committed before the network round-trip that triggers the read. The router's `at_post_login` calls `flush_from_cache(force=True)` + `refresh_from_db()` on the account before reading the flag, to avoid a stale idmapper copy from an earlier read on the router.
+**Both write and read happen on the router process.** The shard's `@ooc` command intentionally does not touch this flag. Stamping it during the ticket auth on the router (rather than on the shard during `@ooc`, before the redirect) keeps the write/read pair inside one process — same `AttributeHandler` cache, same `Attribute` model idmapper. An earlier design did the write on the shard, which exposed a real cross-process cache problem: the router's idmapper held the Attribute instance from its own previous False-write, and the AttributeHandler's `query_key` retrieval went through the through-model FK back into that stale instance. Single-process write/read sidesteps the problem entirely.
+
+**Cleared from a shard remains best-effort.** `_redirect_to_character_shard` is shared with `cross_shard_character_move`, which can call it from a shard process during a programmatic move. That clear writes to the shard's local AttributeHandler cache; the router's cached value won't see it until the router's cache evicts. The worst case is a player landing at the OOC menu after a forced cross-shard move and typing `@ic` to proceed. Acceptable degradation; not worth a cross-process invalidation primitive for this edge case.
 
 **Why account-level, persistent.**
 

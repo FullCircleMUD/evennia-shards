@@ -380,17 +380,17 @@ def _redirect_to_character_shard(account, session, character) -> str:
     # Clear the OOC-menu marker. The player is going IC; on the next
     # connection (refresh, reconnect, fresh login) the router's
     # at_post_login should not suppress AUTO_PUPPET on this account.
-    # Set in ShardAwareCmdOOC; cleared here at the symmetric IC entry
-    # point (covers manual @ic, login-time auto-redirect, and
-    # cross_shard_character_move).
-    prev_flag = account.db._shards_at_ooc_menu
+    # Set on the router by protocols.py priority #2 ticket auth;
+    # cleared here at every IC entry point (manual @ic,
+    # login-time auto-redirect, and cross_shard_character_move).
+    # Router-side calls hit the router's own AttributeHandler — the
+    # symmetric clean case. Shard-side calls (cross_shard move) write
+    # locally on the shard's cache; the router will see stale True
+    # until its cache evicts naturally, but the worst case is the
+    # player landing at OOC menu after a forced move and typing @ic
+    # to proceed. Acceptable degradation; not worth a cross-process
+    # invalidation primitive.
     account.db._shards_at_ooc_menu = False
-    logger.log_info(
-        f"[evennia-shards] _redirect_to_character_shard: CLEARED "
-        f"_shards_at_ooc_menu (was {prev_flag!r}, now "
-        f"{account.db._shards_at_ooc_menu!r}) on account id={account.id} "
-        f"key={account.key} target_char={character} shard={shard_id}"
-    )
 
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,

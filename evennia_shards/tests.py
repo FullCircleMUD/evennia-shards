@@ -1783,6 +1783,7 @@ _FakeProtocol._extract_ticket_token = _SWC._extract_ticket_token
 _FakeProtocol._validate_ticket = _SWC._validate_ticket
 _FakeProtocol._get_client_address = _SWC._get_client_address
 _FakeProtocol._send_text = _SWC._send_text
+_FakeProtocol._mark_ooc_arrival_if_router = _SWC._mark_ooc_arrival_if_router
 
 
 class ExtractTicketTokenTests(BaseEvenniaTestCase):
@@ -1982,6 +1983,57 @@ class RoleGatingTests(BaseEvenniaTestCase):
         self.assertEqual(len(proto.close_calls), 0)
 
 
+class MarkOocArrivalIfRouterTests(BaseEvenniaTestCase):
+    """_mark_ooc_arrival_if_router stamps the OOC-menu flag on routers only.
+
+    An inbound ticket auth on the router is implicitly an @ooc arrival
+    (the only path that returns a player session from a shard to the
+    router is ShardAwareCmdOOC). This is the router-side write half of
+    the OOC-menu signal — the read happens in shard_aware_at_post_login
+    on the same process, so no cross-process Attribute cache to manage.
+    """
+
+    @override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
+    def test_router_sets_flag_on_existing_account(self):
+        from evennia.accounts.models import AccountDB
+
+        account = AccountDB.objects.create(
+            username="ooc_arrival_router",
+            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
+        )
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account.pk)
+
+        account.refresh_from_db()
+        self.assertTrue(account.db._shards_at_ooc_menu)
+
+    @override_settings(SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0")
+    def test_shard_does_not_set_flag(self):
+        from evennia.accounts.models import AccountDB
+
+        account = AccountDB.objects.create(
+            username="ooc_arrival_shard",
+            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
+        )
+        # Distinct sentinel so we detect any write, not just a flip.
+        account.db._shards_at_ooc_menu = "untouched-sentinel"
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account.pk)
+
+        account.refresh_from_db()
+        self.assertEqual(
+            account.db._shards_at_ooc_menu, "untouched-sentinel",
+        )
+
+    @override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
+    def test_missing_account_is_a_no_op(self):
+        proto = _FakeProtocol()
+        # No exception raised even when the pk doesn't exist —
+        # downstream sessionhandler.connect will fail loudly enough
+        # without the flag write being a separate failure mode.
+        proto._mark_ooc_arrival_if_router(account_id=999_999)
+
+
 # ---------------------------------------------------------------------------
 # ShardAwareCmdIC tests
 # ---------------------------------------------------------------------------
@@ -2052,9 +2104,10 @@ class _FakeAccount:
         self._characters = characters or []
         self._last_puppet = None
         # Initialised to False so hooks reading `account.db._shards_at_ooc_menu`
-        # don't AttributeError. Vanilla Evennia's AttributeHandler returns
-        # None silently for unset attrs, but our _FakeAccount uses
-        # `self.db = self`, so the attribute has to actually exist.
+        # (the router's at_post_login override) don't AttributeError on the
+        # _FakeAccount fake. Vanilla Evennia's AttributeHandler returns None
+        # silently for unset attrs, but our _FakeAccount uses `self.db = self`,
+        # so the attribute has to actually exist.
         self._shards_at_ooc_menu = False
         self.db = self  # db.X delegates to self.X
         self.attributes = _FakeAttributes()
@@ -2109,15 +2162,13 @@ class _FakeAccount:
 
     def flush_from_cache(self, force=False):
         # No-op for tests; production code uses this to evict stale
-        # idmapper entries (cross-process attribute writes). The
-        # router's at_post_login override calls it before reading
-        # account.db._shards_at_ooc_menu (the @ooc command writes the
-        # attribute on a shard, the router needs a fresh read).
+        # idmapper entries when cross-shard handoff has updated rows
+        # under this process's feet.
         pass
 
     def refresh_from_db(self, fields=None):
-        # No-op for tests; production code re-reads attributes from
-        # the shared DB after flush_from_cache.
+        # No-op for tests; production code re-reads model fields
+        # from the DB after flush_from_cache.
         pass
 
 
@@ -2443,10 +2494,12 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         """ooc must NOT touch _last_puppet — vanilla Evennia semantics.
 
         The OOC redirect loop is broken by the account-level
-        ``account.db._shards_at_ooc_menu`` flag (set by
-        ShardAwareCmdOOC, cleared by _redirect_to_character_shard,
-        read by the router's at_post_login override), not by
-        mutating _last_puppet. Any change here that adds
+        ``account.db._shards_at_ooc_menu`` flag, set on the router
+        by protocols.py priority #2 ticket auth (an inbound ticket
+        on the router is implicitly an @ooc arrival), cleared by
+        ``_redirect_to_character_shard`` on any IC entry, and read
+        by the router's at_post_login override. Not by mutating
+        ``_last_puppet``. Any change here that adds
         ``account.db._last_puppet = ...`` mutation should be
         deliberate and re-evaluated against the loop-prevention
         strategy.
@@ -2459,23 +2512,26 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
 
         self.assertIs(account.db._last_puppet, char)
 
-    def test_shard_sets_at_ooc_menu_flag(self):
-        """ooc must set account.db._shards_at_ooc_menu=True.
+    def test_shard_does_not_set_at_ooc_menu_flag(self):
+        """ooc on the shard must NOT touch the OOC-menu flag.
 
-        This is the persistent OOC-return signal — read by the
-        router's at_post_login on subsequent connections to
-        suppress the AUTO_PUPPET-driven bounce-back-to-shard.
-        Cleared on any IC entry by _redirect_to_character_shard.
+        The flag is router-owned: written on the router by
+        protocols.py priority #2 ticket auth, read and cleared on
+        the router. The shard side only creates a ticket and emits
+        the redirect. A regression that puts a write here would
+        reintroduce the cross-process Attribute cache problem the
+        router-side stamp was specifically designed to avoid.
         """
         char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
         account = _FakeAccount()
         account.db._last_puppet = char
-        # Ensure the flag starts False (clean baseline).
-        account.db._shards_at_ooc_menu = False
+        # Sentinel value distinct from True/False so we can detect
+        # any write whatsoever, not just a flip.
+        account.db._shards_at_ooc_menu = "untouched-sentinel"
         cmd = _make_ooc_cmd(puppet=char, account=account)
         cmd.func()
 
-        self.assertTrue(account.db._shards_at_ooc_menu)
+        self.assertEqual(account.db._shards_at_ooc_menu, "untouched-sentinel")
 
 
 # ---------------------------------------------------------------------------

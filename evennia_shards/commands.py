@@ -163,21 +163,6 @@ class ShardAwareCmdOOC(CmdOOC):
                 f"(Account: {account}, IP: {session.address})."
             )
 
-        # Mark the player as having explicitly chosen OOC. Read by the
-        # router's at_post_login override on subsequent connections
-        # (refresh, reconnect, fresh login) to suppress the AUTO_PUPPET-
-        # driven bounce-back-to-shard. Cleared on IC by
-        # _redirect_to_character_shard. Survives logout/login —
-        # honouring the player's last expressed intent ("I went OOC")
-        # over vanilla AUTO_PUPPET-on-every-login behaviour.
-        account.db._shards_at_ooc_menu = True
-        logger.log_info(
-            f"[evennia-shards] ShardAwareCmdOOC.func: SET "
-            f"_shards_at_ooc_menu=True on account id={account.id} "
-            f"key={account.key} (read-back="
-            f"{account.db._shards_at_ooc_menu!r})"
-        )
-
         token = create_ticket(
             account.id, character_id, get_router_shard_id(),
             client_ip=session.address,
