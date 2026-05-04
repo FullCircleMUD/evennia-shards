@@ -376,33 +376,22 @@ def _redirect_to_character_shard(account, session, character) -> str:
     logger.log_info(
         f"[evennia-shards] _redirect_to_character_shard: ENTERED "
         f"account id={account.id} key={account.key} "
-        f"target_char={character} shard={shard_id!r} "
-        f"flag_before={account.db._shards_at_ooc_menu!r}"
+        f"target_char={character} shard={shard_id!r}"
     )
 
     # Set _last_puppet so the destination shard's auto-puppet picks up
     # the correct character after ticket auth.
     account.db._last_puppet = character
 
-    # Clear the OOC-menu marker. The player is going IC; on the next
-    # connection (refresh, reconnect, fresh login) the router's
-    # at_post_login should not suppress AUTO_PUPPET on this account.
-    # Set on the router by protocols.py priority #2 ticket auth;
-    # cleared here at every IC entry point (manual @ic,
-    # login-time auto-redirect, and cross_shard_character_move).
-    # Router-side calls hit the router's own AttributeHandler — the
-    # symmetric clean case. Shard-side calls (cross_shard move) write
-    # locally on the shard's cache; the router will see stale True
-    # until its cache evicts naturally, but the worst case is the
-    # player landing at OOC menu after a forced move and typing @ic
-    # to proceed. Acceptable degradation; not worth a cross-process
-    # invalidation primitive.
-    account.db._shards_at_ooc_menu = False
-    logger.log_info(
-        f"[evennia-shards] _redirect_to_character_shard: CLEARED "
-        f"_shards_at_ooc_menu (now "
-        f"{account.db._shards_at_ooc_menu!r}) on account id={account.id}"
-    )
+    # Note: this helper deliberately does NOT touch
+    # ``account.db._shards_at_ooc_menu``. That flag is owned by the
+    # router's Server process and is written there in two and only
+    # two places: the router-Server's ``shard_aware_at_post_login``
+    # (sets True when a fresh ticket auth lands at the router) and
+    # ``ShardAwareCmdIC.func`` (sets False on @ic). Touching it from
+    # this helper would create a cross-process write whenever this
+    # function runs from a shard's Server (cross_shard_character_move)
+    # — the router would not see it.
 
     token = create_ticket(
         account.id, character.id, shard_id, client_ip=session.address,

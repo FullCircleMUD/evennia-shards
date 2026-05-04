@@ -1766,6 +1766,9 @@ class _FakeProtocol:
         self.http_headers = http_headers or {}
         self.sent_lines = []
         self.close_calls = []
+        # Mirrors Evennia ServerSession.protocol_flags — Portal writes,
+        # AMP-synced to Server.
+        self.protocol_flags = {}
 
     def sendLine(self, data):
         self.sent_lines.append(data)
@@ -1984,38 +1987,50 @@ class RoleGatingTests(BaseEvenniaTestCase):
 
 
 class MarkOocArrivalIfRouterTests(BaseEvenniaTestCase):
-    """_mark_ooc_arrival_if_router stamps the OOC-menu flag on routers only.
+    """_mark_ooc_arrival_if_router sets a protocol_flag on routers only.
 
-    An inbound ticket auth on the router is implicitly an @ooc arrival
-    (the only path that returns a player session from a shard to the
-    router is ShardAwareCmdOOC). This is the router-side write half of
-    the OOC-menu signal — the read happens in shard_aware_at_post_login
-    on the same process, so no cross-process Attribute cache to manage.
+    Runs in the Portal process: pure pass-through that sets
+    ``protocol_flags["SHARDS_TICKET_AUTHED"]=True``. Evennia AMP-syncs
+    the flag onto the Server's session; the Server's
+    shard_aware_at_post_login reads it and writes the persistent
+    account.db._shards_at_ooc_menu attribute on its own side.
+
+    The Portal does NOT write to account.db — that would be a
+    cross-process write and the Server's cached AccountDB / Attribute
+    idmappers would not see it.
     """
 
     @override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
-    def test_router_sets_flag_on_existing_account(self):
-        from evennia.accounts.models import AccountDB
-
-        account = AccountDB.objects.create(
-            username="ooc_arrival_router",
-            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
-        )
+    def test_router_sets_protocol_flag(self):
         proto = _FakeProtocol()
-        proto._mark_ooc_arrival_if_router(account.pk)
+        proto._mark_ooc_arrival_if_router(account_id=1)
 
-        account.refresh_from_db()
-        self.assertTrue(account.db._shards_at_ooc_menu)
+        self.assertTrue(proto.protocol_flags.get("SHARDS_TICKET_AUTHED"))
 
     @override_settings(SHARDS_ROLE=ROLE_SHARD, SHARD_ID="shard0")
-    def test_shard_does_not_set_flag(self):
+    def test_shard_does_not_set_protocol_flag(self):
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account_id=1)
+
+        self.assertNotIn("SHARDS_TICKET_AUTHED", proto.protocol_flags)
+
+    @override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
+    def test_router_does_not_touch_account_db(self):
+        """Cross-process safety guard.
+
+        The Portal must not write to account.db — the Server has its
+        own AccountDB / Attribute idmappers and would not see the
+        write. This test creates a real AccountDB row, calls the
+        helper, then asserts the row is unchanged. A regression that
+        makes the helper write to account.db (via any mechanism)
+        would fail this test.
+        """
         from evennia.accounts.models import AccountDB
 
         account = AccountDB.objects.create(
-            username="ooc_arrival_shard",
+            username="portal_no_account_write",
             db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
         )
-        # Distinct sentinel so we detect any write, not just a flip.
         account.db._shards_at_ooc_menu = "untouched-sentinel"
         proto = _FakeProtocol()
         proto._mark_ooc_arrival_if_router(account.pk)
@@ -2024,14 +2039,6 @@ class MarkOocArrivalIfRouterTests(BaseEvenniaTestCase):
         self.assertEqual(
             account.db._shards_at_ooc_menu, "untouched-sentinel",
         )
-
-    @override_settings(SHARDS_ROLE=ROLE_ROUTER, SHARD_ID=ROLE_ROUTER)
-    def test_missing_account_is_a_no_op(self):
-        proto = _FakeProtocol()
-        # No exception raised even when the pk doesn't exist —
-        # downstream sessionhandler.connect will fail loudly enough
-        # without the flag write being a separate failure mode.
-        proto._mark_ooc_arrival_if_router(account_id=999_999)
 
 
 # ---------------------------------------------------------------------------
@@ -2257,27 +2264,30 @@ class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
         # Returned URL matches the OOB URL.
         self.assertEqual(url, oob_url)
 
-    def test_redirect_clears_at_ooc_menu_flag(self):
-        """The IC redirect must clear account.db._shards_at_ooc_menu.
+    def test_redirect_does_not_touch_at_ooc_menu_flag(self):
+        """The helper must NOT touch account.db._shards_at_ooc_menu.
 
-        The flag was set by ShardAwareCmdOOC at OOC; any IC entry —
-        manual @ic, login auto-puppet, or programmatic
-        cross_shard_character_move — clears it via this helper.
-        Without this, a player who @ooc'd, then @ic'd, would still
-        be treated as "at OOC" on the next connection and be denied
-        the AUTO_PUPPET behaviour they'd expect.
+        The flag is owned by the router's Server process and is
+        written there in two places only — shard_aware_at_post_login
+        on a fresh ticket auth (sets True) and ShardAwareCmdIC.func
+        on @ic (sets False). Touching it from this helper would
+        create a cross-process write whenever the helper runs on a
+        shard's Server (cross_shard_character_move calls it from
+        there); the router would not see the new value.
+
+        Sentinel value distinct from True/False so any write at all
+        is detectable, not just a flip.
         """
         from evennia_shards.handoff import _redirect_to_character_shard
 
         char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
         account = _FakeAccount(pk=7)
-        # Simulate a previous @ooc having set the flag.
-        account.db._shards_at_ooc_menu = True
+        account.db._shards_at_ooc_menu = "untouched-sentinel"
         session = _FakeSession(address="10.0.0.1")
 
         _redirect_to_character_shard(account, session, char)
 
-        self.assertFalse(account.db._shards_at_ooc_menu)
+        self.assertEqual(account.db._shards_at_ooc_menu, "untouched-sentinel")
 
 
 @override_settings(
@@ -2386,6 +2396,23 @@ class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
 
         ticket = Ticket.objects.first()
         self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+    def test_router_ic_clears_ooc_menu_flag(self):
+        """ic on the router clears account.db._shards_at_ooc_menu.
+
+        This is the only IC entry point where the flag is plausibly
+        True at the moment of redirect (player at OOC menu, types
+        @ic). Same router-Server process writes the False as reads
+        the flag in shard_aware_at_post_login on subsequent
+        connections — coherent.
+        """
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        account.db._shards_at_ooc_menu = True
+        cmd = _make_cmd(args="Bob", account=account)
+        cmd.func()
+
+        self.assertFalse(account.db._shards_at_ooc_menu)
 
 
 def _make_ooc_cmd(account=None, session=None, puppet=None):
@@ -2625,13 +2652,13 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
     def test_at_ooc_menu_flag_skips_auto_redirect(self):
         """account.db._shards_at_ooc_menu=True → OOC menu, no redirect.
 
-        The flag is set by ShardAwareCmdOOC and cleared by
-        _redirect_to_character_shard (any IC entry). It signals
-        explicit player intent to be at the OOC menu and persists
-        across session lifecycle / refresh / logout-login. Even
-        with a fully redirectable _last_puppet set, an account
-        with this flag lands at the OOC menu rather than being
-        auto-puppeted.
+        The flag is the persistent OOC-intent signal: written here on
+        the Server when a fresh ticket auth lands (see
+        ``test_ticket_authed_protocol_flag_persists_to_account``),
+        cleared by ShardAwareCmdIC.func on @ic. This test covers the
+        refresh / reconnect / next-day-login path: no fresh ticket
+        auth on this connection, but the persisted flag is True so
+        we still render the OOC menu.
         """
         from evennia_shards.hooks import shard_aware_at_post_login
 
@@ -2640,6 +2667,7 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
         account.db._last_puppet = char  # would normally trigger redirect
         account.db._shards_at_ooc_menu = True
         session = _FakeSession()
+        # No protocol flag — refresh / reconnect path, persistence wins.
 
         shard_aware_at_post_login(account, session=session)
 
@@ -2648,6 +2676,34 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
         self.assertNotIn("shard_redirect", session.oob_messages)
 
         # OOC menu rendered.
+        self.assertEqual(len(account.at_look_calls), 1)
+
+    def test_ticket_authed_protocol_flag_persists_to_account(self):
+        """protocol_flags.SHARDS_TICKET_AUTHED=True → write account flag, OOC menu.
+
+        Fresh @ooc arrival flow: Portal sets protocol_flags on the
+        ticket-auth path, AMP-syncs to Server. Server's at_post_login
+        reads the protocol_flag, persists OOC intent to the account,
+        and renders the OOC menu (suppressing AUTO_PUPPET even with a
+        redirectable _last_puppet set).
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char  # would normally trigger redirect
+        account.db._shards_at_ooc_menu = False  # not yet persisted
+        session = _FakeSession()
+        session.protocol_flags["SHARDS_TICKET_AUTHED"] = True
+
+        shard_aware_at_post_login(account, session=session)
+
+        # Account flag written to True (persistence for next reconnect).
+        self.assertTrue(account.db._shards_at_ooc_menu)
+
+        # No redirect, OOC menu rendered.
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
         self.assertEqual(len(account.at_look_calls), 1)
 
     @override_settings(AUTO_PUPPET_ON_LOGIN=False)

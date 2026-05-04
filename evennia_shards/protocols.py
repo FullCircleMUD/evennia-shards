@@ -31,6 +31,22 @@ _BASE_WS_CLASS = class_from_module(
 
 _UPSTREAM_IPS = settings.UPSTREAM_IPS
 
+# Module-load trace — fires whichever process imports this module.
+# If onOpen logs never appear but this line does, the module loaded
+# but the protocol class wasn't actually wired into the WS factory.
+# If neither appears, the module never loaded in that process at all.
+try:  # pragma: no cover — startup-time diagnostic
+    from evennia.utils import logger as _shards_startup_log
+
+    _shards_startup_log.log_info(
+        f"[evennia-shards] protocols.py module loaded; "
+        f"_BASE_WS_CLASS={_BASE_WS_CLASS!r} "
+        f"WEBSOCKET_PROTOCOL_CLASS setting="
+        f"{getattr(settings, 'WEBSOCKET_PROTOCOL_CLASS', '<unset>')!r}"
+    )
+except Exception:
+    pass
+
 
 class ShardWebSocketClient(_BASE_WS_CLASS):
     """WebSocket protocol with ticket-based auth support.
@@ -71,14 +87,24 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
            - Router: fall through to normal login screen.
 
         The OOC-return signal that prevents the @ooc → router →
-        bounce-back-to-shard loop lives at the account level
-        (``account.db._shards_at_ooc_menu``) — set on the router by
-        ``_mark_ooc_arrival_if_router`` in priority #2 below (an
-        inbound ticket on the router is implicitly an @ooc arrival),
-        cleared by ``_redirect_to_character_shard``, read by
-        ``shard_aware_at_post_login``. Persistent across session
-        lifecycle, so refresh and logout-login both honour the
-        player's last expressed intent.
+        bounce-back-to-shard loop is split across two flags:
+
+        - ``protocol_flags["SHARDS_TICKET_AUTHED"]`` — transient
+          per-session signal set HERE in priority #2 (gated on
+          ``get_role() == ROLE_ROUTER``) and AMP-synced to the
+          Server. The Portal does no DB writes for this — it just
+          forwards the bit.
+        - ``account.db._shards_at_ooc_menu`` — persistent, written
+          and cleared exclusively by the router's Server process.
+          The Server's ``shard_aware_at_post_login`` reads the
+          protocol flag, persists OOC intent to this attribute, and
+          on subsequent connections (no protocol flag, but the
+          attribute is True) renders the OOC menu directly.
+
+        Two flags, two jobs. The Portal/Server process boundary
+        means a Portal-side write to ``account.db.*`` would be
+        invisible to the Server; the protocol flag is the bridge.
+        See DESIGN/ticket-auth-flow.md for the full state machine.
         """
         from evennia.utils import logger as _shards_log
 
@@ -342,7 +368,7 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         self.sendLine(json.dumps(["text", [text], {}]))
 
     def _mark_ooc_arrival_if_router(self, account_id):
-        """On the router, stamp the account's OOC-menu flag.
+        """On the router, stamp the session's ticket-auth protocol flag.
 
         An inbound ticket auth on the router is implicitly an @ooc
         arrival from a shard — ``ShardAwareCmdOOC`` is the only path
@@ -351,15 +377,19 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         shard, never by the router; the role gate here keeps shard-
         side ticket auths from touching this flag.
 
-        Setting the flag here (router process, same idmapper as the
-        eventual read in ``shard_aware_at_post_login``) keeps the
-        write/read pair inside one process — no cross-process
-        Attribute cache coherency to manage.
+        The Portal sets ``protocol_flags["SHARDS_TICKET_AUTHED"] =
+        True``; Evennia AMP-syncs the flag onto the Server's session
+        as part of the standard session handover; the Server's
+        ``shard_aware_at_post_login`` reads it and writes the
+        persistent ``account.db._shards_at_ooc_menu`` attribute on
+        the Server side. The Portal does not touch ``account.db.*``
+        — that would be a cross-process write and the Server's
+        cached AccountDB / Attribute idmappers would not see it.
 
-        A missing Account is treated as a no-op rather than an error:
-        the rest of ``onOpen`` will still proceed with ``uid`` set,
-        and ``sessionhandler.connect`` will fail downstream the same
-        way it would have without the flag write.
+        ``account_id`` is unused here (the protocol flag is keyed
+        per-session, not per-account) but kept in the signature for
+        symmetry with priority #2's available data and easy revival
+        if the design ever needs it.
         """
         from evennia.utils import logger
 
@@ -370,21 +400,11 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
                 f"(role={role!r}, not ROLE_ROUTER) account_id={account_id}"
             )
             return
-        from evennia.accounts.models import AccountDB
-        try:
-            account = AccountDB.objects.get(pk=account_id)
-        except AccountDB.DoesNotExist:
-            logger.log_info(
-                f"[evennia-shards] _mark_ooc_arrival_if_router: account "
-                f"pk={account_id} not found; no-op"
-            )
-            return
-        account.db._shards_at_ooc_menu = True
+        self.protocol_flags["SHARDS_TICKET_AUTHED"] = True
         logger.log_info(
             f"[evennia-shards] _mark_ooc_arrival_if_router: SET "
-            f"_shards_at_ooc_menu=True on account id={account.id} "
-            f"key={account.key} (read-back="
-            f"{account.db._shards_at_ooc_menu!r})"
+            f"protocol_flags['SHARDS_TICKET_AUTHED']=True "
+            f"(account_id={account_id!r})"
         )
 
 

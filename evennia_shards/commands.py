@@ -60,6 +60,19 @@ class ShardAwareCmdIC(CmdIC):
             self.msg("That character has no shard assignment.")
             return
 
+        # Clear the OOC-menu marker — the player is going IC. This is
+        # the one IC entry point where the flag is plausibly True at
+        # the moment of redirect (player at OOC menu, typing @ic). The
+        # write happens on the router's Server process, the same
+        # process that reads the flag in shard_aware_at_post_login on
+        # subsequent connections. No cross-process write.
+        self.account.db._shards_at_ooc_menu = False
+        logger.log_info(
+            f"[evennia-shards] ShardAwareCmdIC.func: CLEARED "
+            f"_shards_at_ooc_menu=False on account id={self.account.id} "
+            f"key={self.account.key}"
+        )
+
         _redirect_to_character_shard(self.account, self.session, new_character)
         self.msg(f"Redirecting to {shard_id}...")
 

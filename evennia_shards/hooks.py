@@ -107,33 +107,58 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
-    # OOC-return signal: explicit player intent to be at the OOC menu.
-    # Set on the router by protocols.py priority #2 when an inbound
-    # ticket auth completes (the only way a player session arrives at
-    # the router from a shard is @ooc, so the ticket is implicitly an
-    # OOC arrival). Cleared by _redirect_to_character_shard on any
-    # router-side IC entry (manual @ic, login-time auto-redirect).
-    # Both write and read happen on the router process — same
-    # AttributeHandler, same idmapper, no cross-process staleness.
-    # Survives session lifecycle, refresh, logout/login — honours
-    # player intent over vanilla AUTO_PUPPET-on-every-connection.
+    # OOC/IC state machine — Server-only owner of account.db._shards_at_ooc_menu.
+    #
+    # Two and only two write-points on the Server:
+    #   1. Here, when the session arrived via ticket auth on the router.
+    #      The Portal sets protocol_flags["SHARDS_TICKET_AUTHED"]=True in
+    #      onOpen priority #2; Evennia AMP-syncs the flag onto the
+    #      Server's session; we read it here, and persist the OOC intent
+    #      to the account-level Attribute. Same Server process writes
+    #      the Attribute → reads from the same idmapper on subsequent
+    #      logins → coherent.
+    #   2. ShardAwareCmdIC.func, which clears the flag back to False
+    #      before redirecting the player to a character's shard.
+    #
+    # No other code path touches the account flag.
+    ticket_authed = bool(
+        session and session.protocol_flags.get("SHARDS_TICKET_AUTHED")
+    )
     flag_value = self.db._shards_at_ooc_menu
     logger.log_info(
-        f"[evennia-shards] shard_aware_at_post_login: post-prelude flag "
-        f"read _shards_at_ooc_menu={flag_value!r} (account id={self.id})"
+        f"[evennia-shards] shard_aware_at_post_login: post-prelude state "
+        f"protocol_flags.SHARDS_TICKET_AUTHED={ticket_authed!r} "
+        f"account.db._shards_at_ooc_menu={flag_value!r} "
+        f"(account id={self.id})"
     )
-    if flag_value:
+
+    if ticket_authed:
+        # Fresh @ooc arrival on the router. Persist the OOC intent
+        # onto the account so subsequent reconnects (refresh, fresh
+        # login next day) honour the same intent without needing the
+        # ticket to still be present in the URL.
+        self.db._shards_at_ooc_menu = True
         logger.log_info(
-            f"[evennia-shards] shard_aware_at_post_login: flag is truthy "
-            f"→ rendering OOC menu, suppressing AUTO_PUPPET "
-            f"(account id={self.id})"
+            f"[evennia-shards] shard_aware_at_post_login: ticket_authed "
+            f"→ persisted account.db._shards_at_ooc_menu=True, rendering "
+            f"OOC menu (account id={self.id})"
+        )
+        self.msg(self.at_look(target=self.characters, session=session), session=session)
+        return
+
+    if flag_value:
+        # No fresh ticket auth on this connection (refresh / reconnect /
+        # next-day login), but the persisted intent says OOC.
+        logger.log_info(
+            f"[evennia-shards] shard_aware_at_post_login: persisted flag "
+            f"truthy → rendering OOC menu (account id={self.id})"
         )
         self.msg(self.at_look(target=self.characters, session=session), session=session)
         return
 
     last_puppet = self.db._last_puppet
     logger.log_info(
-        f"[evennia-shards] shard_aware_at_post_login: flag falsy, "
+        f"[evennia-shards] shard_aware_at_post_login: no OOC intent, "
         f"checking _last_puppet={last_puppet!r} (account id={self.id})"
     )
 
