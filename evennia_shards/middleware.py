@@ -5,11 +5,17 @@ Intercepts HTML responses from the webclient and injects:
 1. The shard_redirect.js plugin (OOB redirect handler) — always.
 2. An inline script appending &ticket=TOKEN to window.csessid — only
    when ?ticket= is present in the page URL.
+3. An EARLY inline script BEFORE evennia.js's <script> tag so it
+   runs synchronously after window.wsurl is set but before
+   Evennia.init opens the default WS. Currently a console.log probe
+   to verify load order.
 
 This avoids requiring consumers to edit templates or manually add
 script tags — the library handles it automatically when added to
 INSTALLED_APPS (AppConfig.ready() injects this middleware).
 """
+
+import re
 
 from django.utils.deprecation import MiddlewareMixin
 
@@ -22,6 +28,22 @@ class ShardRedirectScriptMiddleware(MiddlewareMixin):
         b' type="text/javascript"></script>'
     )
 
+    # Match the evennia.js <script> tag so we can inject inline JS
+    # immediately before it. Tolerates attribute order / whitespace
+    # variations the Django template might emit.
+    _EVENNIA_JS_TAG = re.compile(
+        rb"<script\b[^>]*\bsrc=[^>]*evennia\.js[^>]*>\s*</script>"
+    )
+
+    _EARLY_PROBE = (
+        b"<script>"
+        b"console.log("
+        b"'[evennia-shards] EARLY probe: window.wsurl=' + window.wsurl + "
+        b"' window.csessid=' + window.csessid"
+        b");"
+        b"</script>"
+    )
+
     def process_response(self, request, response):
         # Only inject into webclient HTML pages.
         content_type = response.get("Content-Type", "")
@@ -29,6 +51,18 @@ class ShardRedirectScriptMiddleware(MiddlewareMixin):
             return response
         if "/webclient" not in request.path:
             return response
+
+        # Inject the EARLY probe right before evennia.js's <script>
+        # tag so we can confirm load/execution order in the browser
+        # console relative to evennia.js's "Trying websocket..." log.
+        match = self._EVENNIA_JS_TAG.search(response.content)
+        if match and self._EARLY_PROBE not in response.content:
+            response.content = (
+                response.content[: match.start()]
+                + self._EARLY_PROBE
+                + b"\n"
+                + response.content[match.start():]
+            )
 
         injection = b""
 
@@ -53,7 +87,8 @@ class ShardRedirectScriptMiddleware(MiddlewareMixin):
                 b"</body>",
                 injection + b"</body>",
             )
-            if response.get("Content-Length"):
-                response["Content-Length"] = len(response.content)
+
+        if response.get("Content-Length"):
+            response["Content-Length"] = len(response.content)
 
         return response
