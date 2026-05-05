@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-28
 **Command:** `evennia test evennia` from `examples/demo_game/`
-**Environment:** `c:\Users\micro\Documents\EvenniaShards\venv\` — Evennia 6.0.0 and `evennia_shards 0.0.1` (editable). Library now contains [config.py](../../evennia_shards/config.py) with the `get_role()` / `get_shard_id()` accessors.
+**Environment:** `c:\Users\micro\Documents\EvenniaShards\venv\` — Evennia 6.0.0 and `evennia_shards 0.0.1` (editable). Library now contains [config.py](../../src/evennia_shards/config.py) with the `get_role()` / `get_shard_id()` accessors.
 **Purpose:** Re-run the Case 1 gate after the first piece of real library code landed. Confirm the library is still dormant — the new code is read-only Django settings access via `getattr` and is not imported by Evennia's test suite, so the result should be identical to [test_results_1_2026-04-28.md](test_results_1_2026-04-28.md).
 
 ## Result

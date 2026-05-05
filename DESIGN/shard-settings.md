@@ -38,7 +38,7 @@ The library does **not** ship a settings module. It does not write to Django's s
    shard = get_shard_id()    # None if undeclared, else what consumer set
    ```
 
-The accessors live in [`evennia_shards/config.py`](../evennia_shards/config.py) and use `getattr(settings, "...", default)`. The defaults are baked into the library's read code, not into a settings file.
+The accessors live in [`evennia_shards/config.py`](../src/evennia_shards/config.py) and use `getattr(settings, "...", default)`. The defaults are baked into the library's read code, not into a settings file.
 
 ## Why this shape
 

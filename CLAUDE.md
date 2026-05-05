@@ -77,8 +77,10 @@ evennia-shards/
 ├── pyproject.toml
 ├── runtests.py                # standalone test runner (no consumer gamedir needed)
 ├── DESIGN/                    # design wiki (humans + LLMs)
-├── evennia_shards/            # library code
-│   └── tests.py               # unit tests (run via runtests.py)
+├── src/
+│   └── evennia_shards/        # library code (src layout)
+│       └── tests.py           # unit tests (run via runtests.py)
+├── tests/                     # standalone test settings (test_settings.py, urls.py)
 └── examples/
     ├── demo_router/           # router-role demo gamedir
     ├── demo_shard0/           # shard-role demo gamedir (source of truth — others symlink to it)

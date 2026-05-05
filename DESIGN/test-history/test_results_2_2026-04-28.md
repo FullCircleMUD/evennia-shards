@@ -6,7 +6,7 @@
 
 ## What was exercised
 
-- Library code: [evennia_shards/config.py](../../evennia_shards/config.py) — `get_role()`, `get_shard_id()`.
+- Library code: [evennia_shards/config.py](../../src/evennia_shards/config.py) — `get_role()`, `get_shard_id()`.
 - Throwaway probe: a temporary `@shards_debug` superuser command in the demo game (since reverted) that prints both accessor values to the caller.
 
 ## Run 1 — defaults (no settings declared)

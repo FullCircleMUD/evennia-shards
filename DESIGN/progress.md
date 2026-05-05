@@ -154,7 +154,7 @@ Live smoke testing of `cross_shard_character_move` (shard0 → shard1 → shard0
 
 ### 2026-05-02 — `cross_shard_character_move` spike 1: character move (unit-tested)
 
-The cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py). Initial scope: move a single character row across shards (inventory recursion added 2026-05-03 — see milestone above), with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
+The cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../src/evennia_shards/handoff.py). Initial scope: move a single character row across shards (inventory recursion added 2026-05-03 — see milestone above), with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
 
 The primitive composes:
 
@@ -176,9 +176,9 @@ Three findings worth recording for future work:
 
 The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_character_move` will be built on.
 
-**Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
+**Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../src/evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
 
-**Bypass primitive.** [`shard_writes_allowed_for(*objs)`](../evennia_shards/isolation.py) — a context manager that lifts the chokepoints for specific objects within a `with` block. Tracks identity two ways:
+**Bypass primitive.** [`shard_writes_allowed_for(*objs)`](../src/evennia_shards/isolation.py) — a context manager that lifts the chokepoints for specific objects within a `with` block. Tracks identity two ways:
 
 - `id(instance)` — checked by `pre_save` and `pre_delete` (instance-receiving chokepoints). Works for unsaved rows.
 - `(concrete_model, pk)` — checked by `from_db` and `QuerySet.update` (which receive class + pk, not the instance). Normalised via `_meta.concrete_model` so a bypass entered with an Evennia typeclass instance (a Django proxy of `ObjectDB`) matches `from_db` calls where `cls` is `ObjectDB` itself.
@@ -212,7 +212,7 @@ Phase 1 of the original PoC plan (router + 1 shard, both auto-puppet modes) is n
 
 Closes the auth/redirect feature: both `AUTO_PUPPET_ON_LOGIN = True` and `False` paths now work on the router. With auto-puppet=True, login itself triggers the redirect; with False, the player goes through the OOC menu and types `ic <char>`.
 
-`shard_aware_at_post_login` (in [evennia_shards/hooks.py](../evennia_shards/hooks.py), new module) replaces `DefaultAccount.at_post_login` on routers via monkey-patch in `AppConfig.ready()`. The override reproduces Evennia 6.0.0's prelude verbatim, then dispatches three ways via the `_is_redirectable_character()` predicate:
+`shard_aware_at_post_login` (in [evennia_shards/hooks.py](../src/evennia_shards/hooks.py), new module) replaces `DefaultAccount.at_post_login` on routers via monkey-patch in `AppConfig.ready()`. The override reproduces Evennia 6.0.0's prelude verbatim, then dispatches three ways via the `_is_redirectable_character()` predicate:
 
 | `_last_puppet` state | Outcome |
 |---|---|
@@ -453,7 +453,7 @@ Re-ran `evennia test evennia` after the `config.py` accessors landed. Result ide
 
 ### 2026-04-28 — Config accessor wire proven (live, in-game)
 
-First piece of real library code: [evennia_shards/config.py](../evennia_shards/config.py) with `get_role()` / `get_shard_id()` accessors. Settings design documented in [shard-settings.md](shard-settings.md) and load-bearing principle 9 added to [CLAUDE.md](../CLAUDE.md). Wire proven end-to-end with a temporary `@shards_debug` superuser command in the demo game (since reverted): both accessors return the documented defaults when the consumer declares nothing, and return the consumer-declared values when overridden. See [test-history/test_results_2_2026-04-28.md](test-history/test_results_2_2026-04-28.md). Case 1 gate re-run with the new library code is still outstanding.
+First piece of real library code: [evennia_shards/config.py](../src/evennia_shards/config.py) with `get_role()` / `get_shard_id()` accessors. Settings design documented in [shard-settings.md](shard-settings.md) and load-bearing principle 9 added to [CLAUDE.md](../CLAUDE.md). Wire proven end-to-end with a temporary `@shards_debug` superuser command in the demo game (since reverted): both accessors return the documented defaults when the consumer declares nothing, and return the consumer-declared values when overridden. See [test-history/test_results_2_2026-04-28.md](test-history/test_results_2_2026-04-28.md). Case 1 gate re-run with the new library code is still outstanding.
 
 ### 2026-04-28 — Case 1 gate satisfied (empty-library state)
 

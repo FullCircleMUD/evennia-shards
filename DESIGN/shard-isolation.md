@@ -2,7 +2,7 @@
 
 How the library enforces the partition between shards at the Django/Evennia level — what stops one shard's process from accidentally reading, instantiating, or writing to another shard's rows.
 
-The mechanism has two halves: **chokepoints** that catch accidental cross-shard access loudly, and a scoped **bypass** primitive (`shard_writes_allowed_for`) that legitimate cross-shard operations use to opt out. Both live in [`evennia_shards/isolation.py`](../evennia_shards/isolation.py) and share thread-local state, so the enforcement and the opt-in coordinate without cross-module plumbing.
+The mechanism has two halves: **chokepoints** that catch accidental cross-shard access loudly, and a scoped **bypass** primitive (`shard_writes_allowed_for`) that legitimate cross-shard operations use to opt out. Both live in [`evennia_shards/isolation.py`](../src/evennia_shards/isolation.py) and share thread-local state, so the enforcement and the opt-in coordinate without cross-module plumbing.
 
 ## Invariants
 
@@ -88,7 +88,7 @@ Inside the `with` block, all four chokepoints skip enforcement for the listed ob
 
 **Composing with `transaction.atomic()`.** For multi-write operations like `cross_shard_character_move`, callers combine the bypass with `transaction.atomic()` so that the writes either all commit or all roll back. The two primitives compose freely; the bypass doesn't impose any transaction semantics of its own.
 
-For ownership handoff specifically, idmapper eviction (`instance.flush_from_cache()`) is the third moving part — eviction happens inside the same atomic block so a flush failure rolls the DB write back, and a defensive eviction also runs in the `except` branch so a rolled-back move doesn't leave a stale Python instance (with the mutated `shard_id`) in the source process's idmapper. The `cross_shard_character_move` primitive in [`evennia_shards/handoff.py`](../evennia_shards/handoff.py) composes the three (bypass + atomic + flush) into a single operation; consumers writing their own cross-shard orchestration code use the bypass directly with their own composition.
+For ownership handoff specifically, idmapper eviction (`instance.flush_from_cache()`) is the third moving part — eviction happens inside the same atomic block so a flush failure rolls the DB write back, and a defensive eviction also runs in the `except` branch so a rolled-back move doesn't leave a stale Python instance (with the mutated `shard_id`) in the source process's idmapper. The `cross_shard_character_move` primitive in [`evennia_shards/handoff.py`](../src/evennia_shards/handoff.py) composes the three (bypass + atomic + flush) into a single operation; consumers writing their own cross-shard orchestration code use the bypass directly with their own composition.
 
 ## Cross-process cache staleness
 
