@@ -8,11 +8,11 @@ Two flavours of commands live here:
   module-attribute monkey-patch in ``AppConfig.ready()``; the
   ``AccountCmdSet`` picks them up on cmdset rebuild.
 
-- **Permanent superuser commands** — ``CmdShardCheck`` /
-  ``CmdCrossShardDig`` are new admin commands shipped by the library
-  for sharded deployments (Shard Management category, Developer
-  lock). Injected by patching ``CharacterCmdSet.at_cmdset_creation``
-  in ``AppConfig.ready()``.
+- **Permanent admin commands** — ``CmdShardCheck`` /
+  ``CmdCrossShardDig`` / ``CmdCrossShardMove`` are new admin commands
+  shipped by the library for sharded deployments (Shard Management
+  category, Developer lock). Injected by patching
+  ``CharacterCmdSet.at_cmdset_creation`` in ``AppConfig.ready()``.
 """
 
 from evennia.commands.command import Command as BaseCommand
@@ -310,4 +310,78 @@ class CmdCrossShardDig(BaseCommand):
         self.caller.msg(
             f"|wDug |c{room_name}|n on shard {target_shard!r}: "
             f"|w#{room.pk}|n"
+        )
+
+
+class CmdCrossShardMove(BaseCommand):
+    """
+    Move the caller's character across shards.
+
+    Usage:
+      cross_shard_move <shard_id> <room_pk>
+
+    Calls ``cross_shard_character_move`` to move the puppeted character
+    to the room with the given primary key on the target shard. The
+    primitive handles atomic DB writes, idmapper eviction, recursive
+    inventory move, and per-session ticket-based redirect.
+
+    Reports the result: objects moved (character plus carried items),
+    sessions redirected, and any per-session failures.
+
+    Intended as an admin tool for cross-shard navigation during world
+    bootstrap and live diagnosis. Consumer games should layer their
+    own gating (safe-state checks, narrative beats) on top of the
+    underlying ``cross_shard_character_move`` primitive in production
+    contexts — see ``DESIGN/consumer-constraints.md`` § "Cross-shard
+    movement requires a safe character state".
+    """
+
+    key = "cross_shard_move"
+    locks = "cmd:perm(Developer)"
+    help_category = "Shard Management"
+
+    def func(self):
+        from .config import get_shard_url
+        from .handoff import cross_shard_character_move
+
+        args = self.args.strip().split(None, 1)
+        if len(args) < 2:
+            self.caller.msg("Usage: cross_shard_move <shard_id> <room_pk>")
+            return
+        target_shard, room_pk_str = args[0], args[1]
+
+        # Validate target_shard is configured. The primitive itself
+        # validates this too, but failing early with a clearer message
+        # is friendlier for an admin tool.
+        try:
+            get_shard_url(target_shard)
+        except (KeyError, ValueError):
+            self.caller.msg(
+                f"|rTarget shard {target_shard!r} is not configured "
+                f"(not in SHARD_URLS).|n"
+            )
+            return
+
+        try:
+            room_pk = int(room_pk_str)
+        except ValueError:
+            self.caller.msg(
+                f"|rroom_pk must be an integer; got {room_pk_str!r}.|n"
+            )
+            return
+
+        try:
+            result = cross_shard_character_move(
+                self.caller, target_shard, room_pk
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.caller.msg(
+                f"|rcross_shard_character_move failed: {exc}|n"
+            )
+            return
+
+        self.caller.msg(
+            f"|wMove complete:|n objects_moved={result.objects_moved}, "
+            f"sessions_redirected={result.sessions_redirected}, "
+            f"failures={len(result.failures)}"
         )

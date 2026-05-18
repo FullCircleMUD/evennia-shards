@@ -6,6 +6,50 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-18 — `CmdCrossShardMove` promoted from demo into library
+
+The cross-shard movement admin command had been living in
+`examples/demo_shard0/commands/command.py` since the
+`cross_shard_character_move` spike, marked `TEMPORARY`. Promoted into
+[`evennia_shards/commands.py`](../src/evennia_shards/commands.py)
+alongside `CmdShardCheck` and `CmdCrossShardDig`: same Developer lock,
+same "Shard Management" help category, auto-installed into
+`CharacterCmdSet` via the existing `at_cmdset_creation` patch in
+`AppConfig.ready()`.
+
+The command is a thin wrapper around the
+`cross_shard_character_move` primitive — validates `target_shard` is
+in `SHARD_URLS`, parses `room_pk` as int, calls the primitive, prints
+the `MoveResult`. The primitive itself is what's load-bearing; the
+command is just an admin-facing entrypoint that doesn't require the
+consumer to ship one of their own for bootstrap-time use.
+
+**Why now.** FCM (first real consumer) hit the chicken-and-egg of
+"shard1 has no rooms, can't log in, can't `cross_shard_dig` from
+inside it." `CmdCrossShardDig` solves the room-creation half from
+shard0; this command solves the "now actually walk over there" half.
+The pair give an admin everything needed to bootstrap content on a
+fresh shard without consumer-side scaffolding.
+
+**Consumer notes.** This is an *admin tool*, not a player-facing
+movement mechanism. Consumer games that want IC cross-shard
+movement still need to write their own `CrossShardExit` typeclass
+(or equivalent) that gates the primitive with their safe-state
+predicate — see [consumer-constraints.md § Cross-shard movement
+requires a safe character state](consumer-constraints.md#cross-shard-movement-requires-a-safe-character-state).
+
+**210 tests passing** (204 prior + 6 new in
+`CmdCrossShardMoveTests`): no-args usage, one-arg usage,
+non-integer room_pk, unknown shard validation, happy-path primitive
+delegation (mocked), primitive exception surfaces as error message.
+The `AdminCommandAutoInstallTests` assertion was extended to
+include the new command key.
+
+**Files:** `src/evennia_shards/commands.py` (new command),
+`src/evennia_shards/apps.py` (cmdset patch adds it), demo's
+`commands/command.py` and `commands/default_cmdsets.py` (spike copy
+removed). Branch: `cross-shard-move-cmd`.
+
 ### 2026-05-18 — Local multi-process testing on Windows: no view dirs needed
 
 Empirical finding while preparing FCM as the library's first consumer.
