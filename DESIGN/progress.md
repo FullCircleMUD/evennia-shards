@@ -6,6 +6,49 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-18 — Local multi-process testing on Windows: no view dirs needed
+
+Empirical finding while preparing FCM as the library's first consumer.
+On Windows, three Evennia processes (router + shard0 + shard1) can be
+started from the same `demo_shard0/` gamedir in three different
+PowerShell terminals, each with `--settings settings_<role>`, with no
+view directories, no symlinks, no junctions, and no patching of the
+launcher. All three came up cleanly and listened on their per-role ports.
+
+**Why it works.** Evennia's launcher gates the `--pidfile` argument
+passed to `twistd` on `os.name != "nt"`
+([`evennia_launcher.py:529-532`](../../venv/Lib/site-packages/evennia/server/evennia_launcher.py#L529)).
+On Windows that branch is skipped: `twistd` is never told to write
+`<gamedir>/server/server.pid` or `<gamedir>/server/portal.pid`, so two
+`evennia start` invocations from the same folder don't fight over those
+files. `evennia stop` on Windows uses Win32 console-group signals
+(`GenerateConsoleCtrlEvent`, line 1618-1631) instead of PID-file lookups
+— so each terminal stops its own processes by virtue of being its own
+console.
+
+**What this prevented building.** Earlier in the session we sketched a
+cross-OS `evennia_shards.local_views.create_view()` helper that would
+build view gamedirs via directory junctions on Windows and symlinks on
+POSIX, plus a wrapper CLI variant that would patch `init_game_directory`
+to read PID paths from settings, plus an `AppConfig.ready()`-time
+wrapper around `_get_twistd_cmdline` to inject role-suffixed PID paths.
+All three are dropped — the underlying problem (PID-file collision in a
+shared gamedir) only exists on Unix, and on Unix the demo's existing
+symlinked-view recipe already covers it.
+
+**Decision: documentation, not code.** The OS-specific recipes are
+captured as the canonical reference in
+[deployment-topology.md § Local development](deployment-topology.md#local-development),
+with [shard-settings.md](shard-settings.md#localhost-multi-instance-game-directories)
+and [`examples/README.md`](../examples/README.md) pointing back there
+for the rationale. The previously-conflicting claims in those two docs
+(deployment-topology said "same folder works", shard-settings said
+"symlinked view dirs needed") are now resolved as the Windows and
+Unix cases of one underlying split.
+
+No library code changed. No new tests. The discovery does, however,
+trim a substantial would-have-been workstream from the roadmap.
+
 ### 2026-05-04 — Shards run WebSocket-only: HTTP webserver router-only by default
 
 Shards no longer run an HTTP webserver. Default deployment shape is now:
