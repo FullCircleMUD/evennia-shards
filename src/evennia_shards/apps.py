@@ -70,6 +70,7 @@ class EvenniaShardsConfig(AppConfig):
 
                 _account_module.CmdOOC = ShardAwareCmdOOC
 
+
             # Replace DefaultAccount.at_post_login with role-specific
             # overrides.
             #
@@ -145,6 +146,21 @@ class EvenniaShardsConfig(AppConfig):
 
                 def _shards_wrapped_init(*args, **kwargs):
                     _original_init(*args, **kwargs)
+
+                    # Module-attribute swap for CmdTeleport. Deferred to
+                    # here because importing teleport.py pulls in
+                    # evennia.commands.default.building, which transitively
+                    # imports evmenu — and evmenu's module body subclasses
+                    # evennia.Command at load time. Before _original_init
+                    # runs, evennia.Command is None and that subclassing
+                    # raises TypeError. After _original_init, the lazy
+                    # exports are populated and the chain is safe.
+                    from evennia.commands.default import building as _building_module
+
+                    from .teleport import ShardAwareCmdTeleport
+
+                    _building_module.CmdTeleport = ShardAwareCmdTeleport
+
                     from evennia.commands.default.cmdset_character import (
                         CharacterCmdSet,
                     )
