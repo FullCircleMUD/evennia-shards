@@ -141,6 +141,39 @@ How to check: diff upstream `CmdIC.func` and `CmdOOC.func` bodies against what `
 
 **Risk in consumer override:** see "Library territory" above. If a consumer does subclass or replace these, behaviour is undefined — not because of a recoverable bug, but because the consumer is replacing infrastructure they don't own. The library does not detect this case at install time (unlike `at_post_login`); the recommendation is documentation only. Consumer subclasses can be detected by the same MRO walk we use for `at_post_login`, but the failure isn't recoverable via a documented `super()` pattern, so the warning would just say "don't do this" — easier to say it once in the docs than at every startup.
 
+## `CmdTeleport` — narrow override (delegate to vanilla when local)
+
+**What we patch / extend:** `evennia/commands/default/building.py` → `CmdTeleport`. Library code: `evennia_shards/teleport.py` → `ShardAwareCmdTeleport`. Installed via module-attribute swap on `building.CmdTeleport` — same shape as `CmdIC` / `CmdOOC` — but the swap is performed inside `_shards_wrapped_init` (the `evennia._init` wrap, see below) rather than at `AppConfig.ready()` time, because the `building.py` import chain pulls in `prototypes/menus` → `evmenu`, and `evmenu` subclasses `evennia.Command` at module load. `evennia.Command` is a lazy export populated by `evennia._init()`; importing `building` before `_init` runs raises `TypeError: NoneType takes no arguments`. The `_shards_wrapped_init` runs `_original_init` first, so the lazy exports are populated by the time we import `teleport.py`. Based on Evennia 6.0.0.
+
+**Why:**
+
+`CmdTeleport.parse` calls `caller.search(name, global_search=True)` up to three times to resolve `obj_to_teleport` and `destination`. On a shard process, the global search returns rows from every shard and instantiating one whose `shard_id` doesn't match the current process trips the `from_db` chokepoint with `ShardIsolationError`. The exception aborts the command and `@tel` becomes unusable for any name that resolves to a cross-shard match.
+
+The override has a narrow design: stay close to vanilla. The class subclasses `CmdTeleport`. `parse()` mirrors vanilla's structure 1:1, substituting the three `caller.search` calls with [`shard_aware_global_search`](shard-aware-search.md) (which returns either a loaded instance for a local match or pk + shard_id for a foreign match). `func()` dispatches into three branches:
+
+1. **`/tonone`** — vanilla logic if `obj_to_teleport` is local. If foreign, refuse with a pointer to `cross_shard_move`.
+2. **Both local** — delegate to vanilla `super().func()` unchanged. All vanilla behaviour (lock checks, equality checks, `/loc` / `/intoexit` / `/quiet`, the move itself, announce messages, failure paths) runs untouched. This is the common case.
+3. **Cross-shard** — route via the library's `cross_shard_character_move` primitive when the destination is foreign and the object is local. (The foreign-object case is refused with the cross_shard_move pointer; supporting it would require a remote-execute primitive the library does not currently provide.)
+
+The branch where both targets are local — by far the common case in practice — runs vanilla code verbatim. The cross-shard branch wraps an existing library primitive. The structure imitates rather than reimplements; the override surface area is minimal.
+
+**Risk on Evennia upgrade:**
+
+- Changes to `CmdTeleport.parse`'s structure — currently three discrete `caller.search` calls organised under `if self.rhs / elif self.lhs`. Our parse mirrors this exact branching. If vanilla refactors parse (e.g. moves to a helper, adds a fourth lookup, changes the rhs vs no-rhs distinction), our parse needs the same refactor.
+- Changes to `CmdTeleport`'s parent class. Currently `COMMAND_DEFAULT_CLASS` (typically `MuxCommand`), which is where the `lhs` / `rhs` splitting via `rhs_split` lives. Our override calls `super(CmdTeleport, self).parse()` explicitly to reach this parent, skipping vanilla `CmdTeleport.parse`'s body. If the parent changes — or if the `rhs_split` mechanism moves — that call site needs updating.
+- New switches added to `CmdTeleport` — `/quiet`, `/intoexit`, `/tonone`, `/loc` today. Our dispatch enumerates the relevant ones (`/tonone` short-circuits) and delegates the others to vanilla. A new switch that interacts with cross-shard semantics would need explicit handling in our dispatch.
+- Changes to where `CharacterCmdSet` looks up `CmdTeleport` — currently `building.CmdTeleport()` via module attribute (see `evennia/commands/default/cmdset_character.py`). The module-attribute swap pattern relies on this. If Evennia changes the cmdset to bind `CmdTeleport` at import time, the swap stops being seen and we'd need a different patch shape.
+
+How to check: diff upstream `CmdTeleport.parse` and `CmdTeleport.func` against our override on Evennia bump. The relevant cmdset references are in `cmdset_character.py`.
+
+**Risk in consumer override:**
+
+A consumer who subclasses `CmdTeleport` to add custom teleport behaviour (audit logging, restricted-target rules, narrative beats) needs to be aware of the swap: by the time `CharacterCmdSet.at_cmdset_creation` runs, `building.CmdTeleport` points at `ShardAwareCmdTeleport`, so a consumer subclass picks that up via MRO automatically — gaining shard-awareness for free.
+
+A consumer who binds `CmdTeleport` at import time (`from evennia.commands.default.building import CmdTeleport` at the top of their module, used as a base class for a custom subclass) may snapshot vanilla `CmdTeleport` before our swap runs. The result: their subclass extends vanilla, the cross-shard safety is bypassed. Recommended pattern: import the module, reference `building.CmdTeleport` at class-definition time (or define the subclass inside a function called at cmdset-creation time). The library does not detect this case at install time; the recommendation is documentation only.
+
+A consumer who replaces `CmdTeleport` entirely without subclassing the library version is replacing a piece of cross-shard infrastructure, and behaviour is undefined. Same posture as the `CmdIC` / `CmdOOC` "library territory" guidance above.
+
 ## `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation` override
 
 **What we patch / extend:** `evennia._init` (the function in `evennia/__init__.py` that populates Evennia's lazy top-level exports — `Command`, `CmdSet`, etc.) is wrapped from `AppConfig.ready()` to install a follow-on patch on `evennia.commands.default.cmdset_character.CharacterCmdSet.at_cmdset_creation`. The follow-on patch adds the library's permanent admin commands (`CmdShardCheck`, `CmdCrossShardDig`) after the parent populates the default cmdset. Library code: `evennia_shards/apps.py` (the wrap installation) and `evennia_shards/commands.py` (the commands themselves). Based on Evennia 6.0.0.

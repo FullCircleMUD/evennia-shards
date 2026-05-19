@@ -23,6 +23,7 @@ from .messagebus import (
     start_message_bus,
 )
 from .messaging import send_cross_shard_message
+from .search import ShardSearchResult, shard_aware_global_search
 from .tickets import create_ticket, delete_ticket, get_ticket
 
 __version__ = "0.0.1"
@@ -50,6 +51,8 @@ __all__ = [
     "shard_writes_allowed_for",
     "cross_shard_character_move",
     "MoveResult",
+    "shard_aware_global_search",
+    "ShardSearchResult",
     "ShardIsolationError",
     "MessageBusError",
     "TicketError",
