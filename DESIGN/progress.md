@@ -6,6 +6,19 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-20 — `@tel`: trivial vanilla-parity gaps closed
+
+Four small alignments with vanilla `CmdTeleport` / `caller.search`, each independently smoke-tested in the demo gamedirs (root teleporting + ball cross-shard with `me` / `here` / aliases / ambiguous names).
+
+- **Multi-match disambiguation prompt** — both the obj and destination paths in `ShardAwareCmdTeleport.parse` now render the full candidate list (`Multiple matches for 'tavern': #5 (Tavern, shard0), #12 (Tavern, shard1) - specify by dbref.`) instead of a static placeholder. The destination path previously silently fell through to vanilla's "Destination not found." message when multi-match fired; now it raises `InterruptCommand` with the prompt.
+- **Same-position short-circuit** — `ShardAwareCmdTeleport.func` checks `obj.db_location_id == dest_pk` before calling `cross_shard_move`, mirroring vanilla's `obj.location == destination` check ([building.py:3917](https://github.com/evennia/evennia/blob/main/evennia/commands/default/building.py)). Pk uniqueness under the single-Postgres bound makes the instance comparison and the pk comparison equivalent. Saves a no-op bus round-trip and emits vanilla's user-visible "is already at" message.
+- **Caller-relative specials** — `shard_aware_global_search` now resolves `"me"` / `"self"` (→ caller) and `"here"` (→ `caller.location`) before the SQL path, matching vanilla `caller.search` semantics. Always local by construction — no cross-shard routing needed.
+- **Alias matching** — `shard_aware_global_search` now also matches Tag rows with `db_tagtype="alias"`, using the same `Q(...) | (Q(...) & Q(...))` + `.distinct()` pattern vanilla `ObjectDBManager.object_search` uses. Composes correctly with the existing `tag=` / `tag_category=` zone filter (separate `filter()` calls = separate joins). Important convention note: aliases live in `db_tagtype="alias"`, not `db_category="alias"` — confirmed against `AliasHandler._tagtype = "alias"` in `evennia/typeclasses/tags.py`.
+
+After these, name-resolution parity with vanilla `caller.search(global_search=True)` is complete except for fuzzy / partial name matching (the regex fallback when exact fails). Teleport-side gaps that remain are documented but not yet closed: cross-shard `/loc`, cross-shard `/intoexit`, foreign-obj move, `announce_move_from` / `announce_move_to`, obj `teleport` lock check, destination `teleport_here` lock check.
+
+**Files:** `src/evennia_shards/search.py` (specials short-circuit + alias predicate + scope-note update), `src/evennia_shards/teleport.py` (`_format_multiple` helper + multi-match dispatch + already-at short-circuit), `src/evennia_shards/tests.py` (+14 tests; 260 total). `DESIGN/shard-aware-search.md` and `DESIGN/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
+
 ### 2026-05-20 — `cross_shard_move` invalidates destination's idmapper via `flush_from_cache` bus message
 
 Closes the contents-cache-stale issue that surfaced when an unpuppeted

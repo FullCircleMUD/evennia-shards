@@ -157,6 +157,13 @@ The override has a narrow design: stay close to vanilla. The class subclasses `C
 
 The branch where both targets are local — by far the common case in practice — runs vanilla code verbatim. The cross-shard branch wraps an existing library primitive. The structure imitates rather than reimplements; the override surface area is minimal.
 
+Two small vanilla alignments live in the cross-shard branch itself, both aimed at making the user-visible behaviour match vanilla wherever it's cheap:
+
+- **Multi-match disambiguation prompt.** When `shard_aware_global_search` returns `state="multiple"`, the override renders the candidate list (`#5 (Tavern, shard0), #12 (Tavern, shard1) - specify by dbref.`) and raises `InterruptCommand`. The user gets actionable information instead of a generic "ambiguous" refusal.
+- **Same-position short-circuit.** Before calling the `cross_shard_move` primitive, the override checks `obj.db_location_id == dest_pk`. If they match, the obj is already in the destination room — pks are globally unique under the [single-Postgres bound](library-scope-and-mandates.md), so the pk match is equivalent to vanilla's `obj.location == destination` instance comparison. Emits vanilla's `"<obj> is already at <dest>."` and returns without bus traffic.
+
+Name-resolution coverage in the helper itself ([shard-aware-search.md](shard-aware-search.md)) — dbref, exact key, alias, `me`/`self`/`here` — matches vanilla `caller.search(global_search=True)` for everything except fuzzy / partial name matching.
+
 **Risk on Evennia upgrade:**
 
 - Changes to `CmdTeleport.parse`'s structure — currently three discrete `caller.search` calls organised under `if self.rhs / elif self.lhs`. Our parse mirrors this exact branching. If vanilla refactors parse (e.g. moves to a helper, adds a fourth lookup, changes the rhs vs no-rhs distinction), our parse needs the same refactor.

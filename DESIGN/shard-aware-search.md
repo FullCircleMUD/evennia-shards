@@ -23,7 +23,12 @@ result: ShardSearchResult = shard_aware_global_search(
 
 Inputs:
 
-- `name` — dbref (`"#42"`) or case-insensitive exact `db_key`.
+- `caller` — the `ObjectDB` instance triggering the lookup. Required only because the caller-relative specials (`"me"` / `"self"` / `"here"`) resolve against it; for any other input shape, `caller` is passed through unread.
+- `name` — one of:
+  - dbref (`"#42"`),
+  - case-insensitive exact `db_key`,
+  - case-insensitive object alias (Tag row with `db_tagtype="alias"`),
+  - the caller-relative specials `"me"` / `"self"` (→ `caller`) or `"here"` (→ `caller.location`).
 - `tag` (optional) — narrow the lookup to objects carrying this tag. When set, only rows with a matching tag participate in the search. Useful for scoping a key namespace to a smaller domain (e.g. a zone) so the same key can be reused without ambiguity across that domain.
 - `tag_category` (optional) — only consulted when `tag` is set. When omitted, any category for the given tag key matches.
 
@@ -50,14 +55,19 @@ Three states drive caller dispatch:
 
 ## The mechanism
 
-Two-step lookup:
+Three stages, in order:
 
-1. **SQL-level metadata query.** `ObjectDB.objects.filter(...).values_list("pk", "shard_id", "db_key")` against the matching rows. The filter chain composes whatever was supplied: `db_key` (or `pk` for dbref input), and — when set — `db_tags__db_key` / `db_tags__db_category` for tag scoping. All predicates AND into one SQL WHERE; the join through the m2m tag table is handled by Django. This step returns column data only — no `from_db` is called per row, so the chokepoint is not invoked.
+0. **Caller-relative short-circuit.** `name` is lowered and stripped; if it's `"me"` / `"self"`, the helper returns the caller as the match without hitting the database. If it's `"here"`, the helper reads `caller.location` (always local by construction — the caller is on this process) and returns that. These tokens never reach the SQL path. Vanilla `caller.search` handles them the same way.
+1. **SQL-level metadata query.** `ObjectDB.objects.filter(...).values_list("pk", "shard_id", "db_key")` against the matching rows. The match predicate is `db_key` OR an alias tag (`db_tags__db_key` AND `db_tags__db_tagtype="alias"`) — `.distinct()` collapses the m2m duplicates the OR produces. For dbref input the predicate is just `pk=`. When set, `db_tags__db_key` / `db_tags__db_category` for tag scoping is composed as a separate `filter()` call so it gets its own join (the alias join and the tag-scope join then restrict the parent ObjectDB row independently — which is the intended semantics). This step returns column data only — no `from_db` is called per row, so the chokepoint is not invoked.
 2. **Conditional instantiation.** Once the match's shard is known:
    - If the match is local (`shard_id == get_shard_id()` or `shard_id == "*"`), load the instance via the regular ORM (`ObjectDB.objects.get(pk=...)`). The chokepoint sees a local row and allows the load.
    - If the match is on another shard, the helper returns the metadata only.
 
 The chokepoint never fires inside the helper. The caller never receives a cross-shard instance.
+
+### Why the alias predicate uses `db_tagtype`, not `db_category`
+
+Aliases in Evennia are stored in their own tag-type slot (`AliasHandler._tagtype = "alias"`, see `evennia/typeclasses/tags.py`). `db_category` on a Tag row is orthogonal — aliases can carry any category. The match predicate therefore checks `db_tagtype="alias"`, mirroring vanilla `ObjectDBManager.object_search`. A non-alias tag whose key happens to match the search string (e.g. a zone tag named `"sword"`) won't match, which is the correct behaviour.
 
 ### Why tag scoping and shard scoping compose
 
@@ -75,13 +85,13 @@ The current implementation handles:
 
 - dbref lookups (`"#42"`).
 - Case-insensitive exact `db_key` matches.
+- Case-insensitive object alias matches (Tag rows with `db_tagtype="alias"`).
+- Caller-relative specials `"me"` / `"self"` (→ `caller`) and `"here"` (→ `caller.location`).
 - Optional tag scoping via `tag` / `tag_category` to narrow the key namespace (e.g. zone-scoped lookup).
 
 The current implementation does not handle:
 
-- Alias matching.
-- Partial / fuzzy name matches.
-- Special tokens like `"here"`, `"me"`, `"self"`.
+- Partial / fuzzy name matches (vanilla `caller.search`'s regex fallback when exact fails).
 - Locality-aware preference ordering when both local and remote matches exist for the same name.
 
 These are extensions that fit cleanly under the same call signature when a consumer needs them. The helper's contract — name (plus optional tag) in, `ShardSearchResult` out — is stable.
