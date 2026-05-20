@@ -589,6 +589,158 @@ class MessageHandlerTests(BaseEvenniaTestCase):
         # .get("pks") or [] → iterates empty list → no-op return true.
         self.assertTrue(MessageHandler().handle(msg))
 
+    # ── room_msg ──────────────────────────────────────────────────
+
+    def _make_room(self, key="room"):
+        return ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+
+    def test_room_msg_calls_msg_contents_with_text(self):
+        """Handler resolves the room and calls msg_contents(text=...)."""
+        from unittest import mock
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={"room_pk": room.pk, "text": "ball arrives."},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        # The idmapper returns the cached instance; patch msg_contents
+        # on it so the handler's .get() resolves to our spy.
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        msg_contents.assert_called_once()
+        # MagicMock on the bound method: first positional is the text.
+        args, kwargs = msg_contents.call_args
+        self.assertEqual(args[0], "ball arrives.")
+        self.assertEqual(kwargs.get("exclude"), [])
+        self.assertIsNone(kwargs.get("from_obj"))
+
+    def test_room_msg_passes_exclude_pks_resolved_to_instances(self):
+        """exclude_pks are looked up locally and passed as exclude=."""
+        from unittest import mock
+
+        room = self._make_room()
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "exclude_pks": [excluded.pk],
+            },
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        excluded_passed = kwargs.get("exclude")
+        self.assertEqual(len(excluded_passed), 1)
+        self.assertEqual(excluded_passed[0].pk, excluded.pk)
+
+    def test_room_msg_skips_stale_exclude_pk_silently(self):
+        """A non-existent exclude pk is dropped without failing the message."""
+        from unittest import mock
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "exclude_pks": [999_999],
+            },
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        self.assertEqual(kwargs.get("exclude"), [])
+
+    def test_room_msg_resolves_from_obj_pk(self):
+        """from_obj_pk is looked up and passed as from_obj=."""
+        from unittest import mock
+
+        room = self._make_room()
+        sender = ObjectDB.objects.create(
+            db_key="alice", db_typeclass_path=TYPECLASS,
+        )
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "alice says hi.",
+                "from_obj_pk": sender.pk,
+            },
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        from_obj_passed = kwargs.get("from_obj")
+        self.assertIsNotNone(from_obj_passed)
+        self.assertEqual(from_obj_passed.pk, sender.pk)
+
+    def test_room_msg_stale_from_obj_pk_becomes_none(self):
+        """Non-existent from_obj_pk drops attribution but still delivers."""
+        from unittest import mock
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "from_obj_pk": 999_999,
+            },
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        self.assertIsNone(kwargs.get("from_obj"))
+
+    def test_room_msg_missing_room_logs_and_consumes(self):
+        """Room pk doesn't exist → log warning, return True, no msg_contents."""
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={"room_pk": 999_999, "text": "lost arrival."},
+            to_shard="shard0",
+            from_shard="shard1",
+        )
+        # No room created; the .get() raises DoesNotExist inside the
+        # handler, which logs and returns True. No msg_contents call
+        # can happen because no instance exists to receive it.
+        self.assertTrue(MessageHandler().handle(msg))
+
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
 class ProcessInboxTests(BaseEvenniaTestCase):
@@ -1027,6 +1179,15 @@ class _FakeCaller:
         # Set on the instance so it never accidentally collides with the
         # destination pk during ShardAwareCmdTeleport short-circuit checks.
         self.db_location_id = None
+        # `.location` is read by the cross-shard announce wiring. None
+        # is the in-limbo / no-source-room case; tests that exercise
+        # the announce path should set this explicitly.
+        self.location = None
+        # `.key` and `.pk` are read by the cross-shard success message
+        # and announce text composition. Test placeholders; tests can
+        # override these on the instance.
+        self.key = "fakecaller"
+        self.pk = 1
         # Lock-check surfaces. `permissions.check` is consulted on the
         # caller; `access` is consulted on the obj being teleported.
         # Defaults match the admin-bypass path so tests that don't care
@@ -3029,6 +3190,7 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
             db_location_id = None
             pk = 5
             key = "ball"
+            location = None  # no source room for announce wiring
             def access(self, accessing_obj, access_type, default=False):
                 return False  # lock denies, but Admin bypasses
             def __str__(self):
@@ -3066,6 +3228,7 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
             db_location_id = None
             pk = 5
             key = "ball"
+            location = None  # no source room for announce wiring
             def access(self, accessing_obj, access_type, default=False):
                 return True  # obj allows the teleport
             def __str__(self):
@@ -3182,6 +3345,202 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
         msg = "\n".join(cmd.caller.messages)
         self.assertIn("Teleported", msg)
         self.assertIn("newroom", msg)
+
+    # ── leave/arrive announces ────────────────────────────────────
+
+    def test_source_announce_fires_before_cross_shard_move(self):
+        """Source room sees leave-message; obj is excluded from it."""
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        # Tiny stand-in for the source room: capture msg_contents calls.
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        # Tiny obj stub with the attribute surface the announce reads.
+        class _Obj:
+            db_location_id = 2  # not equal to dest_pk so short-circuit doesn't fire
+            pk = 5
+            key = "ball"
+            location = source
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ):
+                cmd.func()
+
+        # Source's msg_contents called once with the leave text + the
+        # obj in the exclude list.
+        source.msg_contents.assert_called_once()
+        args, kwargs = source.msg_contents.call_args
+        text = args[0]
+        self.assertIn("ball", text)
+        self.assertIn("leaving", text)
+        self.assertIn("Limbo", text)
+        self.assertIn("newroom", text)
+        self.assertEqual(kwargs["exclude"], [cmd.obj_to_teleport])
+
+    def test_quiet_suppresses_source_announce(self):
+        """/quiet means the source room sees nothing."""
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = source
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd(switches=["quiet"])
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ):
+                cmd.func()
+
+        source.msg_contents.assert_not_called()
+
+    def test_no_source_announce_when_obj_has_no_location(self):
+        """obj.location=None → no source-side announce (no room to tell)."""
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        class _Obj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            location = None
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        # No exception, no source.msg_contents to assert against.
+        # Destination still gets announced (different room).
+        send_room.assert_called_once()
+
+    def test_destination_announce_routes_via_bus_helper(self):
+        """Post-move, send_cross_shard_room_message is called for the dest."""
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = source
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        send_room.assert_called_once()
+        args, kwargs = send_room.call_args
+        self.assertEqual(args[0], 99)  # dest_pk
+        text = args[1]
+        self.assertIn("ball", text)
+        self.assertIn("arrives", text)
+        self.assertIn("Limbo", text)  # source name in payload
+        self.assertEqual(kwargs.get("exclude_pks"), [5])  # obj's pk
+
+    def test_quiet_suppresses_destination_announce(self):
+        """/quiet means no bus-side broadcast for the destination room."""
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = None  # no source either, simpler stub
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd(switches=["quiet"])
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        send_room.assert_not_called()
 
 
 @override_settings(
@@ -3969,6 +4328,138 @@ class SendCrossShardMessageTests(BaseEvenniaTestCase):
 
         self.assertTrue(result)
         self.assertEqual(captured, [kwargs])
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)
+class SendCrossShardRoomMessageTests(BaseEvenniaTestCase):
+    """Sender-side helper built on top of the ``room_msg`` primitive.
+
+    Parallel structure to ``SendCrossShardMessageTests``: local-vs-
+    remote dispatch, validation rejection on target-gone, and the
+    bus-row shape produced for remote delivery. Receiver-side
+    ``room_msg`` handler behaviour is covered in ``MessageHandlerTests``.
+    """
+
+    def _make_room(self, shard_id="shard0", key="room"):
+        target = ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+        if shard_id != "shard0":
+            _forge_db_shard(target.pk, shard_id)
+        return target
+
+    def test_local_room_calls_msg_contents_directly_no_bus_row(self):
+        """Room on this shard → direct .msg_contents, no Message inserted."""
+        from unittest import mock
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="shard0")
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            result = send_cross_shard_room_message(
+                room.pk, "ball arrives."
+            )
+
+        self.assertTrue(result)
+        spy.assert_called_once()
+        args, kwargs = spy.call_args
+        self.assertEqual(args[0], "ball arrives.")
+        self.assertEqual(kwargs.get("exclude"), [])
+        self.assertIsNone(kwargs.get("from_obj"))
+        # No bus row inserted for the local-fast-path.
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_remote_room_inserts_bus_row_with_payload(self):
+        """Room on another shard → room_msg bus row addressed to that shard."""
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="shard1")
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+
+        result = send_cross_shard_room_message(
+            room.pk,
+            "ball arrives.",
+            exclude_pks=[excluded.pk],
+            from_obj_pk=excluded.pk,
+        )
+
+        self.assertTrue(result)
+        rows = list(Message.objects.filter(kind="room_msg"))
+        self.assertEqual(len(rows), 1)
+        msg = rows[0]
+        self.assertEqual(msg.to_shard, "shard1")
+        self.assertEqual(msg.payload["room_pk"], room.pk)
+        self.assertEqual(msg.payload["text"], "ball arrives.")
+        self.assertEqual(msg.payload["exclude_pks"], [excluded.pk])
+        self.assertEqual(msg.payload["from_obj_pk"], excluded.pk)
+
+    def test_remote_room_omits_optional_fields_when_unused(self):
+        """exclude_pks / from_obj_pk left out of payload when not passed."""
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="shard1")
+        send_cross_shard_room_message(room.pk, "ball arrives.")
+
+        msg = Message.objects.get(kind="room_msg")
+        self.assertNotIn("exclude_pks", msg.payload)
+        self.assertNotIn("from_obj_pk", msg.payload)
+
+    def test_global_sentinel_room_is_local(self):
+        """shard_id='*' rooms count as local — direct msg_contents."""
+        from unittest import mock
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="*")
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            self.assertTrue(send_cross_shard_room_message(room.pk, "hi."))
+
+        spy.assert_called_once()
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_missing_room_logs_and_returns_false(self):
+        """Non-existent room pk → False, warning logged, no bus row."""
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        result = send_cross_shard_room_message(999_999, "ghost.")
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_local_path_resolves_optional_pks_to_instances(self):
+        """exclude / from_obj resolved locally and passed to msg_contents."""
+        from unittest import mock
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="shard0")
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+        sender = ObjectDB.objects.create(
+            db_key="alice", db_typeclass_path=TYPECLASS,
+        )
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            send_cross_shard_room_message(
+                room.pk, "hi.",
+                exclude_pks=[excluded.pk],
+                from_obj_pk=sender.pk,
+            )
+
+        _, kwargs = spy.call_args
+        ex_passed = kwargs.get("exclude")
+        self.assertEqual(len(ex_passed), 1)
+        self.assertEqual(ex_passed[0].pk, excluded.pk)
+        from_obj_passed = kwargs.get("from_obj")
+        self.assertEqual(from_obj_passed.pk, sender.pk)
 
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD)

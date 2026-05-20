@@ -6,6 +6,33 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-20 — `@tel`: cross-shard leave/arrive announces via new `room_msg` bus kind
+
+Closes the announce gap on cross-shard movement. Vanilla's `move_to` fires `announce_move_from` on the source room and `announce_move_to` on the destination room; `cross_shard_move` bypasses `move_to` entirely (atomic DB update + session redirect, no per-room hook firing), so both announces silently dropped — a stationary observer in the source room saw no departure, a stationary observer in the destination saw no arrival.
+
+The earlier framing of "destination-side announce is architecturally not doable" turned out to be wrong. Re-using the same fire-and-forget bus pattern as `flush_from_cache` makes it straightforward: source process tells destination process to run a local `msg_contents` against a foreign room.
+
+Fix has three layers:
+
+- **New bus kind: `room_msg`**. Multicast variant in the `*_msg` family: payload `{"room_pk": <int>, "text": <str>, "exclude_pks": [<int>, ...]?, "from_obj_pk": <int>?}`. Receiver looks up the room and calls `room.msg_contents(text, exclude=..., from_obj=...)`. Sender composes; receiver is dumb. Optional pks (`exclude_pks` / `from_obj_pk`) are hints — pks that don't resolve are dropped silently rather than failing the whole message (losing a hint is strictly better than losing the broadcast). Misroute of the primary `room_pk` trips the chokepoint and follows the standard defer → undeliverable-reply path, same as `obj_msg`.
+- **New sender helper: `send_cross_shard_room_message`**. Mirrors `send_cross_shard_message`'s shape: one `values_list` to read the room's `shard_id`; local-fast-path if the room is on this shard (calls `room.msg_contents` directly, no bus hop); otherwise queues a `room_msg` bus row. Optional pks resolved locally on the fast-path, serialised into the payload on the remote path.
+- **Wired into `ShardAwareCmdTeleport.func`**. Source-side announce fires synchronously before `cross_shard_move` via the local source room's `msg_contents` (source room is local in this branch, since obj is local). Destination-side announce fires after `cross_shard_move` via `send_cross_shard_room_message` (destination is foreign, so the bus path is what gets exercised). Both gated on `/quiet`. Caller-facing confirmation is **not** gated — fixing a separate inversion bug where our previous `/quiet` implementation silenced the caller, opposite to vanilla. Vanilla's `/quiet` only suppresses room announces; the caller always sees confirmation. Test pinned the corrected behaviour.
+
+A new bus kind was preferred over baking an `announce_arrival` specific kind in for one consumer. The library shouldn't own the announce concept (a game-layer notion) — `room_msg` is infrastructure ("broadcast to a room across shards") and the announce composition is game-layer code in the consumer or in `ShardAwareCmdTeleport.func`. Other future use cases — cross-shard world events, system messages targeting specific foreign rooms, eventual cross-shard chat — share the primitive.
+
+Smoke-tested in the demo gamedirs by leaving an observer character in Limbo on shard0 and teleporting another character (root) cross-shard twice:
+
+| Step | Observer in Limbo sees |
+|---|---|
+| root teleports Limbo → newroom (shard1) | `root is leaving Limbo, heading for newroom.` |
+| root teleports newroom (shard1) → Limbo | `root arrives from newroom.` |
+
+(The "has entered the game" system message that follows is the known cross-shard re-login artifact, unrelated.)
+
+`/quiet` verified separately to suppress both announces while still emitting the caller-facing confirmation.
+
+**Files:** `src/evennia_shards/messagebus.py` (new `_handle_room_msg`), `src/evennia_shards/messaging.py` (new `send_cross_shard_room_message`), `src/evennia_shards/__init__.py` (export), `src/evennia_shards/teleport.py` (announce wiring + `/quiet` fix), `src/evennia_shards/tests.py` (+17 tests: 6 receiver-handler, 6 sender helper, 5 announce wiring; existing `/quiet` test rewritten to assert vanilla-aligned behaviour). `DESIGN/cross-shard-message-bus.md` and `DESIGN/library-integration-risks.md` updated. Suite at 280. Branch: `shard-aware-teleport`.
+
 ### 2026-05-20 — `@tel`: obj-side `teleport` lock check added to cross-shard branch
 
 Closes the security-consistency gap that emerged from the dispatch design: the both-targets-local branch delegated to vanilla `super().func()` and therefore honoured vanilla's [`caller.permissions.check("Admin") or obj.access(caller, "teleport")`](https://github.com/evennia/evennia/blob/main/evennia/commands/default/building.py) check at building.py:3922, but the cross-shard branch bypassed `super().func()` entirely and silently skipped the check. A `teleport`-locked obj that was unteleportable locally became teleportable cross-shard — wrong direction.

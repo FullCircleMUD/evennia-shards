@@ -262,16 +262,6 @@ class ShardAwareCmdTeleport(CmdTeleport):
         # Behaviour intentionally skipped in this first cut (worth
         # documenting so future readers don't think it's an oversight):
         #
-        # - announce_move_from on the source room. Vanilla's move_to
-        #   fires this and the source room's other occupants would
-        #   see "X left." cross_shard_move bypasses move_to
-        #   (atomic DB update + session redirect, no per-room hook
-        #   firing), so the announce is silently dropped. If we want
-        #   the announce, source_location.msg_contents(...) would
-        #   need to be called explicitly before the cross-shard call.
-        # - announce_move_to on the destination room. Impossible from
-        #   the source process — the destination row is on the
-        #   foreign shard and we can't reach its contents handler.
         # - Vanilla's "teleport_here" lock check on the destination
         #   (CmdTeleport.func lines 3928-3935). The destination row
         #   lives on the foreign shard, so we can't evaluate its lock
@@ -279,6 +269,22 @@ class ShardAwareCmdTeleport(CmdTeleport):
         #   that primitive lands. The obj-side "teleport" lock is
         #   checked above; only the destination-side check is missing.
         from .handoff import cross_shard_move
+        from .messaging import send_cross_shard_room_message
+
+        # Source-side announce — vanilla's announce_move_from. Source
+        # room is local (obj is local in this branch); fire a regular
+        # msg_contents before the move, while the obj is still in the
+        # room's contents. /quiet suppresses this — mirroring vanilla
+        # at move_to(quiet=...). The obj itself is excluded so it
+        # doesn't see the leave message about itself.
+        dest_display = self.dest_key or f"#{self.dest_pk}"
+        source = self.obj_to_teleport.location
+        if "quiet" not in self.switches and source is not None:
+            source.msg_contents(
+                f"{self.obj_to_teleport.key} is leaving {source.key}, "
+                f"heading for {dest_display}.",
+                exclude=[self.obj_to_teleport],
+            )
 
         try:
             result = cross_shard_move(
@@ -290,16 +296,29 @@ class ShardAwareCmdTeleport(CmdTeleport):
             )
             return
 
+        # Destination-side announce — vanilla's announce_move_to. The
+        # destination room is on the foreign shard, so we route via
+        # the room_msg bus kind. Sender composes the text (source name
+        # included as attribution), receiver looks up the room and
+        # fans out via msg_contents. /quiet suppresses both this and
+        # the source-side announce, matching vanilla.
+        if "quiet" not in self.switches:
+            source_name = source.key if source is not None else "elsewhere"
+            send_cross_shard_room_message(
+                self.dest_pk,
+                f"{self.obj_to_teleport.key} arrives from {source_name}.",
+                exclude_pks=[self.obj_to_teleport.pk],
+            )
+
         # Caller always sees a confirmation — vanilla CmdTeleport.func
         # at building.py:3949 emits "Teleported X -> Y." unconditionally;
         # the /quiet switch only suppresses the source/destination room
-        # announces (which the cross-shard branch wires separately).
+        # announces (the two msg_contents calls above), not this one.
         who = (
             "you"
             if self.obj_to_teleport == self.caller
             else self.obj_to_teleport.key
         )
-        dest_display = self.dest_key or f"#{self.dest_pk}"
         self.caller.msg(
             f"Teleported {who} -> {dest_display} on shard "
             f"{self.dest_shard!r}. (objects_moved={result.objects_moved}, "

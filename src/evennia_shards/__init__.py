@@ -22,7 +22,7 @@ from .messagebus import (
     send_message,
     start_message_bus,
 )
-from .messaging import send_cross_shard_message
+from .messaging import send_cross_shard_message, send_cross_shard_room_message
 from .search import ShardSearchResult, shard_aware_global_search
 from .tickets import create_ticket, delete_ticket, get_ticket
 
@@ -45,6 +45,7 @@ __all__ = [
     "process_inbox",
     "start_message_bus",
     "send_cross_shard_message",
+    "send_cross_shard_room_message",
     "create_ticket",
     "get_ticket",
     "delete_ticket",
