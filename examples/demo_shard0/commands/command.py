@@ -10,9 +10,11 @@ from evennia.commands.command import Command as BaseCommand
 # from evennia import default_cmds
 
 
-# Note: CmdShardCheck, CmdCrossShardDig, and CmdCrossShardMove were
-# promoted to the library and are now auto-installed into
+# Note: CmdShardCheck and CmdCrossShardDig are auto-installed into
 # CharacterCmdSet by AppConfig.ready(). See evennia_shards/commands.py.
+# Cross-shard movement is invoked via the shard-aware @teleport
+# override (see evennia_shards/teleport.py); there is no separate
+# cross_shard_move admin command.
 
 
 # =============================================================================

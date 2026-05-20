@@ -6,6 +6,16 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-20 — `CmdCrossShardMove` removed; `@tel` is the in-game entrypoint
+
+With [`ShardAwareCmdTeleport`](library-integration-risks.md#cmdteleport--narrow-override-delegate-to-vanilla-when-local) landing — vanilla `@tel` that transparently dispatches local or cross-shard via the same `cross_shard_character_move` primitive — the dedicated `cross_shard_move` admin command became redundant. Two ways to do the same thing forces admins to remember which one to use; one way is cleaner. `CmdCrossShardMove` removed from the library; the matching `CmdCrossShardMoveTests` removed; `AdminCommandAutoInstallTests` no longer asserts the key; the demo-gamedir stub-comment updated.
+
+The `cross_shard_character_move` primitive itself is unchanged — every consumer that was previously calling it directly (FCM, the library's own `@tel` override) continues to. What's gone is only the in-game command surface that wrapped it.
+
+Migration for consumers: anywhere `cross_shard_move <shard> <room_pk>` was typed in-game, type `@tel #<room_pk>` instead. The override resolves the target's shard from the dbref and routes the move via the same primitive.
+
+**Files:** `src/evennia_shards/commands.py` (CmdCrossShardMove deleted), `src/evennia_shards/apps.py` (no longer auto-installed), `src/evennia_shards/tests.py` (CmdCrossShardMoveTests deleted), `examples/demo_shard0/commands/command.py` (comment updated). Branch: `shard-aware-teleport`.
+
 ### 2026-05-18 — `CmdCrossShardMove` promoted from demo into library
 
 The cross-shard movement admin command had been living in

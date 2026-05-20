@@ -76,10 +76,15 @@ class ShardAwareCmdTeleport(CmdTeleport):
         self.destination = None
 
         # Extra routing fields (None when not applicable / not found).
+        # _key fields are populated regardless of locality so the
+        # cross-shard branch can produce a readable success message
+        # without needing a foreign-row instance.
         self.obj_pk = None
         self.obj_shard = None
+        self.obj_key = None
         self.dest_pk = None
         self.dest_shard = None
+        self.dest_key = None
 
         # Mirror vanilla's three-call structure with shard-aware lookups.
         if self.rhs:
@@ -98,12 +103,14 @@ class ShardAwareCmdTeleport(CmdTeleport):
             self.obj_to_teleport = obj_result.obj  # None if cross-shard
             self.obj_pk = obj_result.pk
             self.obj_shard = obj_result.shard_id
+            self.obj_key = obj_result.db_key
 
             dest_result = shard_aware_global_search(self.caller, self.rhs)
             if dest_result.state == "found":
                 self.destination = dest_result.obj  # None if cross-shard
                 self.dest_pk = dest_result.pk
                 self.dest_shard = dest_result.shard_id
+                self.dest_key = dest_result.db_key
             # If destination not found, vanilla func() handles the
             # "Destination not found." message via its existing
             # `if not destination: ...` guard.
@@ -114,6 +121,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
                 self.destination = dest_result.obj  # None if cross-shard
                 self.dest_pk = dest_result.pk
                 self.dest_shard = dest_result.shard_id
+                self.dest_key = dest_result.db_key
 
     def func(self):
         # Branch 1 — /tonone. Vanilla's body handles obj at /tonone time;
@@ -122,13 +130,14 @@ class ShardAwareCmdTeleport(CmdTeleport):
         if "tonone" in self.switches:
             if self.obj_to_teleport is None:
                 # Foreign obj — vanilla would crash on the next
-                # attribute access. Refuse with the pointer to the
-                # cross-shard primitive.
+                # attribute access. Refuse with a pointer to the
+                # workflow that brings the obj into reach.
                 self.caller.msg(
                     f"|rCross-shard /tonone not yet implemented.|n "
                     f"Object {self.lhs!r} is on shard "
-                    f"{self.obj_shard!r}; switch shards first with "
-                    f"|wcross_shard_move|n."
+                    f"{self.obj_shard!r}; teleport yourself to that "
+                    f"shard first (|w@tel <room_on_{self.obj_shard}>|n) "
+                    f"and run /tonone there."
                 )
                 return
             super().func()
@@ -153,18 +162,122 @@ class ShardAwareCmdTeleport(CmdTeleport):
             self.caller.msg(
                 f"|rCross-shard teleport of a foreign object not "
                 f"yet implemented.|n Object {self.lhs!r} is on shard "
-                f"{self.obj_shard!r}; switch shards first with "
-                f"|wcross_shard_move|n."
+                f"{self.obj_shard!r}; teleport yourself to that shard "
+                f"first (|w@tel <room_on_{self.obj_shard}>|n) and "
+                f"teleport the object locally from there."
             )
             return
 
-        # obj is local, destination is cross-shard. This is the
-        # "I want to teleport (myself or a local object) to a room on
-        # another shard" path — wraps cross_shard_character_move.
-        # Stub for now.
+        # obj is local, destination is cross-shard. The "I want to
+        # teleport (myself or a local object) to a room on another
+        # shard" path — wraps the library's cross_shard_character_move
+        # primitive.
+        #
+        # /loc and /intoexit modifiers on a cross-shard destination
+        # are refused for now (separate future work):
+        #
+        # - /loc means "go to destination.location" instead of to
+        #   destination itself. Resolving that requires reading the
+        #   destination row's db_location_id without loading the
+        #   instance (another values_list query) and then re-routing
+        #   the move against that pk. Workable but not in this first
+        #   cut.
+        # - /intoexit means "land inside the exit object". The exit
+        #   row lives on the foreign shard and the move target would
+        #   be the exit's own pk rather than its destination. Rare
+        #   admin scenario, not in this first cut.
+        if "loc" in self.switches:
+            self.caller.msg(
+                f"|rCross-shard /loc not yet supported.|n The "
+                f"destination is on shard {self.dest_shard!r}; "
+                f"resolve its location pk first and teleport directly "
+                f"to that pk (|w@tel #<location_pk>|n)."
+            )
+            return
+        if "intoexit" in self.switches:
+            self.caller.msg(
+                f"|rCross-shard /intoexit not yet supported.|n The "
+                f"exit is on shard {self.dest_shard!r}; teleport to "
+                f"its dbref directly (|w@tel #<exit_pk>|n) — without "
+                f"/intoexit, @tel into an exit object lands inside "
+                f"the exit on the destination shard."
+            )
+            return
+
+        # Behaviour intentionally skipped in this first cut (worth
+        # documenting so future readers don't think it's an oversight):
+        #
+        # - announce_move_from on the source room. Vanilla's move_to
+        #   fires this and the source room's other occupants would
+        #   see "X left." cross_shard_character_move bypasses move_to
+        #   (atomic DB update + session redirect, no per-room hook
+        #   firing), so the announce is silently dropped. If we want
+        #   the announce, source_location.msg_contents(...) would
+        #   need to be called explicitly before the cross-shard call.
+        # - announce_move_to on the destination room. Impossible from
+        #   the source process — the destination row is on the
+        #   foreign shard and we can't reach its contents handler.
+        # - Vanilla's "teleport" / "teleport_here" lock checks
+        #   (CmdTeleport.func lines 3922-3935). The obj's "teleport"
+        #   lock is checkable locally (we have the instance), but
+        #   "teleport_here" on the destination requires the foreign
+        #   instance. For consistency, both are skipped here and we
+        #   lean on cross_shard_character_move's own validation
+        #   (target_shard configured, target row exists and is on
+        #   target_shard).
+        from .handoff import cross_shard_character_move
+
+        # Remember whether the object was puppeted before the move —
+        # the primitive doesn't clear obj.db_account (deliberately;
+        # destination's puppet_object overwrites it on arrival), so
+        # has_account is still readable after, but checking before
+        # the move keeps the meaning explicit ("was this puppeted at
+        # the moment of teleport").
+        was_puppeted = self.obj_to_teleport.has_account
+
+        try:
+            result = cross_shard_character_move(
+                self.obj_to_teleport, self.dest_shard, self.dest_pk
+            )
+        except Exception as exc:
+            self.caller.msg(
+                f"|rCross-shard teleport failed:|n {exc}"
+            )
+            return
+
+        # Detection hook for the contents-cache-stale issue. A
+        # puppeted object's session redirects to the destination
+        # shard and re-puppets there, which triggers a full look that
+        # refreshes the destination room's contents view for the
+        # arriving player. An unpuppeted object (item, dropped corpse,
+        # etc.) has no such trigger: the DB row is updated and the
+        # source shard's idmapper is evicted, but the destination
+        # shard's contents-cache of the new room is not refreshed
+        # cross-process, so the object appears to be "in" the room
+        # per the DB while not appearing in the room's `look` output.
+        #
+        # For now, just announce when we hit the unpuppeted case so
+        # the dispatch is provable. The actual refresh logic (force
+        # reload of the destination room's contents on the destination
+        # shard) is the next step once detection is verified.
+        if not was_puppeted:
+            self.caller.msg(
+                "|y[debug]|n Object moved is NOT puppetted — destination "
+                "room's contents cache may be stale until refreshed."
+            )
+
+        if "quiet" in self.switches:
+            return
+
+        who = (
+            "you"
+            if self.obj_to_teleport == self.caller
+            else self.obj_to_teleport.key
+        )
+        dest_display = self.dest_key or f"#{self.dest_pk}"
         self.caller.msg(
-            f"|rCross-shard teleport to foreign destination not yet "
-            f"implemented.|n Destination is on shard "
-            f"{self.dest_shard!r} (pk={self.dest_pk!r}). "
-            f"Use |wcross_shard_move|n directly for now."
+            f"Teleported {who} -> {dest_display} on shard "
+            f"{self.dest_shard!r}. (objects_moved={result.objects_moved}, "
+            f"sessions_redirected={result.sessions_redirected}, "
+            f"failures={len(result.failures)})"
         )

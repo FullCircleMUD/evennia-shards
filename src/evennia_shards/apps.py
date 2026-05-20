@@ -179,13 +179,11 @@ class EvenniaShardsConfig(AppConfig):
                         _original_at_cmdset_creation(self)
                         from .commands import (
                             CmdCrossShardDig,
-                            CmdCrossShardMove,
                             CmdShardCheck,
                         )
 
                         self.add(CmdShardCheck())
                         self.add(CmdCrossShardDig())
-                        self.add(CmdCrossShardMove())
 
                     CharacterCmdSet.at_cmdset_creation = (
                         _shard_aware_at_cmdset_creation

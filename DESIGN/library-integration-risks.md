@@ -151,9 +151,9 @@ How to check: diff upstream `CmdIC.func` and `CmdOOC.func` bodies against what `
 
 The override has a narrow design: stay close to vanilla. The class subclasses `CmdTeleport`. `parse()` mirrors vanilla's structure 1:1, substituting the three `caller.search` calls with [`shard_aware_global_search`](shard-aware-search.md) (which returns either a loaded instance for a local match or pk + shard_id for a foreign match). `func()` dispatches into three branches:
 
-1. **`/tonone`** — vanilla logic if `obj_to_teleport` is local. If foreign, refuse with a pointer to `cross_shard_move`.
+1. **`/tonone`** — vanilla logic if `obj_to_teleport` is local. If foreign, refuse with a pointer to the "teleport yourself to that shard first, then run /tonone locally" workflow.
 2. **Both local** — delegate to vanilla `super().func()` unchanged. All vanilla behaviour (lock checks, equality checks, `/loc` / `/intoexit` / `/quiet`, the move itself, announce messages, failure paths) runs untouched. This is the common case.
-3. **Cross-shard** — route via the library's `cross_shard_character_move` primitive when the destination is foreign and the object is local. (The foreign-object case is refused with the cross_shard_move pointer; supporting it would require a remote-execute primitive the library does not currently provide.)
+3. **Cross-shard** — route via the library's `cross_shard_character_move` primitive when the destination is foreign and the object is local. (The foreign-object case is refused with the same "teleport yourself across first" pointer; supporting it would require a remote-execute primitive the library does not currently provide.)
 
 The branch where both targets are local — by far the common case in practice — runs vanilla code verbatim. The cross-shard branch wraps an existing library primitive. The structure imitates rather than reimplements; the override surface area is minimal.
 

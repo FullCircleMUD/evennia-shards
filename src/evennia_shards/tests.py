@@ -1031,88 +1031,6 @@ class CmdCrossShardDigTests(BaseEvenniaTestCase):
         self.assertIn("shard1", msg)
 
 
-@override_settings(
-    SHARD_ID="shard0", SHARDS_ROLE=ROLE_SHARD,
-    SHARD_URLS={
-        "shard0": "ws://localhost:4011/",
-        "shard1": "ws://localhost:4021/",
-    },
-)
-class CmdCrossShardMoveTests(BaseEvenniaTestCase):
-    """``CmdCrossShardMove`` delegates to ``cross_shard_character_move``."""
-
-    def _make_cmd(self, args=""):
-        from evennia_shards.commands import CmdCrossShardMove
-
-        cmd = CmdCrossShardMove()
-        cmd.args = args
-        cmd.caller = _FakeCaller()
-        return cmd
-
-    def test_no_args_shows_usage(self):
-        cmd = self._make_cmd("")
-        cmd.func()
-        self.assertIn("Usage:", cmd.caller.messages[0])
-
-    def test_one_arg_shows_usage(self):
-        cmd = self._make_cmd("shard1")
-        cmd.func()
-        self.assertIn("Usage:", cmd.caller.messages[0])
-
-    def test_non_integer_room_pk_reports_error(self):
-        cmd = self._make_cmd("shard1 not_an_int")
-        cmd.func()
-        msg = "\n".join(cmd.caller.messages)
-        self.assertIn("must be an integer", msg)
-
-    def test_unknown_shard_id_reports_error_no_primitive_call(self):
-        from unittest import mock
-
-        with mock.patch(
-            "evennia_shards.handoff.cross_shard_character_move"
-        ) as primitive:
-            cmd = self._make_cmd("nonexistent_shard 42")
-            cmd.func()
-        msg = "\n".join(cmd.caller.messages)
-        self.assertIn("nonexistent_shard", msg)
-        self.assertIn("not configured", msg)
-        # Validation precedes the call: primitive never invoked.
-        primitive.assert_not_called()
-
-    def test_calls_primitive_with_parsed_args(self):
-        from unittest import mock
-        from evennia_shards.handoff import MoveResult
-
-        with mock.patch(
-            "evennia_shards.handoff.cross_shard_character_move",
-            return_value=MoveResult(
-                objects_moved=1, sessions_redirected=1, failures=[],
-            ),
-        ) as primitive:
-            cmd = self._make_cmd("shard1 42")
-            cmd.func()
-
-        primitive.assert_called_once_with(cmd.caller, "shard1", 42)
-        msg = "\n".join(cmd.caller.messages)
-        self.assertIn("Move complete", msg)
-        self.assertIn("objects_moved=1", msg)
-        self.assertIn("sessions_redirected=1", msg)
-        self.assertIn("failures=0", msg)
-
-    def test_primitive_exception_surfaces_as_error_message(self):
-        from unittest import mock
-
-        with mock.patch(
-            "evennia_shards.handoff.cross_shard_character_move",
-            side_effect=RuntimeError("boom"),
-        ):
-            cmd = self._make_cmd("shard1 42")
-            cmd.func()
-        msg = "\n".join(cmd.caller.messages)
-        self.assertIn("cross_shard_character_move failed", msg)
-        self.assertIn("boom", msg)
-
-
 class AdminCommandAutoInstallTests(BaseEvenniaTestCase):
     """Library admin commands auto-install into ``CharacterCmdSet``.
 
@@ -1129,7 +1047,6 @@ class AdminCommandAutoInstallTests(BaseEvenniaTestCase):
         keys = {cmd.key for cmd in cmdset.commands}
         self.assertIn("@shard_check", keys)
         self.assertIn("cross_shard_dig", keys)
-        self.assertIn("cross_shard_move", keys)
 
 
 @override_settings(
