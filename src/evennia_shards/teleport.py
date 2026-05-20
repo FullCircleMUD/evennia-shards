@@ -23,6 +23,25 @@ from evennia.commands.default.building import CmdTeleport
 from .search import shard_aware_global_search
 
 
+def _format_multiple(name: str, candidates: list) -> str:
+    """Render a disambiguation prompt from a multi-match search result.
+
+    ``candidates`` is the list of ``(pk, shard_id, db_key)`` triples that
+    :class:`~evennia_shards.search.ShardSearchResult` carries when more
+    than one row matched. Output shape:
+    ``"Multiple matches for 'tavern': #5 (Tavern, shard0), #12 (Tavern,
+    shard1) — specify by dbref."`` The caller has no way to pick between
+    rows without a dbref (foreign-shard rows aren't loadable here), so
+    the prompt steers them straight at ``#<pk>``.
+    """
+    rendered = ", ".join(
+        f"#{pk} ({key}, {shard})" for pk, shard, key in candidates
+    )
+    return (
+        f"Multiple matches for {name!r}: {rendered} — specify by dbref."
+    )
+
+
 class ShardAwareCmdTeleport(CmdTeleport):
     """Shard-aware override of Evennia's ``@teleport`` / ``@tel``.
 
@@ -93,11 +112,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
                 self.msg("Did not find object to teleport.")
                 raise InterruptCommand
             if obj_result.state == "multiple":
-                # TODO: render full disambiguation prompt like vanilla.
-                # For the scaffold, refuse and prompt for dbref.
-                self.msg(
-                    f"Multiple matches for {self.lhs!r}; specify by dbref."
-                )
+                self.msg(_format_multiple(self.lhs, obj_result.candidates))
                 raise InterruptCommand
             # state == "found"
             self.obj_to_teleport = obj_result.obj  # None if cross-shard
@@ -106,6 +121,9 @@ class ShardAwareCmdTeleport(CmdTeleport):
             self.obj_key = obj_result.db_key
 
             dest_result = shard_aware_global_search(self.caller, self.rhs)
+            if dest_result.state == "multiple":
+                self.msg(_format_multiple(self.rhs, dest_result.candidates))
+                raise InterruptCommand
             if dest_result.state == "found":
                 self.destination = dest_result.obj  # None if cross-shard
                 self.dest_pk = dest_result.pk
@@ -117,6 +135,9 @@ class ShardAwareCmdTeleport(CmdTeleport):
 
         elif self.lhs:
             dest_result = shard_aware_global_search(self.caller, self.lhs)
+            if dest_result.state == "multiple":
+                self.msg(_format_multiple(self.lhs, dest_result.candidates))
+                raise InterruptCommand
             if dest_result.state == "found":
                 self.destination = dest_result.obj  # None if cross-shard
                 self.dest_pk = dest_result.pk
@@ -201,6 +222,20 @@ class ShardAwareCmdTeleport(CmdTeleport):
                 f"its dbref directly (|w@tel #<exit_pk>|n) — without "
                 f"/intoexit, @tel into an exit object lands inside "
                 f"the exit on the destination shard."
+            )
+            return
+
+        # Mirror vanilla's "already at <destination>" short-circuit
+        # (CmdTeleport.func line 3917). Vanilla compares the obj's
+        # location instance against the destination instance; we don't
+        # have the destination instance (it's foreign), but pks are
+        # globally unique under the single-Postgres model, so a pk
+        # match on db_location_id is the same statement. Saves a no-op
+        # bus round-trip and matches the user-visible message.
+        if self.obj_to_teleport.db_location_id == self.dest_pk:
+            dest_display = self.dest_key or f"#{self.dest_pk}"
+            self.caller.msg(
+                f"{self.obj_to_teleport} is already at {dest_display}."
             )
             return
 

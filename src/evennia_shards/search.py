@@ -25,11 +25,13 @@ The result is a :class:`ShardSearchResult` with explicit ``state``
 (``"found"`` / ``"not_found"`` / ``"multiple"``) and the per-match data
 the caller needs to dispatch.
 
-Scope note: this initial cut handles dbref lookups (``#42``) and
-case-insensitive exact ``db_key`` matches. Alias matching, partial-name
-matching, and "here"/"me" specials that vanilla ``caller.search``
-supports are not implemented yet; if a consumer needs them the helper
-can grow without changing the call shape.
+Scope note: this initial cut handles dbref lookups (``#42``),
+case-insensitive exact ``db_key`` matches, alias matches (Tag rows
+with ``db_tagtype="alias"``), and the caller-relative specials
+``"me"`` / ``"self"`` / ``"here"`` that vanilla ``caller.search``
+supports. Partial / fuzzy name matching (vanilla's regex fallback
+when exact fails) is not implemented yet; if a consumer needs it the
+helper can grow without changing the call shape.
 """
 
 from dataclasses import dataclass, field
@@ -107,6 +109,36 @@ def shard_aware_global_search(
     if not name:
         return ShardSearchResult(state="not_found")
 
+    # Caller-relative specials. Vanilla caller.search resolves these
+    # before hitting the DB: "me"/"self" → the caller; "here" → the
+    # caller's location. Always local by construction — the caller is
+    # running this command on this process, so the caller row (and any
+    # location it's currently in) are reachable without any cross-shard
+    # routing. Degenerate case: a caller whose db_location_id points at
+    # a foreign-shard room will trip the from_db chokepoint when we
+    # read caller.location — left to raise here, since that's a broken
+    # state worth surfacing rather than papering over.
+    lowered = name.lower()
+    if lowered in ("me", "self"):
+        return ShardSearchResult(
+            state="found",
+            obj=caller,
+            pk=caller.pk,
+            shard_id=caller.shard_id,
+            db_key=caller.db_key,
+        )
+    if lowered == "here":
+        loc = caller.location
+        if loc is None:
+            return ShardSearchResult(state="not_found")
+        return ShardSearchResult(
+            state="found",
+            obj=loc,
+            pk=loc.pk,
+            shard_id=loc.shard_id,
+            db_key=loc.db_key,
+        )
+
     # dbref lookup
     pk_to_search: Optional[int] = None
     if name.startswith("#"):
@@ -118,7 +150,22 @@ def shard_aware_global_search(
     if pk_to_search is not None:
         qs = ObjectDB.objects.filter(pk=pk_to_search)
     else:
-        qs = ObjectDB.objects.filter(db_key__iexact=name)
+        # Match by db_key OR by an object alias. Aliases are stored as
+        # Tag rows with db_tagtype="alias" — note tagtype, NOT category;
+        # AliasHandler._tagtype = "alias" in evennia/typeclasses/tags.py.
+        # The AND inside the OR keeps the two tag predicates pinned to
+        # the same Tag row (within one filter() call, repeated
+        # db_tags__* lookups share one join), so we don't accidentally
+        # match objects that happen to carry a non-alias tag with the
+        # target key. distinct() collapses duplicates produced by the
+        # m2m OR. Matches vanilla's pattern in
+        # evennia/objects/manager.py ObjectDBManager.object_search.
+        from django.db.models import Q
+        qs = ObjectDB.objects.filter(
+            Q(db_key__iexact=name)
+            | (Q(db_tags__db_key__iexact=name)
+               & Q(db_tags__db_tagtype__iexact="alias"))
+        ).distinct()
 
     # Optional tag filter. Composes onto the same queryset — Django
     # joins ObjectDB to its m2m Tag table and ANDs the predicates into
