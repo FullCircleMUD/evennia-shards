@@ -6,6 +6,24 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-20 — `@tel`: obj-side `teleport` lock check added to cross-shard branch
+
+Closes the security-consistency gap that emerged from the dispatch design: the both-targets-local branch delegated to vanilla `super().func()` and therefore honoured vanilla's [`caller.permissions.check("Admin") or obj.access(caller, "teleport")`](https://github.com/evennia/evennia/blob/main/evennia/commands/default/building.py) check at building.py:3922, but the cross-shard branch bypassed `super().func()` entirely and silently skipped the check. A `teleport`-locked obj that was unteleportable locally became teleportable cross-shard — wrong direction.
+
+Fix: copy vanilla's check verbatim into the cross-shard branch, after `/loc` and `/intoexit` refusals and after the same-position short-circuit, before the call to `cross_shard_move`. Three lines, one new comment block. The "intentionally skipped" comment block below was trimmed to mention only `teleport_here` (destination-side), which remains deferred — the destination row lives on the foreign shard, so its lock can't be evaluated locally without a bus round-trip.
+
+Smoke-tested in the demo gamedirs with a non-Admin Builder account (`tim`):
+
+| Setup | Path | Result |
+|---|---|---|
+| root (superuser), `teleport:false()` on ball | cross-shard | succeeds (Admin bypass) |
+| tim (Builder, no Admin), `teleport:false()` on ball | cross-shard | refused with lock message |
+| tim (Builder, no Admin), `teleport:false()` on ball | local | refused with **same** lock message (vanilla parity) |
+
+The smoke test surfaced a separate Evennia subtlety worth noting for future test setup: `cmd:perm(Builder)` on `@tel` checks the **account's** permissions via the lockfunc (see [`evennia/locks/lockfuncs.py:163`](file:///c:/Users/micro/Documents/FCM/libraries/evennia-shards/venv/Lib/site-packages/evennia/locks/lockfuncs.py#L163)), whereas our in-func `caller.permissions.check("Admin")` checks the character's. Granting Builder to a character alone leaves the command invisible; the account also needs the permission (`@perm/account tim = Builder`). Two separate permission surfaces, both come into play.
+
+**Files:** `src/evennia_shards/teleport.py` (new check + trimmed skipped-behaviour comment), `src/evennia_shards/tests.py` (3 new tests: lock-blocks-non-admin, Admin-bypass, non-Admin-allowed-when-obj-grants-access; `_FakeCaller` extended with `permissions.check` / `access` surfaces). Suite at 263. `DESIGN/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
+
 ### 2026-05-20 — `@tel`: trivial vanilla-parity gaps closed
 
 Four small alignments with vanilla `CmdTeleport` / `caller.search`, each independently smoke-tested in the demo gamedirs (root teleporting + ball cross-shard with `me` / `here` / aliases / ambiguous names).

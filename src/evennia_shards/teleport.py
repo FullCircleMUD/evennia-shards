@@ -239,6 +239,26 @@ class ShardAwareCmdTeleport(CmdTeleport):
             )
             return
 
+        # Mirror vanilla's obj-side teleport-lock check
+        # (CmdTeleport.func line 3922). Obj is local in this branch,
+        # so we have the instance — Admin bypass or explicit
+        # `teleport` lock against the caller. Skipping this would
+        # leave a security inconsistency: local @tel honours the
+        # lock (via super().func()), cross-shard @tel would not.
+        # Destination-side `teleport_here` lock is NOT checked here —
+        # the destination row lives on another shard and there's no
+        # local way to evaluate its lock against the obj; that's a
+        # bus round-trip's worth of work, deferred.
+        if not (
+            self.caller.permissions.check("Admin")
+            or self.obj_to_teleport.access(self.caller, "teleport")
+        ):
+            self.caller.msg(
+                f"{self.obj_to_teleport} 'teleport'-lock blocks you "
+                f"from teleporting it anywhere."
+            )
+            return
+
         # Behaviour intentionally skipped in this first cut (worth
         # documenting so future readers don't think it's an oversight):
         #
@@ -252,14 +272,12 @@ class ShardAwareCmdTeleport(CmdTeleport):
         # - announce_move_to on the destination room. Impossible from
         #   the source process — the destination row is on the
         #   foreign shard and we can't reach its contents handler.
-        # - Vanilla's "teleport" / "teleport_here" lock checks
-        #   (CmdTeleport.func lines 3922-3935). The obj's "teleport"
-        #   lock is checkable locally (we have the instance), but
-        #   "teleport_here" on the destination requires the foreign
-        #   instance. For consistency, both are skipped here and we
-        #   lean on cross_shard_move's own validation
-        #   (target_shard configured, target row exists and is on
-        #   target_shard).
+        # - Vanilla's "teleport_here" lock check on the destination
+        #   (CmdTeleport.func lines 3928-3935). The destination row
+        #   lives on the foreign shard, so we can't evaluate its lock
+        #   against obj here without a bus round-trip. Deferred until
+        #   that primitive lands. The obj-side "teleport" lock is
+        #   checked above; only the destination-side check is missing.
         from .handoff import cross_shard_move
 
         try:

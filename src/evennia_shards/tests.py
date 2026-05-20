@@ -1021,12 +1021,25 @@ class _FakeCaller:
     these two.
     """
 
-    def __init__(self, search_returns=None):
+    def __init__(self, search_returns=None, is_admin=True, access_allowed=True):
         self.messages = []
         self.search_returns = search_returns
         # Set on the instance so it never accidentally collides with the
         # destination pk during ShardAwareCmdTeleport short-circuit checks.
         self.db_location_id = None
+        # Lock-check surfaces. `permissions.check` is consulted on the
+        # caller; `access` is consulted on the obj being teleported.
+        # Defaults match the admin-bypass path so tests that don't care
+        # about locks stay green. Override via kwargs when testing the
+        # lock branch itself.
+        import types
+        self.permissions = types.SimpleNamespace(
+            check=lambda name: is_admin
+        )
+        self._access_allowed = access_allowed
+
+    def access(self, accessing_obj, access_type, default=False):
+        return self._access_allowed
 
     def search(self, searchdata):
         return self.search_returns
@@ -2962,6 +2975,118 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
         primitive.assert_not_called()
         msg = "\n".join(cmd.caller.messages)
         self.assertIn("#99", msg)
+
+    def test_teleport_lock_blocks_non_admin_caller(self):
+        """obj.access(caller, 'teleport') == False on non-Admin → refuse.
+
+        Mirrors vanilla CmdTeleport.func line 3922's lock check. Without
+        this, a 'teleport'-locked obj would be teleportable cross-shard
+        despite vanilla refusing the same op locally — a security
+        inconsistency.
+        """
+        from unittest import mock
+
+        caller = _FakeCaller(is_admin=False)
+
+        class _LockedObj:
+            db_location_id = None
+            pk = 5
+            def access(self, accessing_obj, access_type, default=False):
+                return False  # 'teleport' lock denies
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _LockedObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move"
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(caller.messages)
+        self.assertIn("'teleport'-lock", msg)
+        self.assertIn("ball", msg)
+
+    def test_teleport_lock_bypassed_by_admin_caller(self):
+        """Admin permission bypasses the obj-side 'teleport' lock.
+
+        Even when obj.access returns False, an Admin caller proceeds —
+        exact mirror of vanilla's `caller.permissions.check("Admin") or
+        obj.access(caller, "teleport")` short-circuit.
+        """
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        caller = _FakeCaller(is_admin=True)  # default, made explicit
+
+        class _LockedObj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            def access(self, accessing_obj, access_type, default=False):
+                return False  # lock denies, but Admin bypasses
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _LockedObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_called_once_with(cmd.obj_to_teleport, "shard1", 99)
+
+    def test_teleport_lock_allows_non_admin_when_obj_grants_access(self):
+        """Non-Admin caller proceeds if obj.access returns True.
+
+        The `or` short-circuit: admin OR obj-grants-access. This test
+        covers the obj-grants-access path with a non-Admin caller.
+        """
+        from unittest import mock
+        from evennia_shards.handoff import MoveResult
+
+        caller = _FakeCaller(is_admin=False)
+
+        class _PermissiveObj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            def access(self, accessing_obj, access_type, default=False):
+                return True  # obj allows the teleport
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _PermissiveObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_called_once()
 
     def test_local_obj_foreign_dest_failure_emits_error(self):
         """If primitive raises, func surfaces the error and doesn't crash."""
