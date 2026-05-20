@@ -44,7 +44,7 @@ One output: a `ShardSearchResult` dataclass.
 
 Three states drive caller dispatch:
 
-- **`found`** — exactly one match. If `is_local`, `obj` is the loaded instance and the caller can use it as it would a vanilla search result. If `is_cross_shard`, `obj` is `None`; the caller routes via `cross_shard_character_move` (or another cross-shard primitive) using `pk` and `shard_id`.
+- **`found`** — exactly one match. If `is_local`, `obj` is the loaded instance and the caller can use it as it would a vanilla search result. If `is_cross_shard`, `obj` is `None`; the caller routes via `cross_shard_move` (or another cross-shard primitive) using `pk` and `shard_id`.
 - **`not_found`** — no match. The caller emits its own not-found message.
 - **`multiple`** — more than one match. `candidates` is populated so the caller can render its own disambiguation prompt with shard context (e.g. "found `room` on shard0 (#5) and shard1 (#2238) — specify by dbref").
 

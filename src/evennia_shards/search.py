@@ -162,7 +162,7 @@ def shard_aware_global_search(
         )
 
     # Cross-shard match — return metadata only; caller routes via
-    # cross_shard_character_move or equivalent primitive.
+    # cross_shard_move or equivalent primitive.
     return ShardSearchResult(
         state="found",
         obj=None,

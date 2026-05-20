@@ -170,7 +170,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
 
         # obj is local, destination is cross-shard. The "I want to
         # teleport (myself or a local object) to a room on another
-        # shard" path — wraps the library's cross_shard_character_move
+        # shard" path — wraps the library's cross_shard_move
         # primitive.
         #
         # /loc and /intoexit modifiers on a cross-shard destination
@@ -209,7 +209,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
         #
         # - announce_move_from on the source room. Vanilla's move_to
         #   fires this and the source room's other occupants would
-        #   see "X left." cross_shard_character_move bypasses move_to
+        #   see "X left." cross_shard_move bypasses move_to
         #   (atomic DB update + session redirect, no per-room hook
         #   firing), so the announce is silently dropped. If we want
         #   the announce, source_location.msg_contents(...) would
@@ -222,10 +222,10 @@ class ShardAwareCmdTeleport(CmdTeleport):
         #   lock is checkable locally (we have the instance), but
         #   "teleport_here" on the destination requires the foreign
         #   instance. For consistency, both are skipped here and we
-        #   lean on cross_shard_character_move's own validation
+        #   lean on cross_shard_move's own validation
         #   (target_shard configured, target row exists and is on
         #   target_shard).
-        from .handoff import cross_shard_character_move
+        from .handoff import cross_shard_move
 
         # Remember whether the object was puppeted before the move —
         # the primitive doesn't clear obj.db_account (deliberately;
@@ -236,7 +236,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
         was_puppeted = self.obj_to_teleport.has_account
 
         try:
-            result = cross_shard_character_move(
+            result = cross_shard_move(
                 self.obj_to_teleport, self.dest_shard, self.dest_pk
             )
         except Exception as exc:

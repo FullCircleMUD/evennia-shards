@@ -50,7 +50,7 @@ The hazard is a consumer overriding `onOpen()` on their custom class without cal
 **What we patch / extend:** `evennia/accounts/accounts.py` → `DefaultAccount.at_post_login`. Two role-specific patches, both installed via monkey-patch in `AppConfig.ready()`. Based on Evennia 6.0.0.
 
 - **Router** (`get_role() == ROLE_ROUTER`): full replacement → `evennia_shards/hooks.py` → `shard_aware_at_post_login`.
-- **Shard** (`get_role() == ROLE_SHARD`): thin wrapper around Evennia's original → `evennia_shards/hooks.py` → `make_shard_at_post_login(original)`. Flushes the `_last_puppet` character from the idmapper and refreshes it from the DB before delegating to the original. Needed because `cross_shard_character_move` on the source shard updates the character's `shard_id` in the DB, but the destination shard's Account Attribute-handler cache may still hold the stale Python object with the old `shard_id` — causing `puppet_object` to trip the `pre_save` chokepoint.
+- **Shard** (`get_role() == ROLE_SHARD`): thin wrapper around Evennia's original → `evennia_shards/hooks.py` → `make_shard_at_post_login(original)`. Flushes the `_last_puppet` character from the idmapper and refreshes it from the DB before delegating to the original. Needed because `cross_shard_move` on the source shard updates the character's `shard_id` in the DB, but the destination shard's Account Attribute-handler cache may still hold the stale Python object with the old `shard_id` — causing `puppet_object` to trip the `pre_save` chokepoint.
 
 **Why:**
 
@@ -97,7 +97,7 @@ A consumer that *doesn't* override `at_post_login` is safe by Python MRO — `ac
 
 The wrapper calls vanilla unmodified, then reads the new character's `db_location_id`'s `shard_id` via `.values_list` and overwrites the router auto-stamp. The character's shard is by definition the shard that owns its location row — there is no separate policy decision. The two `save()`s (vanilla's plus the wrapper's `update_fields=["shard_id"]`) are both router-side, exempt from the foreign-shard refusal in `pre_save`, so no bypass is needed.
 
-`DEFAULT_HOME` is not touched at chargen time — vanilla `create_character` does not set `db_home`, and any later cross-shard home transfer is a runtime move handled by `cross_shard_character_move`.
+`DEFAULT_HOME` is not touched at chargen time — vanilla `create_character` does not set `db_home`, and any later cross-shard home transfer is a runtime move handled by `cross_shard_move`.
 
 **Risk on Evennia upgrade:**
 
@@ -153,7 +153,7 @@ The override has a narrow design: stay close to vanilla. The class subclasses `C
 
 1. **`/tonone`** — vanilla logic if `obj_to_teleport` is local. If foreign, refuse with a pointer to the "teleport yourself to that shard first, then run /tonone locally" workflow.
 2. **Both local** — delegate to vanilla `super().func()` unchanged. All vanilla behaviour (lock checks, equality checks, `/loc` / `/intoexit` / `/quiet`, the move itself, announce messages, failure paths) runs untouched. This is the common case.
-3. **Cross-shard** — route via the library's `cross_shard_character_move` primitive when the destination is foreign and the object is local. (The foreign-object case is refused with the same "teleport yourself across first" pointer; supporting it would require a remote-execute primitive the library does not currently provide.)
+3. **Cross-shard** — route via the library's `cross_shard_move` primitive when the destination is foreign and the object is local. (The foreign-object case is refused with the same "teleport yourself across first" pointer; supporting it would require a remote-execute primitive the library does not currently provide.)
 
 The branch where both targets are local — by far the common case in practice — runs vanilla code verbatim. The cross-shard branch wraps an existing library primitive. The structure imitates rather than reimplements; the override surface area is minimal.
 

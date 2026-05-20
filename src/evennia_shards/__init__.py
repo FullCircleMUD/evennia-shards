@@ -12,7 +12,7 @@ from .config import (
     get_shard_url,
 )
 from .errors import MessageBusError, ShardIsolationError, TicketError
-from .handoff import MoveResult, cross_shard_character_move
+from .handoff import MoveResult, cross_shard_move
 from .isolation import shard_writes_allowed_for
 from .messagebus import (
     MessageHandler,
@@ -49,7 +49,7 @@ __all__ = [
     "get_ticket",
     "delete_ticket",
     "shard_writes_allowed_for",
-    "cross_shard_character_move",
+    "cross_shard_move",
     "MoveResult",
     "shard_aware_global_search",
     "ShardSearchResult",

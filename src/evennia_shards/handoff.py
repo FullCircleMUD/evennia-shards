@@ -8,10 +8,11 @@ puppeting sessions to the destination shard.
 
 Houses two public primitives:
 
-- :func:`cross_shard_character_move` — composes the full handoff for a
-  character and its inventory (recursive): validate, atomic DB writes
-  (inside :func:`shard_writes_allowed_for`), idmapper eviction,
-  per-session ticket+redirect.
+- :func:`cross_shard_move` — composes the full handoff for an
+  ``ObjectDB``-derived row and its full recursive inventory: validate,
+  atomic DB writes (inside :func:`shard_writes_allowed_for`), idmapper
+  eviction, per-session ticket+redirect (where applicable for
+  puppeted objects).
 - :func:`_redirect_to_character_shard` — the per-session redirect
   used by the move primitive, the ``ic`` command, and the
   ``at_post_login`` override.
@@ -79,10 +80,10 @@ MoveResult = namedtuple(
     "MoveResult",
     ["objects_moved", "sessions_redirected", "failures"],
 )
-"""Outcome of a :func:`cross_shard_character_move` call.
+"""Outcome of a :func:`cross_shard_move` call.
 
 - ``objects_moved`` (int): number of rows whose ``shard_id`` was
-  updated to the new shard (character + inventory contents).
+  updated to the new shard (the moved obj + its recursive inventory).
 - ``sessions_redirected`` (int): number of puppeting sessions for
   which a ticket was created and a ``shard_redirect`` OOB was sent.
 - ``failures`` (list[tuple]): per-session failure entries —
@@ -92,11 +93,13 @@ MoveResult = namedtuple(
 """
 
 
-def cross_shard_character_move(obj, target_shard, target_location_pk):
-    """Move ``obj`` and its inventory to ``target_shard``, into the room at ``target_location_pk``.
+def cross_shard_move(obj, target_shard, target_location_pk):
+    """Move ``obj`` and its inventory to ``target_shard``, into the row at ``target_location_pk``.
 
-    Moves the character and all recursive contents (inventory items,
-    bags-within-bags, etc.).  Contents' ``db_location_id`` is unchanged
+    Operates on any ``ObjectDB``-derived row — character, item, mob,
+    container, NPC, exit, etc. Moves the row itself plus all recursive
+    contents (inventory items, bags-within-bags, characters carried by
+    other characters, etc.).  Contents' ``db_location_id`` is unchanged
     — parent pk doesn't change across shards.  Contents with
     ``shard_id == "*"`` (globals) are left alone.
 
@@ -135,8 +138,11 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
        the returned :class:`MoveResult` and do not roll back the move.
 
     Args:
-        obj: an ``ObjectDB`` instance (typically a Character) on this
-            shard, to be moved to ``target_shard``.
+        obj: any ``ObjectDB``-derived instance on this shard, to be
+            moved to ``target_shard``. Characters are the most common
+            case (their puppeting sessions get redirected), but
+            unpuppeted objects (items, mobs, etc.) work identically —
+            sessions_redirected is simply zero.
         target_shard: the destination shard's ``SHARD_ID``. Must be a
             key in ``SHARD_URLS``.
         target_location_pk: pk of the destination row on the target
@@ -172,7 +178,7 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
         get_shard_url(target_shard)
     except (KeyError, ValueError) as exc:
         raise ShardIsolationError(
-            f"cross_shard_character_move: target_shard {target_shard!r} is not "
+            f"cross_shard_move: target_shard {target_shard!r} is not "
             f"configured (not present in SHARD_URLS)"
         ) from exc
 
@@ -183,13 +189,13 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
     )
     if not target_rows:
         raise ShardIsolationError(
-            f"cross_shard_character_move: target_location_pk {target_location_pk!r} "
+            f"cross_shard_move: target_location_pk {target_location_pk!r} "
             f"does not exist"
         )
     location_shard = target_rows[0]
     if location_shard != target_shard and location_shard != "*":
         raise ShardIsolationError(
-            f"cross_shard_character_move: target_location_pk {target_location_pk!r} "
+            f"cross_shard_move: target_location_pk {target_location_pk!r} "
             f"is on shard {location_shard!r}, not {target_shard!r}"
         )
 
@@ -306,7 +312,7 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
                 obj.tags.remove("puppeted", category="account")
             except Exception as exc:
                 logger.log_warn(
-                    f"cross_shard_character_move: puppeted tag removal "
+                    f"cross_shard_move: puppeted tag removal "
                     f"failed for obj pk={obj.pk}: {exc}"
                 )
     except Exception:
@@ -337,7 +343,7 @@ def cross_shard_character_move(obj, target_shard, target_location_pk):
             redirected += 1
         except Exception as exc:
             logger.log_warn(
-                f"cross_shard_character_move: redirect failed for session "
+                f"cross_shard_move: redirect failed for session "
                 f"{session!r} on obj pk={obj.pk}: {exc}"
             )
             failures.append((session, exc))
@@ -357,7 +363,7 @@ def _redirect_to_character_shard(account, session, character) -> str:
 
     - ``ShardAwareCmdIC`` (manual ``ic <char>``)
     - ``shard_aware_at_post_login`` (login-time auto-puppet)
-    - ``cross_shard_character_move`` (programmatic handoff)
+    - ``cross_shard_move`` (programmatic handoff)
 
     The caller is responsible for validating ``character.shard_id``
     before calling — this helper assumes a usable shard id (not
@@ -384,7 +390,7 @@ def _redirect_to_character_shard(account, session, character) -> str:
     # (sets True when a fresh ticket auth lands at the router) and
     # ``ShardAwareCmdIC.func`` (sets False on @ic). Touching it from
     # this helper would create a cross-process write whenever this
-    # function runs from a shard's Server (cross_shard_character_move)
+    # function runs from a shard's Server (cross_shard_move)
     # — the router would not see it.
 
     token = create_ticket(

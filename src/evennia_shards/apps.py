@@ -81,7 +81,7 @@ class EvenniaShardsConfig(AppConfig):
             # Shard: thin wrapper around Evennia's original that flushes
             #   stale idmapper/Attribute-cache entries for _last_puppet
             #   before auto-puppet. Needed because another process's
-            #   cross_shard_character_move may have updated the character's
+            #   cross_shard_move may have updated the character's
             #   shard_id in the DB while this process's Account Attribute
             #   cache still holds the old Python object.
             from evennia.accounts.accounts import DefaultAccount

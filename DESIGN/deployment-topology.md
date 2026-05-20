@@ -125,7 +125,7 @@ The library was built up across four cases, each a distinct deployment shape exe
 
 1. **Monolith.** Library installed; `SHARDS_ROLE` setting exposed but defaulting to `monolith`; library is dormant; game runs as native Evennia.
 2. **Split: router + 1 shard.** Auth/web/OOC on the router; the entire IC world on the shard. Exercises the ticket-based redirect protocol end-to-end.
-3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via the `cross_shard_character_move` primitive (atomic DB writes via the chokepoint bypass, recursive inventory move, idmapper eviction, per-session ticket redirect).
+3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via the `cross_shard_move` primitive (atomic DB writes via the chokepoint bypass, recursive inventory move, idmapper eviction, per-session ticket redirect).
 3b. **Multi-shard messaging.** Postgres-backed cross-shard message bus with player-facing delivery primitives (`obj_msg`, `account_msg`) and the `send_cross_shard_message` helper. Specialised consumer-level patterns (cross-shard tells, channel propagation) are deferred to `evennia_shards/contrib/`.
 
 Each case strictly builds on the previous.

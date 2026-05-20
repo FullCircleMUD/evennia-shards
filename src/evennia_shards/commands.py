@@ -14,7 +14,7 @@ Two flavours of commands live here:
   Injected by patching ``CharacterCmdSet.at_cmdset_creation`` in
   ``AppConfig.ready()``. Cross-shard movement is exposed through the
   shard-aware ``@teleport`` override (see ``teleport.py``) rather than
-  a dedicated admin command — same primitive (``cross_shard_character_move``),
+  a dedicated admin command — same primitive (``cross_shard_move``),
   one in-game verb (``@tel``) that transparently dispatches local vs
   cross-shard.
 """
@@ -51,7 +51,7 @@ class ShardAwareCmdIC(CmdIC):
             return  # error messages already sent
 
         # Router process may hold a stale row in the idmapper if another
-        # process moved this character (e.g. cross_shard_character_move updates
+        # process moved this character (e.g. cross_shard_move updates
         # shard_id and db_location_id together). Flush from the idmapper
         # cache first — Evennia's SharedMemoryModelBase.__call__ returns
         # the cached instance from from_db(), so refresh_from_db() is a
@@ -270,7 +270,7 @@ class CmdCrossShardDig(BaseCommand):
 
     The room has no location (it's a root room — same as Limbo).
     Reports the new room's dbref so it can be used as a target for
-    cross_shard_character_move or referenced from settings.
+    cross_shard_move or referenced from settings.
     """
 
     key = "cross_shard_dig"

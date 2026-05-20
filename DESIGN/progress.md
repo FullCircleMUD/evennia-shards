@@ -8,9 +8,9 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ### 2026-05-20 — `CmdCrossShardMove` removed; `@tel` is the in-game entrypoint
 
-With [`ShardAwareCmdTeleport`](library-integration-risks.md#cmdteleport--narrow-override-delegate-to-vanilla-when-local) landing — vanilla `@tel` that transparently dispatches local or cross-shard via the same `cross_shard_character_move` primitive — the dedicated `cross_shard_move` admin command became redundant. Two ways to do the same thing forces admins to remember which one to use; one way is cleaner. `CmdCrossShardMove` removed from the library; the matching `CmdCrossShardMoveTests` removed; `AdminCommandAutoInstallTests` no longer asserts the key; the demo-gamedir stub-comment updated.
+With [`ShardAwareCmdTeleport`](library-integration-risks.md#cmdteleport--narrow-override-delegate-to-vanilla-when-local) landing — vanilla `@tel` that transparently dispatches local or cross-shard via the same `cross_shard_move` primitive — the dedicated `cross_shard_move` admin command became redundant. Two ways to do the same thing forces admins to remember which one to use; one way is cleaner. `CmdCrossShardMove` removed from the library; the matching `CmdCrossShardMoveTests` removed; `AdminCommandAutoInstallTests` no longer asserts the key; the demo-gamedir stub-comment updated.
 
-The `cross_shard_character_move` primitive itself is unchanged — every consumer that was previously calling it directly (FCM, the library's own `@tel` override) continues to. What's gone is only the in-game command surface that wrapped it.
+The `cross_shard_move` primitive itself is unchanged — every consumer that was previously calling it directly (FCM, the library's own `@tel` override) continues to. What's gone is only the in-game command surface that wrapped it.
 
 Migration for consumers: anywhere `cross_shard_move <shard> <room_pk>` was typed in-game, type `@tel #<room_pk>` instead. The override resolves the target's shard from the dbref and routes the move via the same primitive.
 
@@ -20,7 +20,7 @@ Migration for consumers: anywhere `cross_shard_move <shard> <room_pk>` was typed
 
 The cross-shard movement admin command had been living in
 `examples/demo_shard0/commands/command.py` since the
-`cross_shard_character_move` spike, marked `TEMPORARY`. Promoted into
+`cross_shard_move` spike, marked `TEMPORARY`. Promoted into
 [`evennia_shards/commands.py`](../src/evennia_shards/commands.py)
 alongside `CmdShardCheck` and `CmdCrossShardDig`: same Developer lock,
 same "Shard Management" help category, auto-installed into
@@ -28,7 +28,7 @@ same "Shard Management" help category, auto-installed into
 `AppConfig.ready()`.
 
 The command is a thin wrapper around the
-`cross_shard_character_move` primitive — validates `target_shard` is
+`cross_shard_move` primitive — validates `target_shard` is
 in `SHARD_URLS`, parses `room_pk` as int, calls the primitive, prints
 the `MoveResult`. The primitive itself is what's load-bearing; the
 command is just an admin-facing entrypoint that doesn't require the
@@ -133,7 +133,7 @@ Follow-on to the WebSocket-level redirect milestone below. The PoC ship covered 
 - `protocol_flags["SHARDS_TICKET_AUTHED"]` — transient Portal→Server bridge. Portal sets it on ticket-bearing connections to the router; Evennia AMP-syncs it onto the Server's session.
 - `account.db._shards_at_ooc_menu` — persistent intent. Server-only writer in two places: `shard_aware_at_post_login` (sets True when it sees the protocol flag) and `ShardAwareCmdIC.func` (sets False on `@ic`). Same Server process owns both write-points and the read in subsequent `at_post_login`s, so coherent.
 
-`_redirect_to_character_shard` is now flag-neutral — it can run from a shard's Server during `cross_shard_character_move` without creating a cross-process write the router would never see.
+`_redirect_to_character_shard` is now flag-neutral — it can run from a shard's Server during `cross_shard_move` without creating a cross-process write the router would never see.
 
 **Refresh-while-IC routes directly to the shard.** Browser refresh re-fetches the webclient page from the router, but the JS opens its WebSocket directly to the shard via localStorage routing. `ShardRedirectScriptMiddleware` injects an inline `<script>` immediately before `evennia.js`'s `<script>` tag (regex match on the rendered HTML); the inline script reads `localStorage["evennia_shards_last_target"]` and `PerformanceNavigationTiming.type === "reload"` synchronously, then overrides `window.wsurl` directly. `Evennia.init` reads `window.wsurl` ~500ms later inside `WebsocketConnection`, by which time our override has taken effect. No router round-trip on refresh, no flash through the router OOC menu.
 
@@ -147,7 +147,7 @@ Follow-on to the WebSocket-level redirect milestone below. The PoC ship covered 
 
 ### 2026-05-04 — WebSocket-level cross-shard redirect (replaces page navigation)
 
-Cross-shard transitions (`@ic`, `@ooc`, `cross_shard_character_move`) now operate at the WebSocket connection layer instead of via full-page navigation. When the server emits a `shard_redirect` OOB, the JS plugin closes the current WebSocket and opens a new one to the destination's WS URL with the ticket as a query parameter; the browser page itself does not reload. UI state, scrollback, plugins, command history all persist across the transition.
+Cross-shard transitions (`@ic`, `@ooc`, `cross_shard_move`) now operate at the WebSocket connection layer instead of via full-page navigation. When the server emits a `shard_redirect` OOB, the JS plugin closes the current WebSocket and opens a new one to the destination's WS URL with the ticket as a query parameter; the browser page itself does not reload. UI state, scrollback, plugins, command history all persist across the transition.
 
 Architectural rationale beyond the immediate UX win:
 
@@ -159,7 +159,7 @@ Architectural rationale beyond the immediate UX win:
 
 **Behaviour change at PoC ship time:** with the URL bar no longer carrying the ticket post-redirect, the original `SHARDS_TICKET_AUTHED` per-WebSocket flag did not persist across page refresh. The follow-on milestone above resolves this with the two-flag OOC-intent mechanism (transient `protocol_flags["SHARDS_TICKET_AUTHED"]` Portal→Server bridge + persistent `account.db._shards_at_ooc_menu` Server-only attribute) — `@ooc` remains a sticky preference across refresh / reconnect / next-day login until cleared by `@ic`.
 
-196 tests passing on the PoC branch at this checkpoint (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_character_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message. Refresh handling completed in the follow-on milestone above.
+196 tests passing on the PoC branch at this checkpoint (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message. Refresh handling completed in the follow-on milestone above.
 
 **Files:** `evennia_shards/handoff.py` (`_redirect_to_character_shard` builds WS URL), `evennia_shards/commands.py` (`ShardAwareCmdOOC` builds WS URL), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (rewritten for WS swap + emit-wrap suppression), demo gamedirs settings updated to `ws://` URLs. Docs: `DESIGN/shard-settings.md`, `DESIGN/ticket-auth-flow.md`, `DESIGN/library-integration-risks.md` updated for the new mechanism. Branch: `websocket-level-redirect-poc`.
 
@@ -200,9 +200,9 @@ Unusable start-location cases (`shard_id` is `None`, `"*"`, or `"router"`) log a
 
 177 tests passing (170 prior + 7 new in `ShardAwareCreateCharacterTests`): happy path, vanilla-returned-None pass-through, unstamped/global/router-owned/no-location cases, and kwargs pass-through. Live smoke pending.
 
-### 2026-05-03 — Inventory recursion + rename to `cross_shard_character_move`
+### 2026-05-03 — Inventory recursion + rename to `cross_shard_move`
 
-Renamed `cross_shard_move_to` → `cross_shard_character_move` to reflect that the primitive is character-shaped (sessions, puppet tags, redirects). Added recursive inventory movement: all contents (items, bags-within-bags, arbitrarily nested) have their `shard_id` bulk-updated and are evicted from the idmapper in the same atomic block as the character. Contents' `db_location_id` is unchanged — parent pk doesn't change across shards. Global (`"*"`) items are left alone.
+Renamed `cross_shard_move_to` → `cross_shard_move` to reflect that the primitive is character-shaped (sessions, puppet tags, redirects). Added recursive inventory movement: all contents (items, bags-within-bags, arbitrarily nested) have their `shard_id` bulk-updated and are evicted from the idmapper in the same atomic block as the character. Contents' `db_location_id` is unchanged — parent pk doesn't change across shards. Global (`"*"`) items are left alone.
 
 **Technical approach:** `_collect_all_contents(root_pk)` does breadth-first pk traversal via `values_list` (avoids `from_db`). Single `qs.update` for contents — no bypass needed since items have `shard_id == current_shard`. Idmapper eviction uses `flush_from_cache(force=True)` on cached instances with direct dict-pop fallback.
 
@@ -210,7 +210,7 @@ Renamed `cross_shard_move_to` → `cross_shard_character_move` to reflect that t
 
 ### 2026-05-03 — Pre-emptive session detach: zombie session fix for cross-shard round-trips
 
-Live smoke testing of `cross_shard_character_move` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
+Live smoke testing of `cross_shard_move` round-trips (shard0 → shard1 → shard0) exposed a zombie session bug that caused a black screen on the return move. Root cause: Evennia's asynchronous disconnect handler (`unpuppet_object`) runs after the WebSocket close triggered by the redirect, but by that point the character's `shard_id` has been mutated to the target shard and the bypass context has exited — so `pre_save` refuses.
 
 **Full causal chain:**
 
@@ -219,7 +219,7 @@ Live smoke testing of `cross_shard_character_move` round-trips (shard0 → shard
 
 **First fix attempt (calling `unpuppet_object` inside bypass) failed.** Evennia's `at_post_unpuppet` hook does `self.db.prelogout_location = self.location`, which dereferences the location FK to the room on the target shard. The room is NOT in the bypass set, so `from_db` refuses.
 
-**Working fix: minimal session detach.** Instead of calling Evennia's full `unpuppet_object`, `cross_shard_character_move` now clears `session.puppet = None` and `session.puid = None` for each puppeting session, and removes the `"puppeted"` tag from the character. This prevents the disconnect handler from entering the puppet cleanup path (its `if obj:` guard finds `None`), and prevents `server_maintenance` from trying to `from_db` a now-foreign row via `get_by_tag("puppeted")`.
+**Working fix: minimal session detach.** Instead of calling Evennia's full `unpuppet_object`, `cross_shard_move` now clears `session.puppet = None` and `session.puid = None` for each puppeting session, and removes the `"puppeted"` tag from the character. This prevents the disconnect handler from entering the puppet cleanup path (its `if obj:` guard finds `None`), and prevents `server_maintenance` from trying to `from_db` a now-foreign row via `get_by_tag("puppeted")`.
 
 **Why minimal detach is safe:** The destination shard's `puppet_object` overwrites `db_sessid` and `db_account` when the player arrives, so stale values in those fields are harmless. The skipped hooks (`at_pre_unpuppet`, `at_post_unpuppet`) are not needed because the character is leaving this process entirely.
 
@@ -229,7 +229,7 @@ Live smoke testing of `cross_shard_character_move` round-trips (shard0 → shard
 
 ### 2026-05-03 — Idmapper / Attribute-cache staleness fix for cross-shard moves
 
-Live smoke testing of `cross_shard_character_move` (shard0 → shard1 → shard0 round-trip) exposed two bugs caused by Evennia's in-memory caching defeating cross-process DB updates. Both share the same root cause: when one process updates a row's `shard_id`, other processes' caches still hold the old value.
+Live smoke testing of `cross_shard_move` (shard0 → shard1 → shard0 round-trip) exposed two bugs caused by Evennia's in-memory caching defeating cross-process DB updates. Both share the same root cause: when one process updates a row's `shard_id`, other processes' caches still hold the old value.
 
 **Bug 1: Router IC command redirects to wrong shard.** After moving a character from shard0 to shard1, going OOC back to the router, then typing `ic` — the router redirected to shard0 (old `shard_id`) instead of shard1.
 
@@ -249,7 +249,7 @@ Live smoke testing of `cross_shard_character_move` (shard0 → shard1 → shard0
 
 164 tests passing.
 
-### 2026-05-02 — `cross_shard_character_move` spike 1: character move (unit-tested)
+### 2026-05-02 — `cross_shard_move` spike 1: character move (unit-tested)
 
 The cross-shard handoff primitive landed in [`evennia_shards/handoff.py`](../src/evennia_shards/handoff.py). Initial scope: move a single character row across shards (inventory recursion added 2026-05-03 — see milestone above), with proper composition of the three primitives the handoff needs (atomic DB writes via the chokepoint bypass, idmapper eviction, per-session ticket+redirect).
 
@@ -271,7 +271,7 @@ Three findings worth recording for future work:
 
 ### 2026-05-02 — Shard isolation refactor + `shard_writes_allowed_for` bypass primitive
 
-The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_character_move` will be built on.
+The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_move` will be built on.
 
 **Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../src/evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
 
@@ -504,7 +504,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 **Beyond the four-chokepoint spike** (Phase 2 / out of scope here):
 
-- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_character_move spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
+- ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_move spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
 - Backfill migration for legacy NULL rows.
 - ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 
