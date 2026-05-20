@@ -99,4 +99,4 @@ These are extensions that fit cleanly under the same call signature when a consu
 ## Related
 
 - [`library-integration-risks.md`](library-integration-risks.md) § `CmdTeleport` — the first consumer of this helper.
-- [`shard-isolation.md`](shard-isolation.md) — the chokepoint architecture this helper is designed to navigate.
+- [`archive/shard-isolation.md`](archive/shard-isolation.md) — the chokepoint architecture this helper was originally designed to navigate. *(Superseded by [tenancy.md](tenancy.md); this helper is itself queued for inversion on the trial branch.)*

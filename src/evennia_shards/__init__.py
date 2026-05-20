@@ -12,6 +12,7 @@ from .config import (
     get_shard_url,
 )
 from .errors import MessageBusError, TicketError
+from .handoff import MoveResult, cross_shard_move
 from .messagebus import (
     MessageHandler,
     delete_message,
@@ -30,13 +31,6 @@ from .tenancy import (
     shard_context,
 )
 from .tickets import create_ticket, delete_ticket, get_ticket
-
-# === MULTITENANT TRIAL: handoff exports disabled pending rewrite.
-#     ``cross_shard_move`` and ``MoveResult`` will return once
-#     handoff.py has been migrated off ``shard_writes_allowed_for``
-#     onto ``shard_context(None)`` + ``qs.update(shard_id=...)``.
-#     See DESIGN/tenancy.md.
-# from .handoff import MoveResult, cross_shard_move
 
 __version__ = "0.0.1"
 
@@ -63,6 +57,8 @@ __all__ = [
     "delete_ticket",
     "shard_aware_global_search",
     "ShardSearchResult",
+    "cross_shard_move",
+    "MoveResult",
     "MessageBusError",
     "TicketError",
     # Multitenant tenancy primitives (replaced shard_writes_allowed_for

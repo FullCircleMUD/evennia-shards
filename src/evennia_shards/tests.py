@@ -554,3 +554,521 @@ class CrossShardWriteTests(BaseEvenniaTestCase):
             flush_cache()
             fresh = ObjectDB.objects.get(pk=obj.pk)
             self.assertEqual(fresh.shard_id, "shard1")
+
+
+# === Test fixtures ===================================================
+#
+# Minimal stand-ins for Evennia session / account infrastructure. They
+# let the cross_shard_move tests assert on session.msg() side-effects
+# and account.db._last_puppet writes without spinning up the real
+# server. Ported from the legacy test suite — neither structure
+# changed under multitenant.
+
+
+class _FakeSession:
+    """Minimal session stand-in for cross_shard_move tests."""
+
+    def __init__(self, address="127.0.0.1"):
+        self.address = address
+        self.puppet = None
+        self.puid = None
+        self.oob_messages = {}
+        self.protocol_flags = {}
+
+    def msg(self, **kwargs):
+        self.oob_messages.update(kwargs)
+
+
+class _FakeAttributes:
+    """Stand-in for AccountDB.attributes."""
+
+    def __init__(self, store=None):
+        self._store = dict(store or {})
+
+    def get(self, name, default=None):
+        return self._store.get(name, default)
+
+
+class _FakeAccount:
+    """Minimal account stand-in. Exposes ``db._last_puppet`` so the
+    redirect helper has somewhere to write its last-puppet stamp."""
+
+    def __init__(self, pk=1):
+        self._saved_attrs = {}
+        self.id = pk
+        self.pk = pk
+        self.db = self  # db.X delegates to self.X
+        self.attributes = _FakeAttributes()
+
+    @property
+    def _last_puppet(self):
+        return self._saved_attrs.get("_last_puppet")
+
+    @_last_puppet.setter
+    def _last_puppet(self, value):
+        self._saved_attrs["_last_puppet"] = value
+
+
+class _FakeSessionHandler:
+    """Stand-in for the per-character SessionHandler. Provides ``.all()``
+    so cross_shard_move can iterate puppeting sessions."""
+
+    def __init__(self, sessions=()):
+        self._sessions = list(sessions)
+
+    def all(self):
+        return list(self._sessions)
+
+
+@override_settings(
+    SHARD_ID="shard0",
+    SHARDS_ROLE="shard",
+    SHARD_URLS={
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
+    },
+)
+class CrossShardMoveTests(BaseEvenniaTestCase):
+    """``cross_shard_move`` end-to-end under multitenant.
+
+    The primitive's external contract is unchanged from the chokepoint
+    era — same args, same return type, same side effects — so most
+    tests port directly from the legacy suite. The internal mechanism
+    swapped ``obj.shard_id = X; obj.save()`` inside a
+    ``shard_writes_allowed_for`` bypass for plain
+    ``qs.update(shard_id=X, db_location_id=Y)``. The qs.update bypasses
+    the tenant-column immutability check on ``__setattr__``, which is
+    what makes the cross-shard write possible at all under the new
+    model.
+
+    Validation failures raise ``ValueError`` (was
+    ``ShardIsolationError``).
+    """
+
+    def _make_target_room(self, target_shard="shard1"):
+        room = ObjectDB.objects.create(
+            db_key="target_room", db_typeclass_path=TYPECLASS
+        )
+        _forge_db_shard(room.pk, target_shard)
+        return room
+
+    def _make_char(self, n_sessions=0):
+        """Create a real ObjectDB row + stub a fake session handler onto it.
+
+        Each fake session shares one fake account on its ``.account``
+        attribute — the primitive reads ``session.account`` for redirects.
+        ``char.__dict__["sessions"] = ...`` shadows the lazy_property
+        descriptor on this one instance, bypassing the typeclass's
+        normal attribute machinery.
+        """
+        char = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS
+        )
+        fake_account = _FakeAccount(pk=42)
+        fake_sessions = []
+        for i in range(n_sessions):
+            sess = _FakeSession(address=f"10.0.0.{i + 1}")
+            sess.account = fake_account
+            fake_sessions.append(sess)
+        char.__dict__["sessions"] = _FakeSessionHandler(fake_sessions)
+        return char, fake_account, fake_sessions
+
+    def _make_item(self, name, location):
+        return ObjectDB.objects.create(
+            db_key=name, db_typeclass_path=TYPECLASS, db_location=location,
+        )
+
+    def _read_row(self, pk, *fields):
+        """Read columns from a row regardless of which shard owns it.
+
+        Used by post-move assertions — once a row's been moved to
+        another shard, the default auto-filter excludes it from
+        queries on this process. ``shard_context(None)`` lifts the
+        filter for the read.
+        """
+        with shard_context(None):
+            row = (
+                ObjectDB.objects.filter(pk=pk)
+                .values_list(*fields)
+                .first()
+            )
+        return row
+
+    # ── happy path ──────────────────────────────────────────────────
+
+    def test_move_no_sessions_succeeds(self):
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Ticket
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        # Row updated at the DB level. Read unscoped — the auto-filter
+        # would exclude shard1 from a shard0 process.
+        persisted = self._read_row(char.pk, "shard_id", "db_location_id")
+        self.assertEqual(persisted, ("shard1", target.pk))
+
+        self.assertEqual(result.objects_moved, 1)
+        self.assertEqual(result.sessions_redirected, 0)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_move_with_one_session_redirects(self):
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Ticket
+
+        char, _, sessions = self._make_char(n_sessions=1)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.sessions_redirected, 1)
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertIn("shard_redirect", sessions[0].oob_messages)
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.to_shard, "shard1")
+        self.assertEqual(ticket.character_id, char.pk)
+
+    def test_move_with_multiple_sessions_redirects_each(self):
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Ticket
+
+        char, _, sessions = self._make_char(n_sessions=3)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.sessions_redirected, 3)
+        self.assertEqual(Ticket.objects.count(), 3)
+        for sess in sessions:
+            self.assertIn("shard_redirect", sess.oob_messages)
+
+    # ── validation failures ─────────────────────────────────────────
+
+    def test_target_shard_not_configured_raises(self):
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Ticket
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_shard_move(char, "nonexistent_shard", target.pk)
+        self.assertIn("nonexistent_shard", str(ctx.exception))
+
+        # No move happened — char still on shard0, visible via default scope.
+        persisted = (
+            ObjectDB.objects.filter(pk=char.pk)
+            .values_list("shard_id", flat=True)
+            .first()
+        )
+        self.assertEqual(persisted, "shard0")
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_target_location_does_not_exist_raises(self):
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_shard_move(char, "shard1", 999999)
+        self.assertIn("999999", str(ctx.exception))
+
+    def test_target_location_on_wrong_shard_raises(self):
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        # Local room (auto-stamped shard0) used as target while
+        # target_shard="shard1" → mismatch.
+        local_room = ObjectDB.objects.create(
+            db_key="local_room", db_typeclass_path=TYPECLASS
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            cross_shard_move(char, "shard1", local_room.pk)
+        msg = str(ctx.exception)
+        self.assertIn("shard0", msg)
+        self.assertIn("shard1", msg)
+
+    # ── atomicity / failure handling ────────────────────────────────
+
+    def test_atomic_rollback_on_eviction_failure(self):
+        """If anything inside the atomic block raises, the DB rolls back.
+
+        Reworked from the legacy ``test_atomic_rollback_on_save_failure``
+        — the legacy version monkey-patched ``obj.save`` to raise, but
+        the multitenant rewrite uses ``qs.update`` (not ``save``), so
+        we inject failure at a different point: monkey-patch
+        ``obj.flush_from_cache`` to raise. It runs inside the same
+        atomic block, after the row update; the rollback should
+        undo the update.
+        """
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Ticket
+
+        char, _, sessions = self._make_char(n_sessions=1)
+        target = self._make_target_room()
+
+        def failing_flush(*args, **kwargs):
+            raise RuntimeError("simulated eviction failure")
+        object.__setattr__(char, "flush_from_cache", failing_flush)
+
+        with self.assertRaises(RuntimeError):
+            cross_shard_move(char, "shard1", target.pk)
+
+        # Atomic rollback: row should still be on shard0 (visible
+        # to default scope).
+        persisted = self._read_row(char.pk, "shard_id", "db_location_id")
+        self.assertEqual(persisted[0], "shard0")
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", sessions[0].oob_messages)
+
+    def test_session_redirect_failure_captured_in_result(self):
+        """One session's redirect raises — the move commits, other
+        sessions redirect, failure recorded in ``result.failures``."""
+        from evennia_shards import cross_shard_move
+
+        char, _, sessions = self._make_char(n_sessions=2)
+        target = self._make_target_room()
+
+        def raising_msg(**kwargs):
+            raise RuntimeError("simulated network failure")
+        sessions[1].msg = raising_msg
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        persisted = self._read_row(char.pk, "shard_id")
+        self.assertEqual(persisted, ("shard1",))
+
+        self.assertEqual(result.sessions_redirected, 1)
+        self.assertEqual(len(result.failures), 1)
+        failed_session, failed_exc = result.failures[0]
+        self.assertIs(failed_session, sessions[1])
+        self.assertIsInstance(failed_exc, RuntimeError)
+
+    # ── inventory recursion ─────────────────────────────────────────
+
+    def test_move_contents_shard_ids_updated(self):
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        item1 = self._make_item("sword", char)
+        item2 = self._make_item("shield", char)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.objects_moved, 3)
+        with shard_context(None):
+            shards = dict(
+                ObjectDB.objects.filter(pk__in=[char.pk, item1.pk, item2.pk])
+                .values_list("pk", "shard_id")
+            )
+        self.assertEqual(shards[char.pk], "shard1")
+        self.assertEqual(shards[item1.pk], "shard1")
+        self.assertEqual(shards[item2.pk], "shard1")
+
+    def test_move_nested_contents(self):
+        """Char → bag → gem: the whole tree moves."""
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        bag = self._make_item("bag", char)
+        gem = self._make_item("gem", bag)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.objects_moved, 3)
+        with shard_context(None):
+            shards = dict(
+                ObjectDB.objects.filter(pk__in=[char.pk, bag.pk, gem.pk])
+                .values_list("pk", "shard_id")
+            )
+        self.assertEqual(shards[char.pk], "shard1")
+        self.assertEqual(shards[bag.pk], "shard1")
+        self.assertEqual(shards[gem.pk], "shard1")
+
+    def test_move_no_contents(self):
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.objects_moved, 1)
+
+    def test_move_contents_idmapper_eviction(self):
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        item = self._make_item("sword", char)
+        target = self._make_target_room()
+
+        cache = ObjectDB.__dbclass__.__instance_cache__
+        self.assertIn(item.pk, cache)
+
+        cross_shard_move(char, "shard1", target.pk)
+
+        self.assertNotIn(char.pk, cache)
+        self.assertNotIn(item.pk, cache)
+
+    def test_move_contents_location_unchanged(self):
+        """Items' ``db_location_id`` still points at char's pk after move
+        (FK target's identity doesn't change across shards)."""
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        item = self._make_item("sword", char)
+        target = self._make_target_room()
+
+        cross_shard_move(char, "shard1", target.pk)
+
+        loc = self._read_row(item.pk, "db_location_id")
+        self.assertEqual(loc, (char.pk,))
+
+    def test_move_contents_globals_left_alone(self):
+        """Items stamped ``shard_id="*"`` (globals) are not re-stamped
+        — the explicit ``shard_id=current`` filter in the contents
+        update excludes them."""
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        normal_item = self._make_item("sword", char)
+        global_item = self._make_item("global_buff", char)
+        _forge_db_shard(global_item.pk, "*")
+        target = self._make_target_room()
+
+        result = cross_shard_move(char, "shard1", target.pk)
+
+        # Char + normal_item moved; global_item untouched.
+        self.assertEqual(result.objects_moved, 2)
+        global_shard = (
+            ObjectDB.objects.filter(pk=global_item.pk)
+            .values_list("shard_id", flat=True)
+            .first()
+        )
+        self.assertEqual(global_shard, "*")
+
+    # ── flush_from_cache bus message ────────────────────────────────
+
+    def test_move_inserts_flush_from_cache_bus_message(self):
+        """After a cross-shard move, a ``flush_from_cache`` row is
+        queued for the destination shard."""
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Message
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        Message.objects.filter(kind="flush_from_cache").delete()
+        cross_shard_move(char, "shard1", target.pk)
+
+        msgs = list(Message.objects.filter(kind="flush_from_cache"))
+        self.assertEqual(len(msgs), 1)
+        msg = msgs[0]
+        self.assertEqual(msg.to_shard, "shard1")
+        self.assertEqual(msg.from_shard, "shard0")
+        self.assertEqual(msg.payload, {"pks": [target.pk]})
+
+    def test_same_shard_move_skips_flush_send(self):
+        """A move whose target equals the current shard does not send
+        a flush_from_cache bus message (the bus refuses same-shard
+        sends; the gate skips them upstream)."""
+        from evennia_shards import cross_shard_move
+        from evennia_shards.models import Message
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room(target_shard="shard0")
+
+        Message.objects.filter(kind="flush_from_cache").delete()
+        cross_shard_move(char, "shard0", target.pk)
+
+        self.assertEqual(
+            Message.objects.filter(kind="flush_from_cache").count(), 0,
+        )
+
+    def test_flush_send_failure_does_not_roll_back_move(self):
+        """A bus failure on the post-move flush_from_cache send is
+        logged but doesn't roll back the move itself."""
+        from unittest import mock
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+
+        with mock.patch(
+            "evennia_shards.messagebus.send_message",
+            side_effect=RuntimeError("bus down"),
+        ):
+            result = cross_shard_move(char, "shard1", target.pk)
+
+        self.assertEqual(result.objects_moved, 1)
+        char_shard = self._read_row(char.pk, "shard_id")
+        self.assertEqual(char_shard, ("shard1",))
+
+    # ── multitenant-specific gap-fillers ────────────────────────────
+
+    def test_moved_row_invisible_to_source_shard_default_query(self):
+        """After the move, the source shard's auto-filter excludes the
+        moved row from default queries. This is the multitenant
+        equivalent of the old ``from_db`` chokepoint refusal — the
+        row is foreign to source, so it just isn't in scope anymore.
+        """
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+        char_pk = char.pk
+
+        cross_shard_move(char, "shard1", target.pk)
+
+        # From shard0's context (the test process), the auto-filter
+        # excludes shard1 rows. The default manager doesn't see it.
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=char_pk).count(), 0,
+        )
+        with self.assertRaises(ObjectDB.DoesNotExist):
+            ObjectDB.objects.get(pk=char_pk)
+
+    def test_moved_row_visible_under_target_shard_context(self):
+        """The moved row is visible when scope switches to the target
+        shard's context. Confirms the move actually placed the row on
+        target_shard (not just hidden it from source)."""
+        from evennia_shards import cross_shard_move
+
+        char, _, _ = self._make_char(n_sessions=0)
+        target = self._make_target_room()
+        char_pk = char.pk
+
+        cross_shard_move(char, "shard1", target.pk)
+
+        with shard_context("shard1"):
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=char_pk).count(), 1,
+            )
+            row = ObjectDB.objects.get(pk=char_pk)
+            self.assertEqual(row.shard_id, "shard1")
+            self.assertEqual(row.db_location_id, target.pk)
+
+    def test_immutability_check_still_protects_against_save_path(self):
+        """Even after cross_shard_move's ``qs.update`` succeeds, the
+        ``shard_id``-immutability check on ``__setattr__`` + ``save``
+        still refuses ordinary user code that tries to mutate the
+        tenant column. The escape hatch (``qs.update``) is deliberately
+        narrower than ``save()`` so casual misuse still fails loudly.
+        """
+        from django.db.utils import NotSupportedError
+
+        local = ObjectDB.objects.create(
+            db_key="probe", db_typeclass_path=TYPECLASS,
+        )
+        # Reset so the new shard_id assignment is treated as a mutation.
+        self.assertEqual(local.shard_id, "shard0")
+
+        local.shard_id = "shard1"  # flags _try_update_tenant
+        with self.assertRaises(NotSupportedError):
+            local.save()

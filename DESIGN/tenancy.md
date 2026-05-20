@@ -1,6 +1,6 @@
 # Tenancy: django-multitenant integration
 
-*Branch: `django-multitenant-trial`.* This document describes the multitenant-based replacement for the four-chokepoint design in [shard-isolation.md](shard-isolation.md). While the trial is in flight, both mechanisms run side by side; once verified, `isolation.py` will be retired and this becomes the only enforcement layer.
+*Branch: `django-multitenant-trial`.* This document describes the multitenant-based replacement for the four-chokepoint design in [shard-isolation.md](archive/shard-isolation.md). While the trial is in flight, both mechanisms run side by side; once verified, `isolation.py` will be retired and this becomes the only enforcement layer.
 
 The strategic shift: **silent auto-filtering at the SQL layer**, replacing the **loud raise-on-foreign-access** model of the chokepoints. See [tenancy-strategy.md](tenancy-strategy.md) (TBD) for the rationale; this document is about *how* the integration works, not *why* we made the swap.
 
@@ -148,16 +148,99 @@ From the moment `ready()` returns:
 
 All of Evennia core and any consumer game code inherits this transparently. No call-site changes required.
 
-## Coexistence with `isolation.py` during the trial
+## Cross-shard handoff under multitenant
 
-The legacy chokepoint install in `isolation.py` still runs from `apps.ready()` at the end. With tenancy active in front of it, foreign rows are auto-filtered out at the SQL layer before they ever reach `from_db` — so the chokepoint sits idle and never fires under normal operation. They enforce the same boundary at different layers; the chokepoints are now redundant but harmless. They will be removed in a follow-up step once the trial has shipped a full pass of the example gamedirs.
+`handoff.py`'s `cross_shard_move(obj, target_shard, target_location_pk)` is the library's primary write path that legitimately needs to *change* a row's tenant column. Under the chokepoint model it did this with `shard_writes_allowed_for(obj)` + `obj.save()`. Under multitenant, two things change:
+
+1. The `shard_id`-immutability check on `__setattr__` would flag a `obj.shard_id = X; obj.save()` flow and the `save()` would raise `NotSupportedError`. So the new shape uses `qs.update(shard_id=..., db_location_id=...)` — a single SQL `UPDATE` that bypasses the instance-level immutability machinery entirely.
+2. The post-save signal (`at_db_location_postsave`) used to need suppressing via the `_safe_contents_update` flag (it would dereference the FK to the now-foreign target room and trip the chokepoint). `qs.update` doesn't fire `post_save` at all, so the flag-dance is gone.
+
+The shape of the new write block:
+
+```python
+with transaction.atomic():
+    objs_updated = ObjectDB.objects.filter(
+        pk=obj.pk, shard_id=current_shard,
+    ).update(
+        shard_id=target_shard,
+        db_location_id=target_location_pk,
+    )
+    # Sync the in-memory instance to match the DB (see compromise #2 below).
+    object.__setattr__(obj, "shard_id", target_shard)
+    object.__setattr__(obj, "db_location_id", target_location_pk)
+    obj.flush_from_cache(force=True)
+    # ... bulk-update contents' shard_id ...
+```
+
+Validation failures raise `ValueError` (was `ShardIsolationError`, which no longer exists).
+
+### Two compromises
+
+The rewrite introduces two intentional rule-breaks worth knowing about. Both are narrow, both are documented inline at the call site, neither hides what it does.
+
+**1. `with shard_context(None):` for the target-shard validation read.** Step 2 of `cross_shard_move` validates that `target_location_pk` exists and is on `target_shard`. That row lives on `target_shard` by definition, and the auto-filter excludes it from any default-scoped query — even `.values_list` (which bypasses `from_db`) is filtered out at the SQL `WHERE` level. So the validation reads inside an unscoped block:
+
+```python
+with shard_context(None):
+    target_rows = list(
+        ObjectDB.objects.filter(pk=target_location_pk)
+        .values_list("shard_id", flat=True)[:1]
+    )
+```
+
+Narrow scope (single query, single column), but it is a deliberate escape from the auto-filter inside a normal write primitive.
+
+**2. `object.__setattr__` to sync in-memory state after `qs.update`.** `qs.update` writes the DB but not the Python instance. The redirect loop two lines later reads `character.shard_id` to stamp tickets — without a sync, tickets get stamped with the pre-move shard. The natural sync (`obj.shard_id = target_shard`) goes through our `__setattr__` wrapper, which flags it as a tenant-column mutation. So we bypass our own wrapper:
+
+```python
+object.__setattr__(obj, "shard_id", target_shard)
+object.__setattr__(obj, "db_location_id", target_location_pk)
+```
+
+The immutability check is meant to catch *accidental* tenant-column mutation. `cross_shard_move` is the one place in the library that legitimately needs to mutate it, and this is the escape hatch. Cleaner long-term designs (dedicated `_post_move_sync` API, or an in-tenancy "scope-escape" context that suppresses the check) are follow-up work — see *Outstanding investigation* below.
+
+### What stays from the original
+
+- Validation of `target_shard` (in `SHARD_URLS`) and `target_location_pk` (exists, on `target_shard` or global).
+- Snapshot of puppeting sessions before the move (`sessions_to_redirect`).
+- Recursive inventory collection via `_collect_all_contents`.
+- Atomic block around the writes + idmapper eviction.
+- Pre-emptive session detach (`session.puppet = None; session.puid = None; tags.remove("puppeted")`).
+- Per-session redirect via `_redirect_to_character_shard`.
+- `flush_from_cache` bus message to the destination shard (cache-invalidation signal).
+- `MoveResult` return shape (objects_moved, sessions_redirected, failures).
+
+External contract is preserved: same args, same return type, same side effects.
 
 ## Known gaps not yet addressed in the trial
 
 - **Idmapper cache.** Evennia's `SharedMemoryManager` caches model instances by pk and serves them on `get()` without re-hitting the DB (and therefore without re-applying the tenant filter). Under multitenant the cache is *implicitly* scoped because every populating read goes through the filter — but legitimate cross-shard reads (via `shard_context()`) can poison the cache with foreign instances visible to later same-process scoped reads. Not exercised by the trial yet.
 - **Thread-local vs Twisted threads.** Multitenant uses `threading.local` by default. `deferToThread` callbacks would not inherit the tenant. Either set `TENANT_USE_ASGIREF = True` or audit which paths use `deferToThread` for ORM work.
-- **Cross-shard handoff.** `handoff.py` currently uses the soon-to-be-removed `shard_writes_allowed_for(...)` bypass primitive. It needs to be rewritten to use `shard_context(target_shard)` (or a similar API) for the brief context switch around the cross-shard write. Tracked in the branch's todo.
 - **`TENANT_STRICT_MODE`.** Multitenant supports raising `EmptyTenant` on `_do_update` when no tenant is set; useful for catching "forgot to set tenant context" bugs in dev/CI. Worth enabling in the test suite once the trial stabilises.
+
+## Status of `isolation.py`
+
+Retired. The chokepoint install (four signal/method patches) and the `shard_writes_allowed_for` bypass are gone — `isolation.py` and `ShardIsolationError` no longer exist. See [shard-isolation.md](archive/shard-isolation.md) for the historical design that was replaced; that doc carries a superseded banner pointing back here.
+
+## Restoration queue
+
+`apps.ready()` returns early after the safe settings-only operations. Several library extensions below the return point — `CmdIC`/`CmdOOC` overrides, hooks (`at_post_login`), the chargen wrapper, the `@teleport` replacement, and the admin commands — are visible-but-unreachable until each underlying module is migrated. Order roughly:
+
+1. ~~`handoff.py`~~ — done. Re-exposes `cross_shard_move` and `_redirect_to_character_shard`.
+2. `hooks.py` — `at_post_login` overrides on router and shard.
+3. `chargen.py` — start-location shard stamping.
+4. `commands.py` — `ShardAwareCmdIC` / `ShardAwareCmdOOC`; `CmdCrossShardDig` admin.
+5. `teleport.py` — cross-shard `@tel`.
+6. `search.py` — invert `shard_aware_global_search` so it *escapes* the auto-filter rather than navigating around the chokepoint.
+
+Move the early-return in `apps.py` below each block as it's restored.
+
+## Outstanding investigation
+
+- Whether Evennia's typeclass-system manager subclassing (the consumer's `Character.objects`, `Room.objects`, etc. via `TypeclassManager`) inherits the patch correctly. Should — the patch is on the manager class, which proxy typeclass managers inherit from — but not yet verified end-to-end.
+- Whether `select_related` / `prefetch_related` joins into ObjectDB still scope correctly when the *root* model is also tenant-tagged. Multitenant's filter injection is per-model; nested joins may need explicit handling.
+- The interaction with Evennia's existing `select_related` calls in `accounts/manager.py:117` (the partial-match search path).
+- Whether the two compromises in `cross_shard_move` (`shard_context(None)` validation read and `object.__setattr__` in-memory sync) want a dedicated "admin/handoff context" API rather than the ad-hoc escapes they are today.
 
 ## Outstanding investigation
 

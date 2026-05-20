@@ -1,5 +1,7 @@
 # Shard Isolation Mechanism
 
+> **Superseded by [tenancy.md](tenancy.md).** This document describes the four-chokepoint design that was retired on the `django-multitenant-trial` branch. The chokepoint machinery (`isolation.py`, the `pre_save` / `pre_delete` signals, the `from_db` and `QuerySet.update` patches, the `shard_writes_allowed_for` bypass, and `ShardIsolationError`) no longer exists in the codebase. The document is kept as historical reference for the design rationale captured in the "Decision: bespoke chokepoints vs `django-multitenant`" section — that decision was reversed and the rationale is now of interest mainly to explain *why* the swap happened.
+
 How the library enforces the partition between shards at the Django/Evennia level — what stops one shard's process from accidentally reading, instantiating, or writing to another shard's rows.
 
 The mechanism has two halves: **chokepoints** that catch accidental cross-shard access loudly, and a scoped **bypass** primitive (`shard_writes_allowed_for`) that legitimate cross-shard operations use to opt out. Both live in [`evennia_shards/isolation.py`](../src/evennia_shards/isolation.py) and share thread-local state, so the enforcement and the opt-in coordinate without cross-module plumbing.
