@@ -6,6 +6,55 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-20 — `cross_shard_move` invalidates destination's idmapper via `flush_from_cache` bus message
+
+Closes the contents-cache-stale issue that surfaced when an unpuppeted
+object (an item, in this case) was teleported cross-shard: the
+destination room's in-process `contents_cache` on the destination
+shard would keep its pre-move view, and `look` / `room.contents`
+on the destination would omit the just-arrived obj even though the
+DB row was correctly stamped.
+
+Root cause: `cross_shard_move`'s `obj.save()` sets
+`_safe_contents_update = True` to suppress Evennia's post-save
+signal (which would otherwise dereference the now-foreign
+`db_location` and trip the chokepoint). The suppression is
+mandatory, but it also means neither the source room's nor the
+destination room's contents_cache gets updated by the signal. The
+source side stays consistent for free via the source process's
+`flush_from_cache` on the moved obj — but the destination process
+never sees that eviction.
+
+Fix: a new `flush_from_cache` message kind on the cross-shard
+message bus, with payload `{"pks": [<int>, ...]}`. Receiver iterates
+the pks and, for each that's currently in this process's `ObjectDB`
+idmapper, calls `instance.flush_from_cache(force=True)` — same
+mechanism Evennia uses for its own idmapper management. Pks not
+cached are no-ops; the handler is idempotent.
+
+`cross_shard_move` step 8 (new): after the per-session redirect
+block, send `flush_from_cache` to `target_shard` with the
+destination row's pk. Gated on `target_shard != current_shard`
+(the bus refuses same-shard sends). Send failure is logged but
+doesn't roll back the move — worst case the destination shows
+stale contents until the room is next evicted for some other reason.
+
+Naming intent: the message is named after the **mechanic** (what the
+handler does) rather than the **trigger** (cross-shard arrival). Any
+future cross-shard mutation that other shards should drop their
+cached view of — `delete`, mass attribute changes, world rebuilds —
+can publish the same kind without needing a new message type.
+
+Verified live in the demo gamedirs: ball moved cross-shard to a
+previously-loaded destination room is visible in `look` and in
+`room.contents` immediately on arrival.
+
+**Files:** `src/evennia_shards/messagebus.py` (handler), `src/evennia_shards/handoff.py` (sender + docstring), `src/evennia_shards/teleport.py` (debug-message detection hook removed; no longer load-bearing), `DESIGN/cross-shard-message-bus.md` (new kind documented). Branch: `shard-aware-teleport`.
+
+### 2026-05-20 — `cross_shard_character_move` renamed `cross_shard_move`
+
+The primitive has always worked on any `ObjectDB`-derived row, not just characters — the `_character_` segment in the name was load-bearing as documentation but actively misleading as the API surface. With `CmdCrossShardMove` gone, the shorter `cross_shard_move` no longer competes with anything for the namespace. Pure rename: docstrings polished to drop "character"-specific language; the `CrossShardCharacterMoveTests` test class renamed to `CrossShardMoveTests`. 204 tests passing.
+
 ### 2026-05-20 — `CmdCrossShardMove` removed; `@tel` is the in-game entrypoint
 
 With [`ShardAwareCmdTeleport`](library-integration-risks.md#cmdteleport--narrow-override-delegate-to-vanilla-when-local) landing — vanilla `@tel` that transparently dispatches local or cross-shard via the same `cross_shard_move` primitive — the dedicated `cross_shard_move` admin command became redundant. Two ways to do the same thing forces admins to remember which one to use; one way is cleaner. `CmdCrossShardMove` removed from the library; the matching `CmdCrossShardMoveTests` removed; `AdminCommandAutoInstallTests` no longer asserts the key; the demo-gamedir stub-comment updated.

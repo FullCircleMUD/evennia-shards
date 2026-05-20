@@ -122,6 +122,8 @@ class MessageHandler:
             return self._handle_obj_msg(message)
         if message.kind == "account_msg":
             return self._handle_account_msg(message)
+        if message.kind == "flush_from_cache":
+            return self._handle_flush_from_cache(message)
         return False
 
     def _handle_ping(self, message) -> bool:
@@ -216,6 +218,49 @@ class MessageHandler:
             )
             return True
         account.msg(**kwargs)
+        return True
+
+    def _handle_flush_from_cache(self, message) -> bool:
+        """Evict pks from this process's ObjectDB idmapper.
+
+        Generic cache-invalidation primitive. The sender publishes
+        ``flush_from_cache`` with payload ``{"pks": [int, ...]}`` to
+        tell a peer shard "your in-process cached instances of these
+        rows are out of date; drop them so the next access reloads
+        from the DB."
+
+        Per-pk behaviour:
+
+        - pk is in this process's idmapper → call
+          ``instance.flush_from_cache(force=True)``, which removes
+          the Python instance from the cache. Next
+          ``ObjectDB.objects.get(pk=N)`` misses the cache, hits the
+          DB, and constructs a fresh instance. Per-instance state
+          (notably ``contents_cache``) is gone; lazy attributes
+          rebuild from current DB.
+        - pk is not currently cached → nothing to do, no-op.
+        - pk no longer exists in the DB → still nothing to do here;
+          the row's absence is the next caller's problem to handle.
+
+        The handler is idempotent: re-sending the same flush message
+        is harmless.
+
+        Primary current consumer: ``cross_shard_move`` sends the
+        destination room's pk so the destination shard re-reads the
+        room's contents on next access (otherwise the contents-cache
+        on a previously-loaded room misses the just-arrived object).
+        The primitive is deliberately generic — any cross-shard
+        mutation that other shards need to notice can publish here
+        without needing a new message kind.
+        """
+        from evennia.objects.models import ObjectDB
+
+        pks = message.payload.get("pks") or []
+        cache = ObjectDB.__dbclass__.__instance_cache__
+        for pk in pks:
+            instance = cache.get(pk)
+            if instance is not None:
+                instance.flush_from_cache(force=True)
         return True
 
 

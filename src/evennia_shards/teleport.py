@@ -227,14 +227,6 @@ class ShardAwareCmdTeleport(CmdTeleport):
         #   target_shard).
         from .handoff import cross_shard_move
 
-        # Remember whether the object was puppeted before the move —
-        # the primitive doesn't clear obj.db_account (deliberately;
-        # destination's puppet_object overwrites it on arrival), so
-        # has_account is still readable after, but checking before
-        # the move keeps the meaning explicit ("was this puppeted at
-        # the moment of teleport").
-        was_puppeted = self.obj_to_teleport.has_account
-
         try:
             result = cross_shard_move(
                 self.obj_to_teleport, self.dest_shard, self.dest_pk
@@ -244,27 +236,6 @@ class ShardAwareCmdTeleport(CmdTeleport):
                 f"|rCross-shard teleport failed:|n {exc}"
             )
             return
-
-        # Detection hook for the contents-cache-stale issue. A
-        # puppeted object's session redirects to the destination
-        # shard and re-puppets there, which triggers a full look that
-        # refreshes the destination room's contents view for the
-        # arriving player. An unpuppeted object (item, dropped corpse,
-        # etc.) has no such trigger: the DB row is updated and the
-        # source shard's idmapper is evicted, but the destination
-        # shard's contents-cache of the new room is not refreshed
-        # cross-process, so the object appears to be "in" the room
-        # per the DB while not appearing in the room's `look` output.
-        #
-        # For now, just announce when we hit the unpuppeted case so
-        # the dispatch is provable. The actual refresh logic (force
-        # reload of the destination room's contents on the destination
-        # shard) is the next step once detection is verified.
-        if not was_puppeted:
-            self.caller.msg(
-                "|y[debug]|n Object moved is NOT puppetted — destination "
-                "room's contents cache may be stale until refreshed."
-            )
 
         if "quiet" in self.switches:
             return

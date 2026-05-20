@@ -12,7 +12,9 @@ Houses two public primitives:
   ``ObjectDB``-derived row and its full recursive inventory: validate,
   atomic DB writes (inside :func:`shard_writes_allowed_for`), idmapper
   eviction, per-session ticket+redirect (where applicable for
-  puppeted objects).
+  puppeted objects), and a ``flush_from_cache`` bus message to the
+  destination shard to invalidate its cached view of the destination
+  row.
 - :func:`_redirect_to_character_shard` — the per-session redirect
   used by the move primitive, the ``ic`` command, and the
   ``at_post_login`` override.
@@ -136,6 +138,16 @@ def cross_shard_move(obj, target_shard, target_location_pk):
     7. For each snapshotted session: create a ticket and send
        ``shard_redirect`` OOB. Per-session failures are captured in
        the returned :class:`MoveResult` and do not roll back the move.
+    8. Send a ``flush_from_cache`` bus message to ``target_shard``
+       with the destination row's pk so the destination shard
+       evicts it from its idmapper. Necessary because the
+       ``_safe_contents_update`` flag on step 4's save suppressed
+       Evennia's post-save signal — otherwise the destination's
+       in-process ``contents_cache`` for that row would still
+       reflect the pre-move state and ``look`` / ``room.contents``
+       would omit the just-arrived obj. Skipped if ``target_shard``
+       equals the current shard (the bus refuses same-shard sends).
+       Send failure is logged but does not roll back the move.
 
     Args:
         obj: any ``ObjectDB``-derived instance on this shard, to be
@@ -347,6 +359,49 @@ def cross_shard_move(obj, target_shard, target_location_pk):
                 f"{session!r} on obj pk={obj.pk}: {exc}"
             )
             failures.append((session, exc))
+
+    # 8. Tell the destination shard to drop its cached view of the
+    # destination room. We suppressed Evennia's post-save signal on
+    # the obj.save() above (via the _safe_contents_update flag, which
+    # is mandatory: the signal would dereference obj.db_location and
+    # try to instantiate the now-foreign destination row, tripping
+    # from_db). Suppressing the signal means the destination room's
+    # in-process contents_cache (on the destination shard, if the
+    # room was previously loaded there) doesn't get updated with the
+    # arriving obj. Subsequent `look` / `room.contents` on the
+    # destination would return a stale view that omits the new
+    # arrival.
+    #
+    # Sending a flush_from_cache bus message with the destination
+    # room's pk asks the destination shard to evict the room from
+    # its idmapper. Next access there rebuilds contents fresh from
+    # the DB.
+    #
+    # Skip the send when target_shard == this shard — send_message
+    # raises in that case (it's a cross-shard bus). A same-shard
+    # "cross_shard_move" is a no-op cross-shard wise, and the source
+    # process's own contents_cache stays consistent via the regular
+    # eviction path on obj.flush_from_cache.
+    current = get_shard_id()
+    if target_shard != current:
+        try:
+            from .messagebus import send_message
+            send_message(
+                kind="flush_from_cache",
+                payload={"pks": [target_location_pk]},
+                to_shard=target_shard,
+            )
+        except Exception as exc:
+            # Cache-invalidation failure shouldn't roll back the
+            # move — the move itself committed and the obj is
+            # correctly placed. Worst case the destination shows a
+            # stale contents view until the room is next evicted
+            # for some other reason. Log and continue.
+            logger.log_warn(
+                f"cross_shard_move: post-move flush_from_cache send "
+                f"failed for room pk={target_location_pk} on shard "
+                f"{target_shard!r}: {exc}"
+            )
 
     return MoveResult(
         objects_moved=1 + contents_updated,
