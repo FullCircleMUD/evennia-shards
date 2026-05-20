@@ -169,7 +169,6 @@ def send_cross_shard_room_message(
     from evennia.objects.models import ObjectDB
 
     from .config import get_shard_id
-    from .errors import ShardIsolationError
     from .messagebus import send_message
 
     rows = list(
@@ -195,13 +194,13 @@ def send_cross_shard_room_message(
         for ex_pk in exclude_pks or ():
             try:
                 exclude.append(ObjectDB.objects.get(pk=ex_pk))
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 continue
         from_obj = None
         if from_obj_pk is not None:
             try:
                 from_obj = ObjectDB.objects.get(pk=from_obj_pk)
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 from_obj = None
         room.msg_contents(text, exclude=exclude, from_obj=from_obj)
         return True

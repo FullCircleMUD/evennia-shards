@@ -337,3 +337,220 @@ class AutoStampAndFilterTests(BaseEvenniaTestCase):
         )
         with self.assertRaises(ObjectDB.DoesNotExist):
             ObjectDB.objects.get(pk=obj.pk)
+
+
+class ShardContextReadTests(BaseEvenniaTestCase):
+    """Verifies that ``shard_context(...)`` correctly switches the
+    auto-filter scope for reads. Test bodies use ``.count()`` /
+    ``.exists()`` / ``.values()`` instead of materialising instances
+    via ``.get()`` or queryset iteration — those paths go through
+    ``from_db``, which the legacy chokepoints in ``isolation.py``
+    still guard. Once the chokepoints are removed, these tests can
+    be extended to cover instance materialisation under foreign
+    context.
+
+    The auto-filter is the single thing all read primitives funnel
+    through (P1 in the survey doc), so verifying it via ``.count()``
+    establishes that the filter is being applied with the right
+    scope. Full materialisation paths inherit the same filter."""
+
+    def _make_row(self, key: str, shard_id: str) -> int:
+        # Helper: create a row under the default shard0 context (so
+        # auto-stamp + chokepoints behave) and forge its shard_id
+        # via raw SQL afterwards. Returns the pk.
+        obj = ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS
+        )
+        if shard_id != "shard0":
+            _forge_db_shard(obj.pk, shard_id)
+        # Flush the idmapper so subsequent queries don't pick up the
+        # cached instance with its original shard_id.
+        from evennia.utils.idmapper.models import flush_cache
+
+        flush_cache()
+        return obj.pk
+
+    def test_foreign_row_visible_inside_its_own_shard_context(self):
+        # A row stamped shard1 is invisible to shard0 by default, but
+        # becomes visible when scope switches to shard1 via the
+        # context manager.
+        pk = self._make_row("inside_own_context", "shard1")
+        self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 0)
+        with shard_context("shard1"):
+            self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+
+    def test_local_row_invisible_inside_foreign_shard_context(self):
+        # The inverse: a shard0 row is normally visible, but inside
+        # shard_context("shard1") falls out of scope.
+        pk = self._make_row("local_in_foreign_context", "shard0")
+        self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+        with shard_context("shard1"):
+            self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 0)
+
+    def test_global_row_visible_in_any_shard_context(self):
+        # The "*" sentinel is the OR-arm of every shard's IN-filter,
+        # so a "*"-stamped row must be visible from every scope.
+        pk = self._make_row("global_in_any_context", "*")
+        self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+        with shard_context("shard1"):
+            self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+        with shard_context("shard2"):
+            self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+
+    def test_unscoped_context_sees_all_shards(self):
+        # shard_context(None) is the "act as router" escape. Without a
+        # tenant set, no auto-filter is injected — every row is in
+        # scope regardless of shard_id.
+        shard0_pk = self._make_row("unscoped_shard0_probe", "shard0")
+        shard1_pk = self._make_row("unscoped_shard1_probe", "shard1")
+        global_pk = self._make_row("unscoped_global_probe", "*")
+
+        with shard_context(None):
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard0_pk).count(), 1
+            )
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard1_pk).count(), 1
+            )
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=global_pk).count(), 1
+            )
+
+    def test_scope_restored_after_context_exit(self):
+        # Entering and exiting shard_context must leave the
+        # process-wide scope unchanged — otherwise a context switch
+        # leaks visibility into subsequent code.
+        pk = self._make_row("scope_restoration_probe", "shard0")
+        self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+        with shard_context("shard1"):
+            self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 0)
+        # Same query, same row, scope restored.
+        self.assertEqual(ObjectDB.objects.filter(pk=pk).count(), 1)
+
+    def test_nested_contexts_filter_each_at_their_own_scope(self):
+        # Each level of nesting sees only its own shard + globals;
+        # inner exits restore to the immediate outer's scope, not all
+        # the way to the process baseline.
+        shard0_pk = self._make_row("nested_shard0_probe", "shard0")
+        shard1_pk = self._make_row("nested_shard1_probe", "shard1")
+        global_pk = self._make_row("nested_global_probe", "*")
+
+        # Outer baseline: shard0.
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=shard0_pk).count(), 1
+        )
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=shard1_pk).count(), 0
+        )
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=global_pk).count(), 1
+        )
+
+        with shard_context("shard1"):
+            # shard1 + global visible; shard0 hidden.
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard0_pk).count(), 0
+            )
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard1_pk).count(), 1
+            )
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=global_pk).count(), 1
+            )
+
+            with shard_context("shard2"):
+                # Only globals visible — neither shard0 nor shard1.
+                self.assertEqual(
+                    ObjectDB.objects.filter(pk=shard0_pk).count(), 0
+                )
+                self.assertEqual(
+                    ObjectDB.objects.filter(pk=shard1_pk).count(), 0
+                )
+                self.assertEqual(
+                    ObjectDB.objects.filter(pk=global_pk).count(), 1
+                )
+
+            # Restored to shard1 scope, not shard0.
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard0_pk).count(), 0
+            )
+            self.assertEqual(
+                ObjectDB.objects.filter(pk=shard1_pk).count(), 1
+            )
+
+        # Restored to shard0 baseline.
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=shard0_pk).count(), 1
+        )
+        self.assertEqual(
+            ObjectDB.objects.filter(pk=shard1_pk).count(), 0
+        )
+
+    def test_exists_respects_shard_context(self):
+        # ``.exists()`` takes a different SQL path than ``.count()``
+        # (SELECT 1 LIMIT 1 vs SELECT COUNT(*)) but goes through the
+        # same queryset filter. Sanity-check both paths.
+        pk = self._make_row("exists_probe", "shard1")
+        self.assertFalse(ObjectDB.objects.filter(pk=pk).exists())
+        with shard_context("shard1"):
+            self.assertTrue(ObjectDB.objects.filter(pk=pk).exists())
+
+    def test_values_respects_shard_context(self):
+        # ``.values()`` returns dicts directly without going through
+        # from_db, but does flow through the manager's get_queryset
+        # and therefore the auto-filter. Same scoping behaviour as
+        # full querysets.
+        pk = self._make_row("values_probe", "shard1")
+        self.assertEqual(
+            list(ObjectDB.objects.filter(pk=pk).values("db_key")), []
+        )
+        with shard_context("shard1"):
+            self.assertEqual(
+                list(ObjectDB.objects.filter(pk=pk).values("db_key")),
+                [{"db_key": "values_probe"}],
+            )
+
+
+class CrossShardWriteTests(BaseEvenniaTestCase):
+    """Verifies cross-shard reads (full materialisation) and writes
+    (creates that auto-stamp under foreign shard_context). These paths
+    were previously blocked by ``isolation.py``'s ``from_db`` and
+    ``pre_save`` chokepoints; they pass cleanly under the multitenant
+    model where the auto-filter is the single boundary."""
+
+    def test_materialise_foreign_row_inside_its_shard_context(self):
+        # Forge a row to shard1 via raw SQL, then materialise it
+        # inside shard_context("shard1"). The auto-filter includes
+        # the row (scope ["shard1", "*"]), from_db fires, instance
+        # constructed — full round-trip via .get().
+        obj = ObjectDB.objects.create(
+            db_key="materialise_probe",
+            db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(obj.pk, "shard1")
+        from evennia.utils.idmapper.models import flush_cache
+
+        flush_cache()
+
+        with shard_context("shard1"):
+            row = ObjectDB.objects.get(pk=obj.pk)
+            self.assertEqual(row.shard_id, "shard1")
+            self.assertEqual(row.db_key, "materialise_probe")
+
+    def test_create_inside_foreign_shard_context_stamps_new_row(self):
+        # Inside shard_context("shard1"), creating a new ObjectDB
+        # auto-stamps shard_id="shard1" (the first item of the tenant
+        # list, not the global sentinel). The row is round-tripped via
+        # DB to confirm it actually persisted with the right stamp,
+        # not just in-memory.
+        with shard_context("shard1"):
+            obj = ObjectDB.objects.create(
+                db_key="cross_shard_create_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+            self.assertEqual(obj.shard_id, "shard1")
+            from evennia.utils.idmapper.models import flush_cache
+
+            flush_cache()
+            fresh = ObjectDB.objects.get(pk=obj.pk)
+            self.assertEqual(fresh.shard_id, "shard1")

@@ -11,9 +11,7 @@ from .config import (
     get_shard_id,
     get_shard_url,
 )
-from .errors import MessageBusError, ShardIsolationError, TicketError
-from .handoff import MoveResult, cross_shard_move
-from .isolation import shard_writes_allowed_for
+from .errors import MessageBusError, TicketError
 from .messagebus import (
     MessageHandler,
     delete_message,
@@ -24,7 +22,21 @@ from .messagebus import (
 )
 from .messaging import send_cross_shard_message, send_cross_shard_room_message
 from .search import ShardSearchResult, shard_aware_global_search
+from .tenancy import (
+    GLOBAL_SHARD_ID,
+    Shard,
+    clear_shard_context,
+    set_current_shard,
+    shard_context,
+)
 from .tickets import create_ticket, delete_ticket, get_ticket
+
+# === MULTITENANT TRIAL: handoff exports disabled pending rewrite.
+#     ``cross_shard_move`` and ``MoveResult`` will return once
+#     handoff.py has been migrated off ``shard_writes_allowed_for``
+#     onto ``shard_context(None)`` + ``qs.update(shard_id=...)``.
+#     See DESIGN/tenancy.md.
+# from .handoff import MoveResult, cross_shard_move
 
 __version__ = "0.0.1"
 
@@ -49,13 +61,16 @@ __all__ = [
     "create_ticket",
     "get_ticket",
     "delete_ticket",
-    "shard_writes_allowed_for",
-    "cross_shard_move",
-    "MoveResult",
     "shard_aware_global_search",
     "ShardSearchResult",
-    "ShardIsolationError",
     "MessageBusError",
     "TicketError",
+    # Multitenant tenancy primitives (replaced shard_writes_allowed_for
+    # / ShardIsolationError from the chokepoint era).
+    "GLOBAL_SHARD_ID",
+    "Shard",
+    "set_current_shard",
+    "clear_shard_context",
+    "shard_context",
     "__version__",
 ]

@@ -65,6 +65,17 @@ class EvenniaShardsConfig(AppConfig):
                     _existing_plugins + [_portal_plugin_path]
                 )
 
+            # === MULTITENANT TRIAL: legacy chokepoint-era extensions
+            #     disabled below. Each remaining block depends on a
+            #     module (handoff / hooks / commands / teleport) that
+            #     still references isolation.py / ShardIsolationError
+            #     or uses the chokepoint-based ``shard_writes_allowed_for``
+            #     bypass primitive. Move the ``return`` below the next
+            #     block as each one's dependencies are migrated onto
+            #     ``shard_context()`` + ``qs.update()`` patterns.
+            #     See DESIGN/tenancy.md.
+            return
+
             # Replace CmdIC with shard-aware version that redirects on
             # routers and blocks on shards. The AccountCmdSet references
             # account.CmdIC via module attribute, so patching the module
@@ -203,8 +214,3 @@ class EvenniaShardsConfig(AppConfig):
                 evennia._init = _shards_wrapped_init
                 evennia._evennia_shards_init_wrapped = True
 
-        # Install the shard isolation chokepoints + bypass machinery.
-        # See evennia_shards/isolation.py and DESIGN/shard-isolation.md.
-        from .isolation import install_chokepoints
-
-        install_chokepoints()

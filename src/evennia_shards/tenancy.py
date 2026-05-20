@@ -180,6 +180,7 @@ def install_tenancy_on_objectdb() -> None:
 
     Idempotent via a marker attribute on ``ObjectDB``.
     """
+    from django.db import models
     from django.db.utils import NotSupportedError
     from django_multitenant.mixins import TenantModelMixin
     from django_multitenant.utils import (
@@ -192,6 +193,17 @@ def install_tenancy_on_objectdb() -> None:
 
     if getattr(ObjectDB, "_evennia_shards_tenancy_installed", False):
         return
+
+    # 0. Late-bind the ``shard_id`` field onto ObjectDB. The column
+    #    exists in the database via the library's migrations; this
+    #    teaches the Django ORM about it so multitenant can read /
+    #    filter / stamp it. Migrated from ``isolation.install_chokepoints``
+    #    where it lived prior to the multitenant adoption.
+    if not any(f.name == "shard_id" for f in ObjectDB._meta.get_fields()):
+        ObjectDB.add_to_class(
+            "shard_id",
+            models.CharField(max_length=64, null=True, blank=True, db_index=True),
+        )
 
     # 1. Declare ObjectDB as a tenant-tagged model. Multitenant reads
     #    `cls.TenantMeta.tenant_field_name` to figure out which column
@@ -283,16 +295,24 @@ def install_tenancy_on_objectdb() -> None:
         except (AttributeError, ValueError):
             return _original_setattr(self, attrname, val)
 
+        # Only the case "setting the tenant column on an existing row"
+        # needs the immutability check. Everything else (db_key, _state,
+        # other field assignments, etc.) just delegates. Critical: we
+        # must NOT read ``self.tenant_value`` here unless we know we're
+        # in that case — accessing it triggers DeferredAttribute loading
+        # if shard_id wasn't in the original query's field set, which
+        # in turn fires refresh_from_db, re-enters from_db, re-enters
+        # __init__, calls __setattr__ again, infinite recursion.
         is_tenant_attr = attrname in (tenant_field_attr, tenant_field_name)
-        is_existing_row = not self._state.adding
-        new_value_differs = (
-            val
-            and self.tenant_value
-            and val != self.tenant_value
-            and val != self.tenant_object
-        )
-        if is_tenant_attr and is_existing_row and new_value_differs:
-            _original_setattr(self, "_try_update_tenant", True)
+        if is_tenant_attr and not self._state.adding:
+            new_value_differs = (
+                val
+                and self.tenant_value
+                and val != self.tenant_value
+                and val != self.tenant_object
+            )
+            if new_value_differs:
+                _original_setattr(self, "_try_update_tenant", True)
         return _original_setattr(self, attrname, val)
 
     ObjectDB.__setattr__ = _tenant_aware_setattr
