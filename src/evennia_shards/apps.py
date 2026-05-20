@@ -15,6 +15,16 @@ class EvenniaShardsConfig(AppConfig):
         from .config import ROLE_MONOLITH, ROLE_ROUTER, ROLE_SHARD, get_role
 
         if get_role() != ROLE_MONOLITH:
+            # Bootstrap the django-multitenant tenant context for this
+            # process. Shard processes scope all queries on tenant-tagged
+            # models to their own rows + ``"*"`` global rows; the router
+            # runs unscoped so it can coordinate across shards.
+            # See evennia_shards/tenancy.py and DESIGN/shard-isolation.md.
+            from .tenancy import bootstrap_tenant_context, install_tenancy_on_objectdb
+
+            bootstrap_tenant_context()
+            install_tenancy_on_objectdb()
+
             from django.conf import settings
 
             # Override the WebSocket protocol class so the library can
