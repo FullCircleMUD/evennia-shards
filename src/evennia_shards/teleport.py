@@ -290,9 +290,10 @@ class ShardAwareCmdTeleport(CmdTeleport):
             )
             return
 
-        if "quiet" in self.switches:
-            return
-
+        # Caller always sees a confirmation — vanilla CmdTeleport.func
+        # at building.py:3949 emits "Teleported X -> Y." unconditionally;
+        # the /quiet switch only suppresses the source/destination room
+        # announces (which the cross-shard branch wires separately).
         who = (
             "you"
             if self.obj_to_teleport == self.caller

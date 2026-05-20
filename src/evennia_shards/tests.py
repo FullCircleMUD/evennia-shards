@@ -3149,8 +3149,17 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
         self.assertIn("/intoexit", msg)
         self.assertIn("not yet supported", msg)
 
-    def test_quiet_suppresses_cross_shard_success_message(self):
-        """/quiet skips the post-success summary line."""
+    def test_quiet_does_not_suppress_caller_confirmation(self):
+        """/quiet must NOT silence the caller-facing summary message.
+
+        Vanilla CmdTeleport.func at building.py:3949 unconditionally
+        emits "Teleported X -> Y." — /quiet only suppresses the
+        source/destination room announces (the leave/arrive
+        messages), never the caller's own confirmation. Our
+        cross-shard branch was previously inverted (silenced the
+        caller under /quiet); this test pins the vanilla-aligned
+        behaviour going forward.
+        """
         from unittest import mock
         from evennia_shards.handoff import MoveResult
 
@@ -3169,8 +3178,10 @@ class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
         ):
             cmd.func()
 
-        # No summary message under /quiet.
-        self.assertEqual(cmd.caller.messages, [])
+        # Caller still sees the confirmation under /quiet.
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("Teleported", msg)
+        self.assertIn("newroom", msg)
 
 
 @override_settings(
