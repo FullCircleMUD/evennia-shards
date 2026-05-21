@@ -240,10 +240,45 @@ Four steps:
 
 A future helper in `tenancy.py` (e.g. `with_remote_row(pk, shard_id) as obj:`) could encapsulate the load + evict pair so call sites don't have to repeat the eviction step. Worth doing once a second use case lands.
 
+## Cross-thread tenant propagation
+
+`django-multitenant` stores the active tenant in `threading.local`. Code dispatched into a separate thread — Twisted's `deferToThread` / `run_async`, `ThreadPoolExecutor.submit`, `asyncio.to_thread` — runs under a fresh `threading.local` with no tenant set. ORM work inside the worker thread sees `get_current_tenant() is None`: queries run unscoped, and the auto-stamp on insert is skipped (the stamp condition requires both `tenant_value is None` *and* a current tenant set).
+
+For consumer code dispatching ORM work into a worker, use `preserve_tenant_context`:
+
+```python
+from evennia_shards import preserve_tenant_context
+
+# Wraps the callable so it carries the current tenant into the worker.
+deferToThread(preserve_tenant_context(do_work), *args)
+```
+
+Behaviour:
+
+- **Capture happens at wrap time, not at call time.** Wrap and dispatch in the same expression so the captured value is the tenant active on the reactor thread.
+- **The wrapped callable sets the captured tenant on entry, restores the worker thread's previous tenant on exit** (which is `None` for a fresh thread, restored as `None`).
+- **No-op when no tenant is active at wrap time** — captures `None`, wrapped callable runs unscoped, same as without the wrap.
+- **Exception-safe** — the restore runs in a `finally` block.
+
+### Pattern for other Evennia libraries
+
+`preserve_tenant_context` is designed as the canonical integration point for other infrastructure libraries that dispatch ORM work into threads. The library-to-library composition rule: the sibling library try-imports the helper, falling back to an identity passthrough when shards isn't installed:
+
+```python
+try:
+    from evennia_shards import preserve_tenant_context
+except ImportError:
+    def preserve_tenant_context(fn):
+        return fn
+```
+
+Three lines. After that, the sibling library uses `preserve_tenant_context(callable)` at every dispatch point. In a sharded deployment the wrap captures-and-restores tenant; in a non-sharded deployment it's a transparent passthrough. Same code path either way — no `if shards_installed:` branching in the consumer.
+
+Live consumer: [`evennia-world-builder`'s `wb_build` command](https://github.com/FullCircleMUD/evennia-world-builder/blob/main/src/evennia_world_builder/commands.py) wraps its `run_async` pipeline dispatch so worker-thread-created rooms get correctly stamped under multi-shard deployments.
+
 ## Known gaps
 
 - **Idmapper cache.** Evennia's `SharedMemoryManager` caches model instances by pk and serves them on `get()` without re-hitting the DB. The cache is implicitly scoped because every populating read goes through the auto-filter — but cross-shard reads via `shard_context()` can poison the cache with foreign instances. Always pair such reads with `flush_from_cache(force=True)`.
-- **Twisted `deferToThread`.** Multitenant uses `threading.local` by default; `deferToThread` callbacks won't inherit the tenant. Either set `TENANT_USE_ASGIREF = True` or audit which paths do ORM work in deferred threads.
 - **`TENANT_STRICT_MODE`.** Multitenant supports raising `EmptyTenant` on `_do_update` when no tenant is set; worth enabling in dev/CI to catch "forgot to set tenant context" bugs.
 
 ## Outstanding investigation
