@@ -566,7 +566,7 @@ class CrossShardWriteTests(BaseEvenniaTestCase):
 
 
 class _FakeSession:
-    """Minimal session stand-in for cross_shard_move tests."""
+    """Minimal session stand-in for cross_shard_move and hook tests."""
 
     def __init__(self, address="127.0.0.1"):
         self.address = address
@@ -574,9 +574,13 @@ class _FakeSession:
         self.puid = None
         self.oob_messages = {}
         self.protocol_flags = {}
+        self.flag_updates = {}
 
     def msg(self, **kwargs):
         self.oob_messages.update(kwargs)
+
+    def update_flags(self, **flags):
+        self.flag_updates.update(flags)
 
 
 class _FakeAttributes:
@@ -588,17 +592,36 @@ class _FakeAttributes:
     def get(self, name, default=None):
         return self._store.get(name, default)
 
+    def reset_cache(self):
+        # No-op: the fake doesn't keep a separate cache to invalidate.
+        pass
+
 
 class _FakeAccount:
-    """Minimal account stand-in. Exposes ``db._last_puppet`` so the
-    redirect helper has somewhere to write its last-puppet stamp."""
+    """Account stand-in for cross_shard_move and hook tests.
 
-    def __init__(self, pk=1):
+    Exposes ``db._last_puppet`` for the redirect helper and recorders
+    (``account_messages``, ``connect_channel_messages``, ``at_look_calls``)
+    for asserting on hook side-effects.
+    """
+
+    def __init__(self, pk=1, characters=None, key="Player1"):
         self._saved_attrs = {}
         self.id = pk
         self.pk = pk
+        self.key = key
+        self._characters = characters or []
         self.db = self  # db.X delegates to self.X
         self.attributes = _FakeAttributes()
+        # Default False so hooks reading ``account.db._shards_at_ooc_menu``
+        # don't AttributeError on the fake (vanilla AttributeHandler
+        # returns None silently for unset attrs, but here ``db = self``
+        # so the attribute has to actually exist).
+        self._shards_at_ooc_menu = False
+        # Recorders for hook side-effect assertions.
+        self.account_messages = []
+        self.connect_channel_messages = []
+        self.at_look_calls = []
 
     @property
     def _last_puppet(self):
@@ -607,6 +630,60 @@ class _FakeAccount:
     @_last_puppet.setter
     def _last_puppet(self, value):
         self._saved_attrs["_last_puppet"] = value
+
+    @property
+    def characters(self):
+        return self._characters
+
+    def msg(self, text=None, session=None, **kwargs):
+        if text is not None:
+            self.account_messages.append(text)
+
+    def _send_to_connect_channel(self, message):
+        self.connect_channel_messages.append(message)
+
+    def at_look(self, target=None, session=None, **kwargs):
+        self.at_look_calls.append({"target": target, "session": session})
+        return "OOC menu"
+
+    def get_puppet(self, session):
+        return session.puppet
+
+    def search(self, searchdata, candidates=None, search_object=True, quiet=True):
+        """Simple name-match search against candidates."""
+        if candidates:
+            return [c for c in candidates if c.key == searchdata]
+        return []
+
+    @property
+    def locks(self):
+        return self
+
+    def check_lockstring(self, account, lockstring):
+        return False  # non-Builder for simplicity
+
+    def unpuppet_object(self, session):
+        for s in (session if isinstance(session, (list, tuple)) else [session]):
+            s.puppet = None
+
+
+class _FakeCaller:
+    """Caller stand-in for admin command tests.
+
+    Captures ``msg(...)`` calls and resolves ``search(...)`` to a
+    pre-set target object (or ``None``).
+    """
+
+    def __init__(self, search_returns=None):
+        self.messages = []
+        self.search_returns = search_returns
+
+    def search(self, searchdata):
+        return self.search_returns
+
+    def msg(self, text=None, **kwargs):
+        if text is not None:
+            self.messages.append(text)
 
 
 class _FakeSessionHandler:
@@ -618,6 +695,29 @@ class _FakeSessionHandler:
 
     def all(self):
         return list(self._sessions)
+
+
+class _FakeCharacter:
+    """Minimal character stand-in for router-side hook tests.
+
+    The router-side override reads ``shard_id`` directly and calls
+    ``flush_from_cache`` / ``refresh_from_db`` as cache-bust steps.
+    Both are no-ops in tests — the row's ``shard_id`` is set
+    statically at construction.
+    """
+
+    def __init__(self, key, pk, shard_id="shard0"):
+        self.key = key
+        self.id = pk
+        self.pk = pk
+        self.shard_id = shard_id
+        self.name = key
+
+    def flush_from_cache(self, force=False):
+        pass
+
+    def refresh_from_db(self, fields=None):
+        pass
 
 
 @override_settings(
@@ -1072,3 +1172,963 @@ class CrossShardMoveTests(BaseEvenniaTestCase):
         local.shard_id = "shard1"  # flags _try_update_tenant
         with self.assertRaises(NotSupportedError):
             local.save()
+
+
+# ---------------------------------------------------------------------------
+# at_post_login override (router-side: shard_aware_at_post_login)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARDS_ROLE="router",
+    SHARD_ID="router",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+)
+class AtPostLoginRouterTests(BaseEvenniaTestCase):
+    """Direct tests for ``shard_aware_at_post_login`` on routers.
+
+    The override replaces Evennia's ``at_post_login`` on routers,
+    intercepting the ``AUTO_PUPPET_ON_LOGIN=True`` branch and converting
+    it to a ticket redirect (or, on fallback, the OOC menu). The router
+    runs unscoped (see ``bootstrap_tenant_context``), so the override's
+    ``ObjectDB`` reads are unaffected by tenant filtering.
+    """
+
+    def test_valid_last_puppet_redirects_and_runs_prelude(self):
+        """``_last_puppet`` on a real shard → redirect + prelude side-effects."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        session = _FakeSession(address="10.0.0.1")
+
+        shard_aware_at_post_login(account, session=session)
+
+        # Prelude side-effects ran.
+        self.assertEqual(session.oob_messages.get("logged_in"), {})
+        self.assertEqual(len(account.connect_channel_messages), 1)
+        self.assertIn("connected", account.connect_channel_messages[0])
+
+        # Redirect happened: ticket created and shard_redirect OOB sent.
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, 7)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+        self.assertIn("shard_redirect", session.oob_messages)
+
+        # Fallback path did NOT run.
+        self.assertEqual(account.at_look_calls, [])
+
+    def test_no_last_puppet_falls_through_to_ooc_menu_silently(self):
+        """``_last_puppet=None`` → OOC menu, no warning, no ticket."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        account = _FakeAccount(pk=7)
+        session = _FakeSession()
+
+        with self.assertNoLogs("evennia", level="WARNING"):
+            shard_aware_at_post_login(account, session=session)
+
+        self.assertEqual(session.oob_messages.get("logged_in"), {})
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+        self.assertEqual(len(account.at_look_calls), 1)
+        self.assertIn("OOC menu", account.account_messages)
+
+    def test_unusable_shard_id_warns_and_falls_through(self):
+        """``_last_puppet`` set with broken ``shard_id`` → warning + OOC menu."""
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        for bad_shard_id in (None, "*", "unknown_shard"):
+            with self.subTest(shard_id=bad_shard_id):
+                Ticket.objects.all().delete()
+                char = _FakeCharacter("Bob", pk=42, shard_id=bad_shard_id)
+                account = _FakeAccount(pk=7)
+                account.db._last_puppet = char
+                session = _FakeSession()
+
+                shard_aware_at_post_login(account, session=session)
+
+                self.assertEqual(Ticket.objects.count(), 0)
+                self.assertNotIn("shard_redirect", session.oob_messages)
+                self.assertEqual(len(account.at_look_calls), 1)
+
+    def test_at_ooc_menu_flag_skips_auto_redirect(self):
+        """``account.db._shards_at_ooc_menu=True`` → OOC menu, no redirect.
+
+        The flag is the persistent OOC-intent signal. Covers the
+        refresh / reconnect / next-day-login path: no fresh ticket
+        auth on this connection, but the persisted flag is True so
+        the OOC menu is rendered.
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        account.db._shards_at_ooc_menu = True
+        session = _FakeSession()
+
+        shard_aware_at_post_login(account, session=session)
+
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+        self.assertEqual(len(account.at_look_calls), 1)
+
+    def test_ticket_authed_protocol_flag_persists_to_account(self):
+        """``protocol_flags.SHARDS_TICKET_AUTHED=True`` → persist + OOC menu.
+
+        Fresh @ooc arrival flow: Portal sets ``protocol_flags`` on the
+        ticket-auth path, AMP-syncs to Server. The override reads the
+        flag, persists OOC intent to the account, and renders the OOC
+        menu (suppressing auto-puppet even with a redirectable
+        ``_last_puppet`` set).
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        account.db._shards_at_ooc_menu = False
+        session = _FakeSession()
+        session.protocol_flags["SHARDS_TICKET_AUTHED"] = True
+
+        shard_aware_at_post_login(account, session=session)
+
+        self.assertTrue(account.db._shards_at_ooc_menu)
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+        self.assertEqual(len(account.at_look_calls), 1)
+
+    @override_settings(AUTO_PUPPET_ON_LOGIN=False)
+    def test_auto_puppet_disabled_renders_ooc_menu_unconditionally(self):
+        """``AUTO_PUPPET_ON_LOGIN=False`` → OOC menu, no redirect.
+
+        If the consumer has disabled auto-puppet, the library's
+        override must not auto-redirect either — vanilla's else-branch
+        always renders the OOC menu in that case.
+        """
+        from evennia_shards.hooks import shard_aware_at_post_login
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        session = _FakeSession()
+
+        shard_aware_at_post_login(account, session=session)
+
+        self.assertEqual(Ticket.objects.count(), 0)
+        self.assertNotIn("shard_redirect", session.oob_messages)
+        self.assertEqual(len(account.at_look_calls), 1)
+
+
+# ---------------------------------------------------------------------------
+# at_post_login override (shard-side: make_shard_at_post_login)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARDS_ROLE="shard",
+    SHARD_ID="shard0",
+    SHARD_URLS={
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
+    },
+)
+class AtPostLoginShardTests(BaseEvenniaTestCase):
+    """Direct tests for ``make_shard_at_post_login`` on shards.
+
+    The shard-side override is a thin wrapper around Evennia's original
+    ``at_post_login``. It flushes the idmapper / Attribute cache for
+    ``_last_puppet`` so vanilla puppet_object works against the current
+    DB state. Under multitenant, if the character has been moved off
+    this shard while the account was offline, ``refresh_from_db`` raises
+    ``ObjectDB.DoesNotExist`` (the auto-filter excludes the foreign row);
+    the wrapper catches that and nulls out ``_last_puppet`` so the
+    original falls through to the OOC menu.
+    """
+
+    def _make_wrapped(self):
+        """Build a wrapped at_post_login + the call recorder it wraps."""
+        from evennia_shards.hooks import make_shard_at_post_login
+
+        calls = []
+
+        def original_at_post_login(account, session=None, **kwargs):
+            calls.append({
+                "last_puppet": account.db._last_puppet,
+                "session": session,
+            })
+
+        return make_shard_at_post_login(original_at_post_login), calls
+
+    def test_normal_refresh_passes_through_to_original(self):
+        """Local character row exists → refresh_from_db succeeds → original fires."""
+        wrapped, calls = self._make_wrapped()
+
+        char = ObjectDB.objects.create(
+            db_key="local_char", db_typeclass_path=TYPECLASS,
+        )
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        session = _FakeSession()
+
+        wrapped(account, session=session)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["last_puppet"], char)
+        self.assertIs(calls[0]["session"], session)
+
+    def test_foreign_row_clears_last_puppet_and_passes_through(self):
+        """Character moved off this shard → DoesNotExist → ``_last_puppet`` cleared.
+
+        The new (multitenant-specific) failure-mode coverage: if another
+        process moved the character to a different shard while the
+        account was offline, the row is foreign to this shard and the
+        auto-filter excludes it. ``refresh_from_db`` raises
+        ``DoesNotExist``; the wrapper catches it, nulls
+        ``_last_puppet``, then calls original — which sees None and
+        falls through to the OOC menu.
+        """
+        wrapped, calls = self._make_wrapped()
+
+        char = ObjectDB.objects.create(
+            db_key="foreign_char", db_typeclass_path=TYPECLASS,
+        )
+        # Force the row onto another shard via raw SQL — simulates a
+        # cross_shard_move that happened on a different process.
+        _forge_db_shard(char.pk, "shard1")
+
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = char
+        session = _FakeSession()
+
+        wrapped(account, session=session)
+
+        # Original still fired (auto-puppet flow proceeds), but with
+        # _last_puppet cleared so vanilla renders the OOC menu.
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["last_puppet"])
+        self.assertIsNone(account.db._last_puppet)
+
+    def test_no_last_puppet_passes_through_unchanged(self):
+        """``_last_puppet=None`` → skip refresh, call original directly."""
+        wrapped, calls = self._make_wrapped()
+
+        account = _FakeAccount(pk=7)
+        session = _FakeSession()
+
+        wrapped(account, session=session)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["last_puppet"])
+
+    def test_character_without_flush_from_cache_passes_through(self):
+        """Defensive: non-ObjectDB ``_last_puppet`` → skip refresh.
+
+        Some test/edge configurations may store a non-ObjectDB object
+        as ``_last_puppet`` (e.g. a fake). The wrapper's
+        ``hasattr(character, 'flush_from_cache')`` guard ensures these
+        don't crash the login flow.
+        """
+        wrapped, calls = self._make_wrapped()
+
+        class _PlainObj:
+            pass
+
+        account = _FakeAccount(pk=7)
+        account.db._last_puppet = _PlainObj()
+        session = _FakeSession()
+
+        wrapped(account, session=session)
+
+        self.assertEqual(len(calls), 1)
+
+
+# ---------------------------------------------------------------------------
+# Consumer-override detection (warn_if_at_post_login_overridden)
+# ---------------------------------------------------------------------------
+
+
+class WarnIfAtPostLoginOverriddenTests(BaseEvenniaTestCase):
+    """Detect consumer overrides of ``Account.at_post_login``.
+
+    The library patches ``DefaultAccount.at_post_login`` directly. A
+    consumer subclass that overrides ``at_post_login`` shadows the
+    library's patch via Python MRO unless the override calls
+    ``super()``. The detector walks the MRO and returns True iff an
+    override is present below ``DefaultAccount``.
+    """
+
+    def test_default_account_returns_false(self):
+        """``DefaultAccount`` itself is the patch target — no warning."""
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        self.assertFalse(
+            warn_if_at_post_login_overridden(DefaultAccount, "router")
+        )
+        self.assertFalse(
+            warn_if_at_post_login_overridden(DefaultAccount, "shard")
+        )
+
+    def test_subclass_with_intermediate_override_returns_true(self):
+        """Override at any level between leaf and ``DefaultAccount`` triggers."""
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class MidLevelAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                pass
+
+        class LeafAccount(MidLevelAccount):
+            pass
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(LeafAccount, "router")
+        )
+
+    def test_subclass_without_override_returns_false(self):
+        """Subclass with no ``at_post_login`` override: no warning."""
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class PassThroughAccount(DefaultAccount):
+            pass
+
+        self.assertFalse(
+            warn_if_at_post_login_overridden(PassThroughAccount, "router")
+        )
+        self.assertFalse(
+            warn_if_at_post_login_overridden(PassThroughAccount, "shard")
+        )
+
+    def test_subclass_with_override_returns_true(self):
+        """Consumer override is detected."""
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class ShadowingAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                pass  # consumer override that does NOT call super()
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(ShadowingAccount, "router")
+        )
+        self.assertTrue(
+            warn_if_at_post_login_overridden(ShadowingAccount, "shard")
+        )
+
+    def test_subclass_with_super_calling_override_still_returns_true(self):
+        """A correct (super-calling) override still triggers the warning.
+
+        Detection is by ``__dict__`` membership and can't distinguish a
+        well-behaved override from a shadowing one. The false-positive
+        cost is one log line at startup; documented as deliberate in
+        the function's docstring.
+        """
+        from evennia.accounts.accounts import DefaultAccount
+
+        from evennia_shards.hooks import warn_if_at_post_login_overridden
+
+        class CooperativeAccount(DefaultAccount):
+            def at_post_login(self, session=None, **kwargs):
+                super().at_post_login(session=session, **kwargs)
+
+        self.assertTrue(
+            warn_if_at_post_login_overridden(CooperativeAccount, "router")
+        )
+
+
+# ---------------------------------------------------------------------------
+# Character creation wrapper (router-side: make_shard_aware_create_character)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
+    """Direct tests for ``make_shard_aware_create_character``.
+
+    The wrapper sits on the router-side ``Account.create_character`` seam
+    (the converging point for ``CmdCharCreate``,
+    ``AUTO_CREATE_CHARACTER_WITH_ACCOUNT``, and the guest path). On
+    successful chargen it reads the new character's start-location row's
+    ``shard_id`` via ``.values_list`` and stamps the character to match,
+    overwriting the ``NULL`` left by the unscoped router's skipped
+    auto-stamp. Tests use real ``ObjectDB`` rows for the location lookup;
+    vanilla ``create_character`` is a stub callable that returns a
+    pre-built character row.
+
+    The test class clears the tenant context in ``setUp`` and restores
+    it in ``tearDown``. ``@override_settings`` changes the settings
+    dict but does not re-run ``bootstrap_tenant_context()``, and the
+    suite-wide bootstrap leaves the process scoped to ``shard0``; for
+    the wrapper to behave router-like (unscoped) the tests have to
+    manage that context explicitly.
+    """
+
+    def setUp(self):
+        self._previous_tenant = get_current_tenant()
+        clear_shard_context()
+
+    def tearDown(self):
+        if self._previous_tenant is None:
+            clear_shard_context()
+        else:
+            from django_multitenant.utils import set_current_tenant
+            set_current_tenant(self._previous_tenant)
+
+    def _make_room(self, shard_id):
+        """Create an ObjectDB row to act as the start location."""
+        room = ObjectDB.objects.create(
+            db_key="start_room", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(room.pk, shard_id)
+        return room
+
+    def _make_character(self, location):
+        """Create an ObjectDB row to act as the new character.
+
+        Under multitenant on the router (unscoped), the auto-stamp on
+        insert is skipped, so the new row lands with ``shard_id=NULL``.
+        """
+        char = ObjectDB.objects.create(
+            db_key="newchar",
+            db_typeclass_path=TYPECLASS,
+            db_location=location,
+        )
+        return char
+
+    def _stub_original(self, character, errs=None):
+        """Build a vanilla-shaped ``create_character`` stub.
+
+        Records its kwargs so tests can assert pass-through.
+        """
+        recorder = {"args": None, "kwargs": None}
+
+        def _original(self, *args, **kwargs):
+            recorder["args"] = args
+            recorder["kwargs"] = kwargs
+            return character, errs
+
+        return _original, recorder
+
+    def _persisted_shard(self, pk):
+        """Read a row's shard_id directly, bypassing the auto-filter."""
+        with shard_context(None):
+            return (
+                ObjectDB.objects.filter(pk=pk)
+                .values_list("shard_id", flat=True)[0]
+            )
+
+    def test_stamps_shard_id_from_start_location(self):
+        """Happy path: new character's shard_id matches start room's."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="shard0")
+        char = self._make_character(location=room)
+        # Sanity: unscoped router auto-stamp is skipped — row lands NULL.
+        self.assertIsNone(char.shard_id)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        result_char, result_errs = wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIs(result_char, char)
+        self.assertIsNone(result_errs)
+        # Persisted update_fields=["shard_id"] write.
+        self.assertEqual(self._persisted_shard(char.pk), "shard0")
+        # In-memory instance also updated.
+        self.assertEqual(char.shard_id, "shard0")
+
+    def test_passes_through_when_vanilla_returns_none(self):
+        """Vanilla refused (e.g. slot limit) → wrapper returns same tuple."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        errs = ["You have reached the max characters for this account."]
+        original, recorder = self._stub_original(None, errs=errs)
+        wrapped = make_shard_aware_create_character(original)
+
+        result_char, result_errs = wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(result_char)
+        self.assertEqual(result_errs, errs)
+        self.assertEqual(recorder["args"], ("Bob",))
+
+    def test_unstamped_start_location_leaves_unstamped(self):
+        """Start room shard_id=None → character left as ``NULL``.
+
+        Wrapper logs a warning; we assert on the side-effect (no
+        overwrite) rather than the log.
+        """
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = ObjectDB.objects.create(
+            db_key="start_room", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(room.pk, None)
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(self._persisted_shard(char.pk))
+
+    def test_global_start_location_leaves_unstamped(self):
+        """Start room shard_id="*" → character left as ``NULL``."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="*")
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(self._persisted_shard(char.pk))
+
+    def test_router_owned_start_location_leaves_unstamped(self):
+        """Start room shard_id="router" → no overwrite."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="router")
+        char = self._make_character(location=room)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(self._persisted_shard(char.pk))
+
+    def test_no_db_location_leaves_unstamped(self):
+        """Character created without db_location → no overwrite."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        char = ObjectDB.objects.create(
+            db_key="newchar", db_typeclass_path=TYPECLASS,
+        )
+        self.assertIsNone(char.db_location_id)
+
+        original, _ = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        wrapped(_FakeAccount(pk=7), "Bob")
+
+        self.assertIsNone(self._persisted_shard(char.pk))
+
+    def test_kwargs_flow_through_to_vanilla(self):
+        """Wrapper does not mutate args/kwargs going into vanilla."""
+        from evennia_shards.chargen import make_shard_aware_create_character
+
+        room = self._make_room(shard_id="shard0")
+        char = self._make_character(location=room)
+
+        original, recorder = self._stub_original(char)
+        wrapped = make_shard_aware_create_character(original)
+
+        sentinel = object()
+        wrapped(
+            _FakeAccount(pk=7),
+            "Bob",
+            "A description.",
+            typeclass="my.path",
+            character_typeclass="my.path",
+            extra=sentinel,
+        )
+
+        self.assertEqual(recorder["args"], ("Bob", "A description."))
+        self.assertEqual(recorder["kwargs"]["typeclass"], "my.path")
+        self.assertEqual(recorder["kwargs"]["character_typeclass"], "my.path")
+        self.assertIs(recorder["kwargs"]["extra"], sentinel)
+
+
+# ---------------------------------------------------------------------------
+# Library admin commands (CmdShardCheck, CmdCrossShardDig)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARD_ID="shard0", SHARDS_ROLE="shard",
+    SHARD_URLS={
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
+    },
+)
+class CmdShardCheckTests(BaseEvenniaTestCase):
+    """``CmdShardCheck`` reports an object's shard_id (ORM + raw SQL)."""
+
+    def _make_cmd(self, args="", search_returns=None):
+        from evennia_shards.commands import CmdShardCheck
+
+        cmd = CmdShardCheck()
+        cmd.args = args
+        cmd.caller = _FakeCaller(search_returns=search_returns)
+        return cmd
+
+    def test_no_args_shows_usage(self):
+        cmd = self._make_cmd("")
+        cmd.func()
+        self.assertEqual(len(cmd.caller.messages), 1)
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_unknown_target_returns_silently(self):
+        # search() returning None means "not found" — Evennia has
+        # already messaged the caller. Command should add nothing.
+        cmd = self._make_cmd("ghost", search_returns=None)
+        cmd.func()
+        self.assertEqual(cmd.caller.messages, [])
+
+    def test_reports_shard_id_for_target(self):
+        target = ObjectDB.objects.create(db_key="x", db_typeclass_path=TYPECLASS)
+        cmd = self._make_cmd("x", search_returns=target)
+        cmd.func()
+
+        # Both ORM and raw-SQL probes report the value.
+        joined = "\n".join(cmd.caller.messages)
+        self.assertIn("ORM:", joined)
+        self.assertIn("DB:", joined)
+        self.assertIn("shard0", joined)
+
+
+@override_settings(
+    SHARD_ID="shard0", SHARDS_ROLE="shard",
+    SHARD_URLS={
+        "shard0": "ws://localhost:4011/",
+        "shard1": "ws://localhost:4021/",
+    },
+)
+class CmdCrossShardDigTests(BaseEvenniaTestCase):
+    """``CmdCrossShardDig`` creates a room stamped with a target shard's id.
+
+    Under multitenant the wrapper uses ``shard_context(target_shard)``
+    around ``create_object`` so the auto-stamp lands the target shard
+    on insert — no post-creation re-stamp needed.
+    """
+
+    def _make_cmd(self, args=""):
+        from evennia_shards.commands import CmdCrossShardDig
+
+        cmd = CmdCrossShardDig()
+        cmd.args = args
+        cmd.caller = _FakeCaller()
+        return cmd
+
+    def test_no_args_shows_usage(self):
+        cmd = self._make_cmd("")
+        cmd.func()
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_one_arg_shows_usage(self):
+        cmd = self._make_cmd("shard1")
+        cmd.func()
+        self.assertIn("Usage:", cmd.caller.messages[0])
+
+    def test_unknown_shard_id_reports_error_no_room_created(self):
+        before = ObjectDB.objects.count()
+        cmd = self._make_cmd("nonexistent_shard MyRoom")
+        cmd.func()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("nonexistent_shard", msg)
+        self.assertIn("not configured", msg)
+        # Validation precedes creation: row count unchanged.
+        self.assertEqual(ObjectDB.objects.count(), before)
+
+    def test_creates_room_stamped_to_target_shard(self):
+        cmd = self._make_cmd("shard1 TargetLimbo")
+        cmd.func()
+
+        # Read with auto-filter escape — the new row lives on shard1,
+        # which the suite's default shard0 scope would exclude.
+        with shard_context(None):
+            rows = list(
+                ObjectDB.objects.filter(db_key="TargetLimbo")
+                .values_list("shard_id", "db_location_id")
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0], ("shard1", None))
+
+        # Success message includes the target shard.
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("TargetLimbo", msg)
+        self.assertIn("shard1", msg)
+
+
+class AdminCommandAutoInstallTests(BaseEvenniaTestCase):
+    """Library admin commands auto-install into ``CharacterCmdSet``.
+
+    The install happens via a wrapper around ``evennia._init`` registered
+    in ``AppConfig.ready()``. The test runner calls ``evennia._init()``
+    explicitly, so by the time tests run the patch is in place.
+    """
+
+    def test_character_cmdset_contains_library_commands(self):
+        from evennia.commands.default.cmdset_character import CharacterCmdSet
+
+        cmdset = CharacterCmdSet()
+        cmdset.at_cmdset_creation()
+        keys = {cmd.key for cmd in cmdset.commands}
+        self.assertIn("@shard_check", keys)
+        self.assertIn("cross_shard_dig", keys)
+
+
+# ---------------------------------------------------------------------------
+# ShardAwareCmdIC (router-side redirect, shard-side reject)
+# ---------------------------------------------------------------------------
+
+
+def _make_ic_cmd(args="", account=None, session=None, characters=None):
+    """Build a ShardAwareCmdIC instance wired up for testing."""
+    from evennia_shards.commands import ShardAwareCmdIC
+
+    cmd = ShardAwareCmdIC()
+    cmd.args = args
+    cmd.raw_string = f"ic {args}"
+    cmd.session = session or _FakeSession()
+    if account is None:
+        account = _FakeAccount(characters=characters or [])
+    cmd.account = account
+    cmd.caller = account
+    cmd._messages = []
+
+    def _msg(text, **kwargs):
+        cmd._messages.append(text)
+
+    cmd.msg = _msg
+    return cmd
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+)
+class ShardAwareCmdICShardTests(BaseEvenniaTestCase):
+    """IC command on a shard tells the player to return to the router."""
+
+    def test_shard_rejects_ic(self):
+        cmd = _make_ic_cmd(args="Bob")
+        cmd.func()
+        self.assertEqual(len(cmd._messages), 1)
+        self.assertIn("Leave this character", cmd._messages[0])
+
+    def test_shard_rejects_ic_no_args(self):
+        cmd = _make_ic_cmd(args="")
+        cmd.func()
+        self.assertEqual(len(cmd._messages), 1)
+        self.assertIn("Leave this character", cmd._messages[0])
+
+
+@override_settings(
+    SHARDS_ROLE="router", SHARD_ID="router",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+)
+class ShardAwareCmdICRouterTests(BaseEvenniaTestCase):
+    """IC command on the router creates a ticket and redirects."""
+
+    def test_router_creates_ticket_and_redirects(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        cmd = _make_ic_cmd(args="Bob", characters=[char], session=session)
+        cmd.func()
+
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, cmd.account.id)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+
+        self.assertIn("shard_redirect", session.oob_messages)
+        url = session.oob_messages["shard_redirect"][0][0]
+        self.assertIn("ws://localhost:4011/?ticket=", url)
+        self.assertIn(ticket.token, url)
+
+    def test_router_sets_last_puppet(self):
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        cmd = _make_ic_cmd(args="Bob", account=account)
+        cmd.func()
+        self.assertIs(account.db._last_puppet, char)
+
+    def test_router_no_args_uses_last_puppet(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        account.db._last_puppet = char
+        session = _FakeSession()
+        cmd = _make_ic_cmd(args="", account=account, session=session)
+        cmd.func()
+
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_router_no_args_no_last_puppet_shows_usage(self):
+        cmd = _make_ic_cmd(args="")
+        cmd.func()
+        self.assertTrue(any("Usage:" in m for m in cmd._messages))
+
+    def test_router_character_no_shard_id_gives_error(self):
+        char = _FakeCharacter("Bob", pk=42, shard_id=None)
+        cmd = _make_ic_cmd(args="Bob", characters=[char])
+        cmd.func()
+        self.assertTrue(any("no shard assignment" in m for m in cmd._messages))
+
+    def test_router_character_global_shard_gives_error(self):
+        char = _FakeCharacter("Bob", pk=42, shard_id="*")
+        cmd = _make_ic_cmd(args="Bob", characters=[char])
+        cmd.func()
+        self.assertTrue(any("no shard assignment" in m for m in cmd._messages))
+
+    def test_router_character_not_found(self):
+        cmd = _make_ic_cmd(args="Nobody", characters=[])
+        cmd.func()
+        self.assertTrue(any("not a valid character" in m for m in cmd._messages))
+
+    def test_router_ip_pinned_in_ticket(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession(address="10.0.0.1")
+        cmd = _make_ic_cmd(args="Bob", characters=[char], session=session)
+        cmd.func()
+
+        ticket = Ticket.objects.first()
+        self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+    def test_router_ic_clears_ooc_menu_flag(self):
+        """ic on the router clears account.db._shards_at_ooc_menu."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(characters=[char])
+        account.db._shards_at_ooc_menu = True
+        cmd = _make_ic_cmd(args="Bob", account=account)
+        cmd.func()
+
+        self.assertFalse(account.db._shards_at_ooc_menu)
+
+
+# ---------------------------------------------------------------------------
+# ShardAwareCmdOOC (shard-side redirect to router)
+# ---------------------------------------------------------------------------
+
+
+def _make_ooc_cmd(account=None, session=None, puppet=None):
+    """Build a ShardAwareCmdOOC instance wired up for testing."""
+    from evennia_shards.commands import ShardAwareCmdOOC
+
+    cmd = ShardAwareCmdOOC()
+    cmd.args = ""
+    cmd.raw_string = "ooc"
+    if session is None:
+        session = _FakeSession()
+    if puppet is not None:
+        session.puppet = puppet
+    cmd.session = session
+    if account is None:
+        account = _FakeAccount()
+    cmd.account = account
+    cmd.caller = account
+    cmd._messages = []
+
+    def _msg(text, **kwargs):
+        cmd._messages.append(text)
+
+    cmd.msg = _msg
+    return cmd
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+    ROUTER_URL="ws://localhost:4001/",
+)
+class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
+    """OOC command on a shard creates a ticket and redirects to router."""
+
+    def test_shard_with_puppet_creates_ticket_and_redirects(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(session=session, puppet=char)
+        cmd.func()
+
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        self.assertEqual(tickets[0].character_id, 42)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_shard_no_puppet_with_last_puppet_redirects(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(account=account, session=session)
+        cmd.func()
+
+        self.assertEqual(Ticket.objects.first().character_id, 42)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_shard_no_puppet_no_last_puppet_redirects_with_zero(self):
+        """Broken state: no puppet, no _last_puppet → ticket with character_id=0."""
+        from evennia_shards.models import Ticket
+
+        session = _FakeSession()
+        cmd = _make_ooc_cmd(session=session)
+        cmd.func()
+
+        self.assertEqual(Ticket.objects.first().character_id, 0)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_shard_ip_pinned_in_ticket(self):
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession(address="10.0.0.1")
+        cmd = _make_ooc_cmd(session=session, puppet=char)
+        cmd.func()
+
+        self.assertEqual(Ticket.objects.first().client_ip, "10.0.0.1")
+
+    def test_shard_ticket_to_shard_is_router(self):
+        """OOC tickets target the router, not a shard."""
+        from evennia_shards.models import Ticket
+
+        from evennia_shards.config import get_router_shard_id
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        cmd = _make_ooc_cmd(puppet=char)
+        cmd.func()
+
+        self.assertEqual(Ticket.objects.first().to_shard, get_router_shard_id())
+
+    def test_shard_does_not_mutate_last_puppet(self):
+        """OOC does not clear _last_puppet (only IC writes that flag)."""
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        cmd = _make_ooc_cmd(account=account, puppet=char)
+        cmd.func()
+
+        self.assertIs(account.db._last_puppet, char)

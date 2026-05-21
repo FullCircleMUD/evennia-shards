@@ -148,6 +148,22 @@ From the moment `ready()` returns:
 
 All of Evennia core and any consumer game code inherits this transparently. No call-site changes required.
 
+### `refresh_from_db()` needs a visibility guard
+
+Django's `Model.refresh_from_db()` routes through `_base_manager` (a plain `models.Manager()` instance), not the model's `.objects`. We only patch `.objects`, so `refresh_from_db()` runs unscoped and will load a foreign-shard row into the in-memory instance without complaint.
+
+Shard-side callers gate it behind an explicit existence check on the patched manager:
+
+```python
+if ObjectDB.objects.filter(pk=obj.pk).exists():
+    obj.refresh_from_db()
+else:
+    # Row not visible from this shard — moved or deleted.
+    ...
+```
+
+Live use site: `make_shard_at_post_login` in [hooks.py:204-237](../src/evennia_shards/hooks.py#L204-L237). Router-side `refresh_from_db()` calls don't need the guard — the router runs unscoped, so `_base_manager` and `.objects` agree.
+
 ## Cross-shard handoff under multitenant
 
 `handoff.py`'s `cross_shard_move(obj, target_shard, target_location_pk)` is the library's primary write path that legitimately needs to *change* a row's tenant column. Under the chokepoint model it did this with `shard_writes_allowed_for(obj)` + `obj.save()`. Under multitenant, two things change:
@@ -227,7 +243,7 @@ Retired. The chokepoint install (four signal/method patches) and the `shard_writ
 `apps.ready()` returns early after the safe settings-only operations. Several library extensions below the return point — `CmdIC`/`CmdOOC` overrides, hooks (`at_post_login`), the chargen wrapper, the `@teleport` replacement, and the admin commands — are visible-but-unreachable until each underlying module is migrated. Order roughly:
 
 1. ~~`handoff.py`~~ — done. Re-exposes `cross_shard_move` and `_redirect_to_character_shard`.
-2. `hooks.py` — `at_post_login` overrides on router and shard.
+2. ~~`hooks.py`~~ — done. `at_post_login` overrides restored on both roles; shard-side uses the visibility guard described under *`refresh_from_db()` needs a visibility guard* above.
 3. `chargen.py` — start-location shard stamping.
 4. `commands.py` — `ShardAwareCmdIC` / `ShardAwareCmdOOC`; `CmdCrossShardDig` admin.
 5. `teleport.py` — cross-shard `@tel`.
@@ -241,11 +257,3 @@ Move the early-return in `apps.py` below each block as it's restored.
 - Whether `select_related` / `prefetch_related` joins into ObjectDB still scope correctly when the *root* model is also tenant-tagged. Multitenant's filter injection is per-model; nested joins may need explicit handling.
 - The interaction with Evennia's existing `select_related` calls in `accounts/manager.py:117` (the partial-match search path).
 - Whether the two compromises in `cross_shard_move` (`shard_context(None)` validation read and `object.__setattr__` in-memory sync) want a dedicated "admin/handoff context" API rather than the ad-hoc escapes they are today.
-
-## Outstanding investigation
-
-These were discovered during the integration but deferred:
-
-- Whether Evennia's typeclass-system manager subclassing (the consumer's `Character.objects`, `Room.objects`, etc. via `TypeclassManager`) inherits the patch correctly. Should — the patch is on the manager class, which proxy typeclass managers inherit from — but not yet verified end-to-end.
-- Whether `select_related` / `prefetch_related` joins into ObjectDB still scope correctly when the *root* model is also tenant-tagged. Multitenant's filter injection is per-model; nested joins may need explicit handling.
-- The interaction with Evennia's existing `select_related` calls in `accounts/manager.py:117` (the partial-match search path).

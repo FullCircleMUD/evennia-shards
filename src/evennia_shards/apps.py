@@ -67,30 +67,12 @@ class EvenniaShardsConfig(AppConfig):
 
             # === MULTITENANT TRIAL: legacy chokepoint-era extensions
             #     disabled below. Each remaining block depends on a
-            #     module (handoff / hooks / commands / teleport) that
-            #     still references isolation.py / ShardIsolationError
-            #     or uses the chokepoint-based ``shard_writes_allowed_for``
-            #     bypass primitive. Move the ``return`` below the next
-            #     block as each one's dependencies are migrated onto
+            #     module (commands / teleport) that still uses the
+            #     chokepoint-based ``shard_writes_allowed_for`` bypass
+            #     primitive. Move the ``return`` below the next block
+            #     as each one's dependencies are migrated onto
             #     ``shard_context()`` + ``qs.update()`` patterns.
             #     See DESIGN/tenancy.md.
-            return
-
-            # Replace CmdIC with shard-aware version that redirects on
-            # routers and blocks on shards. The AccountCmdSet references
-            # account.CmdIC via module attribute, so patching the module
-            # makes the cmdset pick up our version on rebuild.
-            from evennia.commands.default import account as _account_module
-
-            from .commands import ShardAwareCmdIC
-
-            _account_module.CmdIC = ShardAwareCmdIC
-
-            if get_role() == ROLE_SHARD:
-                from .commands import ShardAwareCmdOOC
-
-                _account_module.CmdOOC = ShardAwareCmdOOC
-
 
             # Replace DefaultAccount.at_post_login with role-specific
             # overrides.
@@ -101,10 +83,8 @@ class EvenniaShardsConfig(AppConfig):
             #
             # Shard: thin wrapper around Evennia's original that flushes
             #   stale idmapper/Attribute-cache entries for _last_puppet
-            #   before auto-puppet. Needed because another process's
-            #   cross_shard_move may have updated the character's
-            #   shard_id in the DB while this process's Account Attribute
-            #   cache still holds the old Python object.
+            #   before auto-puppet, and nulls out _last_puppet if the
+            #   character's row has been moved off this shard.
             from evennia.accounts.accounts import DefaultAccount
             from evennia.utils.utils import class_from_module
 
@@ -125,16 +105,25 @@ class EvenniaShardsConfig(AppConfig):
 
                 DefaultAccount.at_post_login = shard_aware_at_post_login
 
-                # Wrap create_character on the consumer's configured
-                # account class so newly created characters get their
-                # shard_id stamped from the start-location row's
-                # shard_id (instead of being left as auto-stamped
-                # "router", which is not redirectable). Wrapping
-                # AccountCls (rather than DefaultAccount) lets a
-                # consumer override of create_character compose with
-                # the library's stamp via the wrap pattern. Same
-                # pattern as protocols.py uses for
-                # WEBSOCKET_PROTOCOL_CLASS.
+            elif get_role() == ROLE_SHARD:
+                from .hooks import make_shard_at_post_login
+
+                DefaultAccount.at_post_login = make_shard_at_post_login(
+                    DefaultAccount.at_post_login
+                )
+
+            # Wrap create_character on the consumer's configured
+            # account class so newly created characters get their
+            # shard_id stamped from the start-location row's
+            # shard_id. Under multitenant the router runs unscoped,
+            # so the auto-stamp on insert is skipped — without this
+            # wrapper, the new row lands with ``shard_id=NULL``,
+            # which is not redirectable. Wrapping AccountCls (rather
+            # than DefaultAccount) lets a consumer override of
+            # create_character compose with the library's stamp via
+            # the wrap pattern. Same pattern as protocols.py uses
+            # for WEBSOCKET_PROTOCOL_CLASS.
+            if get_role() == ROLE_ROUTER:
                 from .chargen import make_shard_aware_create_character
 
                 AccountCls.create_character = (
@@ -143,12 +132,20 @@ class EvenniaShardsConfig(AppConfig):
                     )
                 )
 
-            elif get_role() == ROLE_SHARD:
-                from .hooks import make_shard_at_post_login
+            # Replace CmdIC with shard-aware version that redirects on
+            # routers and blocks on shards. The AccountCmdSet references
+            # account.CmdIC via module attribute, so patching the module
+            # makes the cmdset pick up our version on rebuild.
+            from evennia.commands.default import account as _account_module
 
-                DefaultAccount.at_post_login = make_shard_at_post_login(
-                    DefaultAccount.at_post_login
-                )
+            from .commands import ShardAwareCmdIC
+
+            _account_module.CmdIC = ShardAwareCmdIC
+
+            if get_role() == ROLE_SHARD:
+                from .commands import ShardAwareCmdOOC
+
+                _account_module.CmdOOC = ShardAwareCmdOOC
 
             # Auto-install permanent library admin commands into
             # CharacterCmdSet. We can't import cmdset_character here:
@@ -167,20 +164,6 @@ class EvenniaShardsConfig(AppConfig):
 
                 def _shards_wrapped_init(*args, **kwargs):
                     _original_init(*args, **kwargs)
-
-                    # Module-attribute swap for CmdTeleport. Deferred to
-                    # here because importing teleport.py pulls in
-                    # evennia.commands.default.building, which transitively
-                    # imports evmenu — and evmenu's module body subclasses
-                    # evennia.Command at load time. Before _original_init
-                    # runs, evennia.Command is None and that subclassing
-                    # raises TypeError. After _original_init, the lazy
-                    # exports are populated and the chain is safe.
-                    from evennia.commands.default import building as _building_module
-
-                    from .teleport import ShardAwareCmdTeleport
-
-                    _building_module.CmdTeleport = ShardAwareCmdTeleport
 
                     from evennia.commands.default.cmdset_character import (
                         CharacterCmdSet,
@@ -213,4 +196,17 @@ class EvenniaShardsConfig(AppConfig):
 
                 evennia._init = _shards_wrapped_init
                 evennia._evennia_shards_init_wrapped = True
+
+            return
+
+            # === MULTITENANT TRIAL: teleport.py still references the
+            #     chokepoint-era handoff API. Restoration is item 16 of
+            #     the queue. When that lands, the CmdTeleport module-
+            #     attribute swap moves into _shards_wrapped_init above,
+            #     and this return slides past it. See DESIGN/tenancy.md.
+            from evennia.commands.default import building as _building_module
+
+            from .teleport import ShardAwareCmdTeleport
+
+            _building_module.CmdTeleport = ShardAwareCmdTeleport
 

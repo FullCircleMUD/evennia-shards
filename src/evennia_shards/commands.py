@@ -281,7 +281,7 @@ class CmdCrossShardDig(BaseCommand):
         from evennia.utils.create import create_object
 
         from .config import get_shard_url
-        from .isolation import shard_writes_allowed_for
+        from .tenancy import shard_context
 
         args = self.args.strip().split(None, 1)
         if len(args) < 2:
@@ -299,17 +299,16 @@ class CmdCrossShardDig(BaseCommand):
             )
             return
 
-        # Create the room locally (auto-stamps to current shard).
-        room = create_object(
-            "evennia.objects.objects.DefaultRoom",
-            key=room_name,
-        )
-
-        # Re-stamp to target shard via the bypass primitive.
-        with shard_writes_allowed_for(room):
-            room.shard_id = target_shard
-            room.save()
-            room.flush_from_cache(force=True)
+        # Create the room *inside* the target shard's context so the
+        # multitenant auto-stamp lands ``shard_id=target_shard`` on
+        # insert. No re-stamp needed afterward — the bypass primitive
+        # from the chokepoint era is gone, and under the tenant-column
+        # immutability check we can't re-stamp via assignment anyway.
+        with shard_context(target_shard):
+            room = create_object(
+                "evennia.objects.objects.DefaultRoom",
+                key=room_name,
+            )
 
         self.caller.msg(
             f"|wDug |c{room_name}|n on shard {target_shard!r}: "
