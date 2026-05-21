@@ -8,6 +8,12 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-05-21 — Evennia's own test suite run against the library in three modes
+
+Ran Evennia's full test suite (1649 tests) under `monolith`, `shard`, and `router` settings to find any interactions the library's own 290 tests don't surface. Three settings files under [`tests/`](../tests/) (`evennia_suite_monolith.py`, `evennia_suite_shard.py`, `evennia_suite_router.py`) plus log capture under `ops/evennia-suite-runs/`. Full writeup at [test-history/test_results_4_2026-05-21_evennia_suite.md](test-history/test_results_4_2026-05-21_evennia_suite.md).
+
+Headline: 6 baseline failures (our test scaffolding), 51 install-side failures shared by shard + router (mostly `CharacterCmdSet` topic-count side-effect from the admin commands the library ships, and the Twisted `deferToThread` tenant-context gap already flagged in [tenancy.md](tenancy.md)), 5 auto-filter-specific failures, 8 router-mode-override-specific failures (intentional behaviour — router overrides puppet semantics by design). Auto-filter accounts for only ~8% of with-library failures; the dominant pattern is documented library-feature side-effects, not regressions.
+
 ### 2026-05-21 — Shard partition: django-multitenant adopted
 
 The library's shard partition is enforced via [django-multitenant](https://github.com/citusdata/django-multitenant) 4.1.1. Every query through `ObjectDB.objects` carries `WHERE shard_id IN (current, '*')` automatically; the boundary is in the database, not in Python. See [tenancy.md](tenancy.md) for the live design.
