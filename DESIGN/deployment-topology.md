@@ -16,7 +16,7 @@ The settings file naming convention (`settings_router.py` / `settings_shard0.py`
 
 Monolith mode is just one terminal: `cd <game folder> && evennia start` with the base settings.
 
-**Boot order matters on a fresh database.** Evennia's `initial_setup` creates Limbo (`#2`) and the superuser character (`#1`); the library's `pre_save` chokepoint auto-stamps those rows with whichever shard is currently saving. **Boot `shard0` first** so Limbo and the superuser land with `shard_id="shard0"` — a row stamped `"router"` is not a valid IC destination and would need backfilling before chargen works.
+**Boot order matters on a fresh database.** Evennia's `initial_setup` creates Limbo (`#2`) and the superuser character (`#1`); the tenancy install auto-stamps those rows with whichever shard is currently saving. **Boot `shard0` first** so Limbo and the superuser land with `shard_id="shard0"` — a row created under the router (which runs unscoped, so the auto-stamp is skipped) would land `shard_id=NULL` and not be a valid IC destination without backfilling.
 
 **The mechanism for running N processes locally varies by OS** because Evennia's PID-file mechanism varies by OS. The two cases are written up explicitly below; this is the canonical reference for local multi-process setup, and other docs (e.g. [shard-settings.md](shard-settings.md), [`examples/README.md`](../examples/README.md)) point back here.
 
@@ -125,7 +125,7 @@ The library was built up across four cases, each a distinct deployment shape exe
 
 1. **Monolith.** Library installed; `SHARDS_ROLE` setting exposed but defaulting to `monolith`; library is dormant; game runs as native Evennia.
 2. **Split: router + 1 shard.** Auth/web/OOC on the router; the entire IC world on the shard. Exercises the ticket-based redirect protocol end-to-end.
-3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via the `cross_shard_move` primitive (atomic DB writes via the chokepoint bypass, recursive inventory move, idmapper eviction, per-session ticket redirect).
+3a. **Multi-shard navigation.** Two or more shards, each owning part of the IC world. Exercises the cache invariant and cross-shard handoff via the `cross_shard_move` primitive (atomic `qs.update` to retag the row, recursive inventory move, idmapper eviction, per-session ticket redirect).
 3b. **Multi-shard messaging.** Postgres-backed cross-shard message bus with player-facing delivery primitives (`obj_msg`, `account_msg`) and the `send_cross_shard_message` helper. Specialised consumer-level patterns (cross-shard tells, channel propagation) are deferred to `evennia_shards/contrib/`.
 
 Each case strictly builds on the previous.

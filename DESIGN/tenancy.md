@@ -1,8 +1,6 @@
 # Tenancy: django-multitenant integration
 
-*Branch: `django-multitenant-trial`.* This document describes the multitenant-based replacement for the four-chokepoint design in [shard-isolation.md](archive/shard-isolation.md). While the trial is in flight, both mechanisms run side by side; once verified, `isolation.py` will be retired and this becomes the only enforcement layer.
-
-The strategic shift: **silent auto-filtering at the SQL layer**, replacing the **loud raise-on-foreign-access** model of the chokepoints. See [tenancy-strategy.md](tenancy-strategy.md) (TBD) for the rationale; this document is about *how* the integration works, not *why* we made the swap.
+The per-shard partition is enforced at the SQL layer via [django-multitenant](https://github.com/citusdata/django-multitenant). Every query through `ObjectDB.objects` carries `WHERE shard_id IN (current, '*')` automatically; the boundary is in the database, not in Python.
 
 ## What the library demands of django-multitenant
 
@@ -40,7 +38,7 @@ Reads `SHARDS_ROLE` and `SHARD_ID` via the config accessors and routes to one of
 
 Multitenant's tenant context is thread-local. Each shard process holds its context for the full process lifetime; the only switches during normal operation are inside `shard_context()` blocks (handoff, chargen, admin tooling).
 
-A flag worth noting: multitenant defaults to `threading.local` but supports `asgiref.local.Local` via the `TENANT_USE_ASGIREF` setting. Twisted (Evennia's reactor) is single-threaded for most operations but uses `deferToThread` for some blocking calls; if those threads ever do ORM work they would inherit nothing from the main thread's tenant context. Out of scope for the trial; flagged for follow-up.
+Multitenant defaults to `threading.local` but supports `asgiref.local.Local` via the `TENANT_USE_ASGIREF` setting. Twisted (Evennia's reactor) is single-threaded for most operations but uses `deferToThread` for some blocking calls; if those threads ever do ORM work they would inherit nothing from the main thread's tenant context. See *Known gaps* below.
 
 ## Step 2: `install_tenancy_on_objectdb()` — attach the mixins
 
@@ -164,14 +162,11 @@ else:
 
 Live use site: `make_shard_at_post_login` in [hooks.py:204-237](../src/evennia_shards/hooks.py#L204-L237). Router-side `refresh_from_db()` calls don't need the guard — the router runs unscoped, so `_base_manager` and `.objects` agree.
 
-## Cross-shard handoff under multitenant
+## Cross-shard handoff
 
-`handoff.py`'s `cross_shard_move(obj, target_shard, target_location_pk)` is the library's primary write path that legitimately needs to *change* a row's tenant column. Under the chokepoint model it did this with `shard_writes_allowed_for(obj)` + `obj.save()`. Under multitenant, two things change:
+`handoff.py`'s `cross_shard_move(obj, target_shard, target_location_pk)` is the library's primary write path that legitimately changes a row's tenant column. The `__setattr__` immutability check refuses `obj.shard_id = X; obj.save()`, so the write uses `qs.update(shard_id=..., db_location_id=...)` — a single SQL `UPDATE` that bypasses the instance-level immutability machinery entirely. `qs.update` doesn't fire `post_save`, so the FK-dereference into a now-foreign target room never happens.
 
-1. The `shard_id`-immutability check on `__setattr__` would flag a `obj.shard_id = X; obj.save()` flow and the `save()` would raise `NotSupportedError`. So the new shape uses `qs.update(shard_id=..., db_location_id=...)` — a single SQL `UPDATE` that bypasses the instance-level immutability machinery entirely.
-2. The post-save signal (`at_db_location_postsave`) used to need suppressing via the `_safe_contents_update` flag (it would dereference the FK to the now-foreign target room and trip the chokepoint). `qs.update` doesn't fire `post_save` at all, so the flag-dance is gone.
-
-The shape of the new write block:
+The write block:
 
 ```python
 with transaction.atomic():
@@ -188,11 +183,11 @@ with transaction.atomic():
     # ... bulk-update contents' shard_id ...
 ```
 
-Validation failures raise `ValueError` (was `ShardIsolationError`, which no longer exists).
+Validation failures raise `ValueError`.
 
 ### Two compromises
 
-The rewrite introduces two intentional rule-breaks worth knowing about. Both are narrow, both are documented inline at the call site, neither hides what it does.
+`cross_shard_move` carries two intentional rule-breaks. Both are narrow, both are documented inline at the call site, neither hides what it does.
 
 **1. `with shard_context(None):` for the target-shard validation read.** Step 2 of `cross_shard_move` validates that `target_location_pk` exists and is on `target_shard`. That row lives on `target_shard` by definition, and the auto-filter excludes it from any default-scoped query — even `.values_list` (which bypasses `from_db`) is filtered out at the SQL `WHERE` level. So the validation reads inside an unscoped block:
 
@@ -215,24 +210,13 @@ object.__setattr__(obj, "db_location_id", target_location_pk)
 
 The immutability check is meant to catch *accidental* tenant-column mutation. `cross_shard_move` is the one place in the library that legitimately needs to mutate it, and this is the escape hatch. Cleaner long-term designs (dedicated `_post_move_sync` API, or an in-tenancy "scope-escape" context that suppresses the check) are follow-up work — see *Outstanding investigation* below.
 
-### What stays from the original
+### Other steps in the move
 
-- Validation of `target_shard` (in `SHARD_URLS`) and `target_location_pk` (exists, on `target_shard` or global).
-- Snapshot of puppeting sessions before the move (`sessions_to_redirect`).
-- Recursive inventory collection via `_collect_all_contents`.
-- Atomic block around the writes + idmapper eviction.
-- Pre-emptive session detach (`session.puppet = None; session.puid = None; tags.remove("puppeted")`).
-- Per-session redirect via `_redirect_to_character_shard`.
-- `flush_from_cache` bus message to the destination shard (cache-invalidation signal).
-- `MoveResult` return shape (objects_moved, sessions_redirected, failures).
-
-External contract is preserved: same args, same return type, same side effects.
+`cross_shard_move` also handles target validation (`target_shard` is in `SHARD_URLS`, `target_location_pk` exists on `target_shard` or is global), a session snapshot before the move, recursive inventory collection via `_collect_all_contents`, atomic transaction + idmapper eviction, pre-emptive session detach, per-session redirect via `_redirect_to_character_shard`, and a `flush_from_cache` bus message to the destination shard. Returns a `MoveResult(objects_moved, sessions_redirected, failures)`.
 
 ## Cross-shard reads: the load-evict pattern
 
-Multitenant enables a category of operation that was *structurally impossible* under the chokepoint design: materialising a foreign-shard row's Python instance to call read-only methods on it. The chokepoints refused `from_db` construction of any foreign row; the bypass primitive needed the instance as an argument, but you couldn't get the instance without first constructing it. The closest substitute was a bus round-trip ("ask the destination shard to do the work, await the reply"), which was high-latency and required a new message kind per operation.
-
-Under multitenant the same operation is a narrow scope switch:
+For operations that need to materialise a foreign-shard row's Python instance and call read-only methods on it (e.g. evaluating a destination room's `teleport_here` lock against a local caller), use a scope switch around the load and an explicit eviction afterwards:
 
 ```python
 with shard_context(target_shard):
@@ -248,36 +232,19 @@ Four steps:
 3. **Call** the read-only method (`access`, attribute reads, etc.). Pure in-memory; no further DB hit.
 4. **Evict** the foreign instance from the idmapper. Without this, the next default-scoped read on the same pk on this process would return the cached foreign instance instead of the auto-filter excluding it. Subtle bug class — always pair the load with the evict.
 
-**Use case worth shipping:** the destination-side `teleport_here` lock check in `ShardAwareCmdTeleport`'s cross-shard branch. The teleport.py docstring at the cross-shard branch notes the gap explicitly ("Vanilla's `teleport_here` lock check on the destination — deferred until a bus primitive lands"); the load-evict pattern closes it without a bus primitive.
-
 **Caveats:**
 
 - **Side-effecting lockfuncs:** Most stock lockfuncs (`perm()`, `id()`, `tag()`, `holds()`, etc.) are read-only and scope-safe. Custom lockfuncs that write DB state will write to the target shard inside the `with` block — usually the right thing, but worth knowing.
 - **Lockfuncs that themselves query:** A lockfunc that reads the caller's own rows (e.g. `same_guild(caller)` looking up the caller's guild membership) runs under the *target* shard's scope inside the block. If the caller's relevant rows live on the caller's home shard, the lookup will silently see only the target shard's rows. Wrap such cases in a nested `shard_context(caller.shard_id)` if you hit one.
 - **Strictly for reads.** Don't use this pattern to *write* to foreign rows — that's what `cross_shard_move`'s `qs.update` path is for. Writes via instance `save()` inside `shard_context(target)` would land on the target, but they'd also fight the tenant-column immutability machinery if the row's `shard_id` is touched. Stay on the read side.
 
-A future helper in `tenancy.py` (e.g. `with_remote_row(pk, shard_id) as obj:`) could encapsulate the load + evict pair so call sites don't have to repeat the eviction step. Worth doing once a second use case lands; one use case (the lock check) doesn't justify the abstraction yet.
+A future helper in `tenancy.py` (e.g. `with_remote_row(pk, shard_id) as obj:`) could encapsulate the load + evict pair so call sites don't have to repeat the eviction step. Worth doing once a second use case lands.
 
-## Known gaps not yet addressed in the trial
+## Known gaps
 
-- **Idmapper cache.** Evennia's `SharedMemoryManager` caches model instances by pk and serves them on `get()` without re-hitting the DB (and therefore without re-applying the tenant filter). Under multitenant the cache is *implicitly* scoped because every populating read goes through the filter — but legitimate cross-shard reads (via `shard_context()`) can poison the cache with foreign instances visible to later same-process scoped reads. Not exercised by the trial yet.
-- **Thread-local vs Twisted threads.** Multitenant uses `threading.local` by default. `deferToThread` callbacks would not inherit the tenant. Either set `TENANT_USE_ASGIREF = True` or audit which paths use `deferToThread` for ORM work.
-- **`TENANT_STRICT_MODE`.** Multitenant supports raising `EmptyTenant` on `_do_update` when no tenant is set; useful for catching "forgot to set tenant context" bugs in dev/CI. Worth enabling in the test suite once the trial stabilises.
-
-## Status of `isolation.py`
-
-Retired. The chokepoint install (four signal/method patches) and the `shard_writes_allowed_for` bypass are gone — `isolation.py` and `ShardIsolationError` no longer exist. See [shard-isolation.md](archive/shard-isolation.md) for the historical design that was replaced; that doc carries a superseded banner pointing back here.
-
-## Restoration queue
-
-All six entries below have landed; `apps.ready()` no longer has a trial early-return. Kept here as the change-log of the trial's restoration order.
-
-1. ~~`handoff.py`~~ — done. Re-exposes `cross_shard_move` and `_redirect_to_character_shard`.
-2. ~~`hooks.py`~~ — done. `at_post_login` overrides restored on both roles; shard-side uses the visibility guard described under *`refresh_from_db()` needs a visibility guard* above.
-3. ~~`chargen.py`~~ — done. Wrapper logic unchanged from the chokepoint era; under multitenant the unscoped router skips the auto-stamp so new rows land `shard_id=NULL` (was `"router"` under chokepoints), and the post-create lookup-and-stamp path lands the location's shard.
-4. ~~`commands.py`~~ — done. `CmdCrossShardDig` rewritten on `shard_context(target_shard)` around `create_object` (no re-stamp needed). `ShardAwareCmdIC` / `ShardAwareCmdOOC` / `CmdShardCheck` unchanged — none touched chokepoint primitives.
-5. ~~`teleport.py`~~ — done. The module never touched chokepoint primitives directly; restoration was the apps.py `CmdTeleport` module-attribute swap, gated on `search.py`'s inversion below (without that, cross-shard matches stay invisible and the cross-shard `@tel` branch is dead code).
-6. ~~`search.py`~~ — done. `shard_aware_global_search` now wraps its `values_list` in `shard_context(None)` to escape the auto-filter and see every shard. The local-instance load that follows stays on `ObjectDB.objects` (auto-filtered), since by then the match's shard is known and only local matches are loaded.
+- **Idmapper cache.** Evennia's `SharedMemoryManager` caches model instances by pk and serves them on `get()` without re-hitting the DB. The cache is implicitly scoped because every populating read goes through the auto-filter — but cross-shard reads via `shard_context()` can poison the cache with foreign instances. Always pair such reads with `flush_from_cache(force=True)`.
+- **Twisted `deferToThread`.** Multitenant uses `threading.local` by default; `deferToThread` callbacks won't inherit the tenant. Either set `TENANT_USE_ASGIREF = True` or audit which paths do ORM work in deferred threads.
+- **`TENANT_STRICT_MODE`.** Multitenant supports raising `EmptyTenant` on `_do_update` when no tenant is set; worth enabling in dev/CI to catch "forgot to set tenant context" bugs.
 
 ## Outstanding investigation
 
