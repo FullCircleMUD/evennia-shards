@@ -65,15 +65,6 @@ class EvenniaShardsConfig(AppConfig):
                     _existing_plugins + [_portal_plugin_path]
                 )
 
-            # === MULTITENANT TRIAL: legacy chokepoint-era extensions
-            #     disabled below. Each remaining block depends on a
-            #     module (commands / teleport) that still uses the
-            #     chokepoint-based ``shard_writes_allowed_for`` bypass
-            #     primitive. Move the ``return`` below the next block
-            #     as each one's dependencies are migrated onto
-            #     ``shard_context()`` + ``qs.update()`` patterns.
-            #     See DESIGN/tenancy.md.
-
             # Replace DefaultAccount.at_post_login with role-specific
             # overrides.
             #
@@ -165,6 +156,20 @@ class EvenniaShardsConfig(AppConfig):
                 def _shards_wrapped_init(*args, **kwargs):
                     _original_init(*args, **kwargs)
 
+                    # Module-attribute swap for CmdTeleport. Deferred to
+                    # here because importing teleport.py pulls in
+                    # evennia.commands.default.building, which transitively
+                    # imports evmenu — and evmenu's module body subclasses
+                    # evennia.Command at load time. Before _original_init
+                    # runs, evennia.Command is None and that subclassing
+                    # raises TypeError. After _original_init, the lazy
+                    # exports are populated and the chain is safe.
+                    from evennia.commands.default import building as _building_module
+
+                    from .teleport import ShardAwareCmdTeleport
+
+                    _building_module.CmdTeleport = ShardAwareCmdTeleport
+
                     from evennia.commands.default.cmdset_character import (
                         CharacterCmdSet,
                     )
@@ -196,17 +201,4 @@ class EvenniaShardsConfig(AppConfig):
 
                 evennia._init = _shards_wrapped_init
                 evennia._evennia_shards_init_wrapped = True
-
-            return
-
-            # === MULTITENANT TRIAL: teleport.py still references the
-            #     chokepoint-era handoff API. Restoration is item 16 of
-            #     the queue. When that lands, the CmdTeleport module-
-            #     attribute swap moves into _shards_wrapped_init above,
-            #     and this return slides past it. See DESIGN/tenancy.md.
-            from evennia.commands.default import building as _building_module
-
-            from .teleport import ShardAwareCmdTeleport
-
-            _building_module.CmdTeleport = ShardAwareCmdTeleport
 

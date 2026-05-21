@@ -83,9 +83,10 @@ class ShardAwareCmdTeleport(CmdTeleport):
     def parse(self):
         # Arg split via CmdTeleport's parent (MuxCommand, in the
         # default Evennia stack). Skips vanilla CmdTeleport.parse's
-        # body, which would do the unsafe caller.search(global_search=True)
-        # calls and trip the from_db chokepoint on cross-shard matches.
-        # The lhs/rhs splitting (via rhs_split = ("=", " to ")) lives in
+        # body, which would do ``caller.search(global_search=True)``
+        # calls — those route through the auto-filtered manager and
+        # would silently miss cross-shard matches. The lhs/rhs
+        # splitting (via ``rhs_split = ("=", " to ")``) lives in
         # MuxCommand.parse, not in Command.parse — so we have to reach
         # the immediate parent, not the bare base.
         super(CmdTeleport, self).parse()

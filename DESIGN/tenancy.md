@@ -240,16 +240,14 @@ Retired. The chokepoint install (four signal/method patches) and the `shard_writ
 
 ## Restoration queue
 
-`apps.ready()` returns early after the safe settings-only operations. Several library extensions below the return point — `CmdIC`/`CmdOOC` overrides, hooks (`at_post_login`), the chargen wrapper, the `@teleport` replacement, and the admin commands — are visible-but-unreachable until each underlying module is migrated. Order roughly:
+All six entries below have landed; `apps.ready()` no longer has a trial early-return. Kept here as the change-log of the trial's restoration order.
 
 1. ~~`handoff.py`~~ — done. Re-exposes `cross_shard_move` and `_redirect_to_character_shard`.
 2. ~~`hooks.py`~~ — done. `at_post_login` overrides restored on both roles; shard-side uses the visibility guard described under *`refresh_from_db()` needs a visibility guard* above.
-3. `chargen.py` — start-location shard stamping.
-4. `commands.py` — `ShardAwareCmdIC` / `ShardAwareCmdOOC`; `CmdCrossShardDig` admin.
-5. `teleport.py` — cross-shard `@tel`.
-6. `search.py` — invert `shard_aware_global_search` so it *escapes* the auto-filter rather than navigating around the chokepoint.
-
-Move the early-return in `apps.py` below each block as it's restored.
+3. ~~`chargen.py`~~ — done. Wrapper logic unchanged from the chokepoint era; under multitenant the unscoped router skips the auto-stamp so new rows land `shard_id=NULL` (was `"router"` under chokepoints), and the post-create lookup-and-stamp path lands the location's shard.
+4. ~~`commands.py`~~ — done. `CmdCrossShardDig` rewritten on `shard_context(target_shard)` around `create_object` (no re-stamp needed). `ShardAwareCmdIC` / `ShardAwareCmdOOC` / `CmdShardCheck` unchanged — none touched chokepoint primitives.
+5. ~~`teleport.py`~~ — done. The module never touched chokepoint primitives directly; restoration was the apps.py `CmdTeleport` module-attribute swap, gated on `search.py`'s inversion below (without that, cross-shard matches stay invisible and the cross-shard `@tel` branch is dead code).
+6. ~~`search.py`~~ — done. `shard_aware_global_search` now wraps its `values_list` in `shard_context(None)` to escape the auto-filter and see every shard. The local-instance load that follows stays on `ObjectDB.objects` (auto-filtered), since by then the match's shard is known and only local matches are loaded.
 
 ## Outstanding investigation
 

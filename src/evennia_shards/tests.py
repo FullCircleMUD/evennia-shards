@@ -2132,3 +2132,358 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         cmd.func()
 
         self.assertIs(account.db._last_puppet, char)
+
+
+# ---------------------------------------------------------------------------
+# shard_aware_global_search (escapes the auto-filter to see every shard)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ShardAwareGlobalSearchTests(BaseEvenniaTestCase):
+    """``shard_aware_global_search`` — see rows on every shard.
+
+    Under multitenant, ``ObjectDB.objects`` carries the tenant
+    auto-filter; a stock global search would miss foreign rows
+    entirely. The helper wraps its ``values_list`` in
+    ``shard_context(None)`` to escape that filter, then dispatches
+    on the match's shard — loading the instance if it's local,
+    returning metadata only if it's on another shard.
+    """
+
+    def _make_local(self, key="local_room"):
+        return ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+
+    def _make_remote(self, key="remote_room", shard="shard1"):
+        obj = ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(obj.pk, shard)
+        return obj
+
+    # ── basic name resolution ─────────────────────────────────────
+
+    def test_not_found_when_no_match(self):
+        from evennia_shards import shard_aware_global_search
+
+        result = shard_aware_global_search(None, "nothing_here")
+        self.assertEqual(result.state, "not_found")
+        self.assertIsNone(result.obj)
+        self.assertIsNone(result.pk)
+        self.assertFalse(result.is_local)
+        self.assertFalse(result.is_cross_shard)
+
+    def test_empty_name_is_not_found(self):
+        from evennia_shards import shard_aware_global_search
+
+        self.assertEqual(
+            shard_aware_global_search(None, "").state, "not_found"
+        )
+
+    def test_whitespace_only_name_is_not_found(self):
+        from evennia_shards import shard_aware_global_search
+
+        self.assertEqual(
+            shard_aware_global_search(None, "   ").state, "not_found"
+        )
+
+    def test_db_key_match_is_case_insensitive(self):
+        from evennia_shards import shard_aware_global_search
+
+        self._make_local(key="MixedCase")
+        for variant in ("mixedcase", "MIXEDCASE", "MixedCase"):
+            result = shard_aware_global_search(None, variant)
+            self.assertEqual(result.state, "found", variant)
+            self.assertEqual(result.db_key, "MixedCase")
+
+    def test_dbref_match(self):
+        from evennia_shards import shard_aware_global_search
+
+        target = self._make_local()
+        result = shard_aware_global_search(None, f"#{target.pk}")
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, target.pk)
+
+    def test_dbref_with_garbage_falls_through_to_key_lookup(self):
+        from evennia_shards import shard_aware_global_search
+
+        result = shard_aware_global_search(None, "#notanint")
+        self.assertEqual(result.state, "not_found")
+
+    # ── local vs cross-shard routing ──────────────────────────────
+
+    def test_local_match_populates_instance(self):
+        from evennia_shards import shard_aware_global_search
+
+        target = self._make_local(key="local_target")
+        result = shard_aware_global_search(None, "local_target")
+
+        self.assertEqual(result.state, "found")
+        self.assertIsNotNone(result.obj)
+        self.assertEqual(result.obj.pk, target.pk)
+        self.assertEqual(result.pk, target.pk)
+        self.assertEqual(result.shard_id, "shard0")
+        self.assertTrue(result.is_local)
+        self.assertFalse(result.is_cross_shard)
+
+    def test_cross_shard_match_omits_instance(self):
+        from evennia_shards import shard_aware_global_search
+
+        target = self._make_remote(key="remote_target", shard="shard1")
+        result = shard_aware_global_search(None, "remote_target")
+
+        self.assertEqual(result.state, "found")
+        self.assertIsNone(result.obj)
+        self.assertEqual(result.pk, target.pk)
+        self.assertEqual(result.shard_id, "shard1")
+        self.assertFalse(result.is_local)
+        self.assertTrue(result.is_cross_shard)
+
+    def test_global_sentinel_match_is_local(self):
+        from evennia_shards import shard_aware_global_search
+
+        target = self._make_remote(key="global_thing", shard="*")
+        result = shard_aware_global_search(None, "global_thing")
+
+        self.assertEqual(result.state, "found")
+        self.assertIsNotNone(result.obj)
+        self.assertEqual(result.shard_id, "*")
+        self.assertTrue(result.is_local)
+        self.assertFalse(result.is_cross_shard)
+
+    # ── multi-match disambiguation ────────────────────────────────
+
+    def test_multiple_matches_returns_candidates_list(self):
+        from evennia_shards import shard_aware_global_search
+
+        a = self._make_local(key="Tavern")
+        b = self._make_remote(key="Tavern", shard="shard1")
+
+        result = shard_aware_global_search(None, "Tavern")
+
+        self.assertEqual(result.state, "multiple")
+        self.assertIsNone(result.obj)
+        pks_in_candidates = {c[0] for c in result.candidates}
+        self.assertEqual(pks_in_candidates, {a.pk, b.pk})
+
+    def test_multiple_matches_is_local_false(self):
+        from evennia_shards import shard_aware_global_search
+
+        self._make_local(key="x")
+        self._make_remote(key="x", shard="shard1")
+
+        result = shard_aware_global_search(None, "x")
+
+        self.assertFalse(result.is_local)
+        self.assertFalse(result.is_cross_shard)
+
+    # ── tag filtering ─────────────────────────────────────────────
+
+    def test_tag_filter_narrows_results(self):
+        from evennia_shards import shard_aware_global_search
+
+        scoped = self._make_local(key="Tavern")
+        scoped.tags.add("millholm", category="zone")
+        self._make_local(key="Tavern")
+
+        self.assertEqual(
+            shard_aware_global_search(None, "Tavern").state, "multiple"
+        )
+        result = shard_aware_global_search(
+            None, "Tavern", tag="millholm",
+        )
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, scoped.pk)
+
+    def test_tag_and_category_filter_narrows_further(self):
+        from evennia_shards import shard_aware_global_search
+
+        zone_tagged = self._make_local(key="Forge")
+        zone_tagged.tags.add("millholm", category="zone")
+
+        meta_tagged = self._make_local(key="Forge")
+        meta_tagged.tags.add("millholm", category="meta")
+
+        self.assertEqual(
+            shard_aware_global_search(None, "Forge", tag="millholm").state,
+            "multiple",
+        )
+        result = shard_aware_global_search(
+            None, "Forge", tag="millholm", tag_category="zone",
+        )
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, zone_tagged.pk)
+
+    def test_tag_filter_with_no_matching_tag_is_not_found(self):
+        from evennia_shards import shard_aware_global_search
+
+        room = self._make_local(key="Tavern")
+        room.tags.add("millholm", category="zone")
+
+        result = shard_aware_global_search(
+            None, "Tavern", tag="cloverfen",
+        )
+        self.assertEqual(result.state, "not_found")
+
+    # ── alias matching ────────────────────────────────────────────
+
+    def test_alias_only_match(self):
+        from evennia_shards import shard_aware_global_search
+
+        obj = self._make_local(key="Excalibur")
+        obj.aliases.add("sword")
+
+        result = shard_aware_global_search(None, "sword")
+
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, obj.pk)
+        self.assertEqual(result.db_key, "Excalibur")
+
+    def test_alias_match_is_case_insensitive(self):
+        from evennia_shards import shard_aware_global_search
+
+        obj = self._make_local(key="Excalibur")
+        obj.aliases.add("Sword")
+
+        for variant in ("sword", "SWORD", "SwOrD"):
+            result = shard_aware_global_search(None, variant)
+            self.assertEqual(result.state, "found", variant)
+            self.assertEqual(result.pk, obj.pk, variant)
+
+    def test_key_and_alias_both_match_returns_single_result(self):
+        """One row whose key AND alias both match → 'found', not 'multiple'.
+
+        ``.distinct()`` collapses the duplicate that the OR-over-m2m
+        join would otherwise produce.
+        """
+        from evennia_shards import shard_aware_global_search
+
+        obj = self._make_local(key="ball")
+        obj.aliases.add("ball")
+
+        result = shard_aware_global_search(None, "ball")
+
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, obj.pk)
+
+    def test_non_alias_tag_with_matching_key_does_not_match(self):
+        """Tag with the right key but wrong tagtype must NOT match."""
+        from evennia_shards import shard_aware_global_search
+
+        obj = self._make_local(key="Excalibur")
+        obj.tags.add("sword", category="zone")  # zone tag, not alias
+
+        result = shard_aware_global_search(None, "sword")
+
+        self.assertEqual(result.state, "not_found")
+
+    def test_alias_match_composes_with_zone_tag_filter(self):
+        from evennia_shards import shard_aware_global_search
+
+        in_zone = self._make_local(key="Excalibur")
+        in_zone.aliases.add("sword")
+        in_zone.tags.add("millholm", category="zone")
+
+        out_of_zone = self._make_local(key="Anduril")
+        out_of_zone.aliases.add("sword")
+
+        self.assertEqual(
+            shard_aware_global_search(None, "sword").state, "multiple"
+        )
+        result = shard_aware_global_search(
+            None, "sword", tag="millholm", tag_category="zone",
+        )
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.pk, in_zone.pk)
+
+    def test_alias_match_on_cross_shard_row_returns_metadata_only(self):
+        from evennia_shards import shard_aware_global_search
+
+        remote = self._make_remote(key="Excalibur", shard="shard1")
+        remote.aliases.add("sword")
+
+        result = shard_aware_global_search(None, "sword")
+
+        self.assertEqual(result.state, "found")
+        self.assertIsNone(result.obj)
+        self.assertEqual(result.pk, remote.pk)
+        self.assertEqual(result.shard_id, "shard1")
+        self.assertTrue(result.is_cross_shard)
+
+    # ── caller-relative specials (me / self / here) ───────────────
+
+    def _stub_caller_with_location(self, location=None):
+        """Tiny stand-in for caller — just the attributes the special-
+        token branch reads. Avoids touching ObjectDB."""
+        import types
+
+        return types.SimpleNamespace(
+            pk=42, shard_id="shard0", db_key="Bob", location=location,
+        )
+
+    def test_me_token_returns_caller(self):
+        from evennia_shards import shard_aware_global_search
+
+        caller = self._stub_caller_with_location()
+        result = shard_aware_global_search(caller, "me")
+
+        self.assertEqual(result.state, "found")
+        self.assertIs(result.obj, caller)
+        self.assertEqual(result.pk, 42)
+        self.assertEqual(result.shard_id, "shard0")
+        self.assertEqual(result.db_key, "Bob")
+
+    def test_self_token_returns_caller(self):
+        from evennia_shards import shard_aware_global_search
+
+        caller = self._stub_caller_with_location()
+        result = shard_aware_global_search(caller, "self")
+
+        self.assertEqual(result.state, "found")
+        self.assertIs(result.obj, caller)
+
+    def test_me_token_is_case_insensitive(self):
+        from evennia_shards import shard_aware_global_search
+
+        caller = self._stub_caller_with_location()
+        for variant in ("ME", "Me", "  me  "):
+            result = shard_aware_global_search(caller, variant)
+            self.assertEqual(result.state, "found", variant)
+            self.assertIs(result.obj, caller, variant)
+
+    def test_here_token_returns_caller_location(self):
+        import types
+
+        from evennia_shards import shard_aware_global_search
+
+        location = types.SimpleNamespace(
+            pk=99, shard_id="shard0", db_key="Tavern",
+        )
+        caller = self._stub_caller_with_location(location=location)
+        result = shard_aware_global_search(caller, "here")
+
+        self.assertEqual(result.state, "found")
+        self.assertIs(result.obj, location)
+        self.assertEqual(result.pk, 99)
+        self.assertEqual(result.db_key, "Tavern")
+
+    def test_here_token_with_no_location_is_not_found(self):
+        from evennia_shards import shard_aware_global_search
+
+        caller = self._stub_caller_with_location(location=None)
+        result = shard_aware_global_search(caller, "here")
+
+        self.assertEqual(result.state, "not_found")
+
+    def test_me_does_not_match_db_object_named_me(self):
+        from evennia_shards import shard_aware_global_search
+
+        self._make_local(key="me")  # tries to compete
+        caller = self._stub_caller_with_location()
+
+        result = shard_aware_global_search(caller, "me")
+
+        self.assertIs(result.obj, caller)
+        self.assertEqual(result.pk, 42)
