@@ -2487,3 +2487,1645 @@ class ShardAwareGlobalSearchTests(BaseEvenniaTestCase):
 
         self.assertIs(result.obj, caller)
         self.assertEqual(result.pk, 42)
+
+
+# ---------------------------------------------------------------------------
+# Config accessors (get_role, get_shard_id, get_shard_url, get_router_url,
+# get_router_shard_id, get_message_timeout). Pure setting reads — no DB,
+# no multitenant interaction. Ported verbatim from the legacy suite.
+# ---------------------------------------------------------------------------
+
+
+class ConfigAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_role / get_shard_id accessors."""
+
+    @override_settings(SHARDS_ROLE="router")
+    def test_get_role_reflects_setting_router(self):
+        from evennia_shards import get_role
+
+        self.assertEqual(get_role(), "router")
+
+    @override_settings(SHARDS_ROLE="shard")
+    def test_get_role_reflects_setting_shard(self):
+        from evennia_shards import get_role
+
+        self.assertEqual(get_role(), "shard")
+
+    @override_settings(SHARD_ID="some-shard")
+    def test_get_shard_id_reflects_setting(self):
+        from evennia_shards import get_shard_id
+
+        self.assertEqual(get_shard_id(), "some-shard")
+
+
+class ShardUrlAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_shard_url accessor."""
+
+    @override_settings(SHARD_URLS={"shard0": "ws://localhost:4001/"})
+    def test_returns_url_for_known_shard(self):
+        from evennia_shards import get_shard_url
+
+        self.assertEqual(get_shard_url("shard0"), "ws://localhost:4001/")
+
+    @override_settings(SHARD_URLS={"shard0": "ws://localhost:4001/"})
+    def test_raises_key_error_for_unknown_shard(self):
+        from evennia_shards import get_shard_url
+
+        with self.assertRaises(KeyError):
+            get_shard_url("shard99")
+
+    @override_settings(SHARD_URLS=None)
+    def test_raises_value_error_when_not_configured(self):
+        from evennia_shards import get_shard_url
+
+        with self.assertRaises(ValueError):
+            get_shard_url("shard0")
+
+    @override_settings(
+        SHARD_URLS={
+            "overworld": "ws://overworld.example.com/",
+            "dungeons": "ws://dungeons.example.com/",
+            "pvp_arena": "ws://pvp.example.com/",
+        }
+    )
+    def test_multiple_shards_flexible_names(self):
+        from evennia_shards import get_shard_url
+
+        self.assertEqual(get_shard_url("overworld"), "ws://overworld.example.com/")
+        self.assertEqual(get_shard_url("dungeons"), "ws://dungeons.example.com/")
+        self.assertEqual(get_shard_url("pvp_arena"), "ws://pvp.example.com/")
+
+
+class RouterUrlAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_router_url accessor."""
+
+    @override_settings(ROUTER_URL="ws://router.example.com/")
+    def test_returns_configured_url(self):
+        from evennia_shards import get_router_url
+
+        self.assertEqual(get_router_url(), "ws://router.example.com/")
+
+    @override_settings(ROUTER_URL=None)
+    def test_raises_value_error_when_not_configured(self):
+        from evennia_shards import get_router_url
+
+        with self.assertRaises(ValueError):
+            get_router_url()
+
+
+class RouterShardIdAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_router_shard_id accessor."""
+
+    def test_returns_router(self):
+        from evennia_shards import get_router_shard_id
+
+        self.assertEqual(get_router_shard_id(), "router")
+
+
+class MessageTimeoutAccessorTests(BaseEvenniaTestCase):
+    """Tests for the get_message_timeout accessor."""
+
+    def test_default_is_10_seconds_when_no_settings(self):
+        from evennia_shards import get_message_timeout
+
+        self.assertEqual(get_message_timeout("anything"), 10)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUT_DEFAULT=20)
+    def test_global_default_is_overridden(self):
+        from evennia_shards import get_message_timeout
+
+        self.assertEqual(get_message_timeout("anything"), 20)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUTS={"tell": 5, "character_handoff": 30})
+    def test_per_kind_override_returns_specific_timeout(self):
+        from evennia_shards import get_message_timeout
+
+        self.assertEqual(get_message_timeout("tell"), 5)
+        self.assertEqual(get_message_timeout("character_handoff"), 30)
+
+    @override_settings(
+        SHARDS_MESSAGE_TIMEOUT_DEFAULT=20,
+        SHARDS_MESSAGE_TIMEOUTS={"tell": 5},
+    )
+    def test_unmapped_kind_falls_back_to_default(self):
+        from evennia_shards import get_message_timeout
+
+        self.assertEqual(get_message_timeout("tell"), 5)
+        self.assertEqual(get_message_timeout("other_kind"), 20)
+
+
+# ---------------------------------------------------------------------------
+# Cross-shard message bus — Message model + send / poll / delete primitives.
+#
+# The Message model has its own table (not ObjectDB), so multitenant doesn't
+# touch it. Tests port verbatim from the legacy suite — only imports change.
+# ---------------------------------------------------------------------------
+
+
+class MessageModelTests(BaseEvenniaTestCase):
+    """The Message model is wired and the migration deploys."""
+
+    def test_table_name_is_namespaced(self):
+        from evennia_shards.models import Message
+
+        self.assertEqual(Message._meta.db_table, "evennia_shards_message")
+
+    def test_create_round_trips_payload(self):
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            to_shard="shard1",
+            from_shard="shard0",
+            kind="character_handoff",
+            payload={"char_id": 42, "to_room": 7},
+        )
+        loaded = Message.objects.get(pk=msg.pk)
+        self.assertEqual(loaded.to_shard, "shard1")
+        self.assertEqual(loaded.from_shard, "shard0")
+        self.assertEqual(loaded.kind, "character_handoff")
+        self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
+        self.assertIsNotNone(loaded.created_at)
+
+    def test_payload_defaults_to_empty_dict(self):
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(to_shard="shard1", kind="ping")
+        self.assertEqual(msg.payload, {})
+
+    def test_from_shard_can_be_null(self):
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(to_shard="shard1", kind="ping")
+        self.assertIsNone(msg.from_shard)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class SendMessageTests(BaseEvenniaTestCase):
+    """send_message primitive: insert a message row."""
+
+    def test_returns_created_message_instance(self):
+        from evennia_shards import send_message
+        from evennia_shards.models import Message
+
+        msg = send_message(
+            kind="ping",
+            payload={"hello": "world"},
+            to_shard="shard1",
+        )
+        self.assertIsInstance(msg, Message)
+        self.assertIsNotNone(msg.pk)
+
+    def test_explicit_from_shard_is_recorded(self):
+        from evennia_shards import send_message
+
+        msg = send_message(
+            kind="ping",
+            payload={},
+            to_shard="shard1",
+            from_shard="shard2",
+        )
+        self.assertEqual(msg.from_shard, "shard2")
+
+    def test_default_from_shard_uses_current_setting(self):
+        from evennia_shards import send_message
+
+        msg = send_message(kind="ping", payload={}, to_shard="shard1")
+        self.assertEqual(msg.from_shard, "shard0")
+
+    def test_payload_is_persisted(self):
+        from evennia_shards import send_message
+        from evennia_shards.models import Message
+
+        msg = send_message(
+            kind="character_handoff",
+            payload={"char_id": 42, "to_room": 7},
+            to_shard="shard1",
+        )
+        loaded = Message.objects.get(pk=msg.pk)
+        self.assertEqual(loaded.payload, {"char_id": 42, "to_room": 7})
+
+    def test_explicit_same_shard_send_raises(self):
+        from evennia_shards import MessageBusError, send_message
+
+        with self.assertRaises(MessageBusError) as ctx:
+            send_message(
+                kind="ping",
+                payload={},
+                to_shard="shard0",
+                from_shard="shard0",
+            )
+        self.assertIn("shard0", str(ctx.exception))
+
+    def test_default_from_shard_same_as_to_shard_raises(self):
+        from evennia_shards import MessageBusError, send_message
+
+        # SHARD_ID is "shard0" via class @override_settings; no explicit
+        # from_shard, so it defaults to "shard0", matching to_shard.
+        with self.assertRaises(MessageBusError):
+            send_message(kind="ping", payload={}, to_shard="shard0")
+
+    def test_no_message_row_inserted_when_same_shard_send_raises(self):
+        from evennia_shards import MessageBusError, send_message
+        from evennia_shards.models import Message
+
+        before = Message.objects.count()
+        with self.assertRaises(MessageBusError):
+            send_message(
+                kind="ping", payload={}, to_shard="shard0", from_shard="shard0",
+            )
+        self.assertEqual(Message.objects.count(), before)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class PollMessagesTests(BaseEvenniaTestCase):
+    """poll_messages primitive: read messages addressed to a shard."""
+
+    def test_returns_only_messages_for_requested_shard(self):
+        from evennia_shards import poll_messages, send_message
+
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        send_message(kind="ping", payload={}, to_shard="shard2", from_shard="shard0")
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+
+        result = list(poll_messages("shard1"))
+        self.assertEqual(len(result), 2)
+        for msg in result:
+            self.assertEqual(msg.to_shard, "shard1")
+
+    def test_returns_empty_when_no_matching_messages(self):
+        from evennia_shards import poll_messages, send_message
+
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        result = list(poll_messages("shard9"))
+        self.assertEqual(result, [])
+
+    def test_results_ordered_by_created_at_ascending(self):
+        from evennia_shards import poll_messages, send_message
+
+        first = send_message(
+            kind="ping", payload={"n": 1}, to_shard="shard1", from_shard="shard0",
+        )
+        second = send_message(
+            kind="ping", payload={"n": 2}, to_shard="shard1", from_shard="shard0",
+        )
+        third = send_message(
+            kind="ping", payload={"n": 3}, to_shard="shard1", from_shard="shard0",
+        )
+
+        result = list(poll_messages("shard1"))
+        self.assertEqual([msg.pk for msg in result], [first.pk, second.pk, third.pk])
+
+    def test_default_shard_uses_current_setting(self):
+        from evennia_shards import poll_messages, send_message
+
+        send_message(kind="ping", payload={}, to_shard="shard0", from_shard="shard1")
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+
+        result = list(poll_messages())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].to_shard, "shard0")
+
+    def test_returns_queryset_not_list(self):
+        from evennia_shards import poll_messages, send_message
+
+        send_message(kind="ping", payload={}, to_shard="shard1", from_shard="shard0")
+        result = poll_messages("shard1")
+        self.assertEqual(result.count(), 1)
+        self.assertIsNotNone(result.first())
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class DeleteMessageTests(BaseEvenniaTestCase):
+    """delete_message primitive: remove a processed message row."""
+
+    def test_deletes_only_the_named_message(self):
+        from evennia_shards import delete_message, send_message
+        from evennia_shards.models import Message
+
+        keep = send_message(
+            kind="ping", payload={}, to_shard="shard1", from_shard="shard0",
+        )
+        drop = send_message(
+            kind="ping", payload={}, to_shard="shard1", from_shard="shard0",
+        )
+
+        delete_message(drop)
+
+        remaining_pks = list(Message.objects.values_list("pk", flat=True))
+        self.assertIn(keep.pk, remaining_pks)
+        self.assertNotIn(drop.pk, remaining_pks)
+
+    def test_subsequent_poll_does_not_return_deleted_message(self):
+        from evennia_shards import delete_message, poll_messages, send_message
+
+        msg = send_message(
+            kind="ping", payload={}, to_shard="shard1", from_shard="shard0",
+        )
+        self.assertEqual(poll_messages("shard1").count(), 1)
+
+        delete_message(msg)
+
+        self.assertEqual(poll_messages("shard1").count(), 0)
+
+
+# ---------------------------------------------------------------------------
+# MessageHandler — dispatch for library-shipped kinds (ping, obj_msg,
+# account_msg, room_msg, flush_from_cache, undeliverable_reply). All ObjectDB
+# rows the handler resolves are local to the current shard scope, so the
+# multitenant auto-filter doesn't change visibility for these tests.
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class MessageHandlerTests(BaseEvenniaTestCase):
+    """The base MessageHandler dispatches library-shipped kinds."""
+
+    def test_unknown_kind_returns_false(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="unknown_kind", payload={},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertFalse(MessageHandler().handle(msg))
+
+    def test_ping_returns_true_and_inserts_ping_received_reply(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        ping = Message.objects.create(
+            kind="ping", payload={"text": "hello"},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(ping))
+
+        replies = list(Message.objects.filter(kind="ping_received"))
+        self.assertEqual(len(replies), 1)
+        reply = replies[0]
+        self.assertEqual(reply.to_shard, "shard1")
+        self.assertEqual(reply.from_shard, "shard0")
+        self.assertEqual(
+            reply.payload, {"original_pk": ping.pk, "echo": {"text": "hello"}},
+        )
+
+    def test_ping_with_no_from_shard_returns_true_and_no_reply(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        ping = Message.objects.create(
+            kind="ping", payload={}, to_shard="shard0", from_shard=None,
+        )
+        self.assertTrue(MessageHandler().handle(ping))
+        self.assertFalse(Message.objects.filter(kind="ping_received").exists())
+
+    def test_ping_received_returns_true_and_inserts_nothing(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="ping_received",
+            payload={"original_pk": 99, "echo": {}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(Message.objects.count(), before_count)
+
+    def test_obj_msg_calls_target_msg_with_kwargs(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        recorded_kwargs = {}
+        # Shadow the typeclass-level msg via __dict__ (bypasses
+        # Evennia's protective __setattr__).
+        target.__dict__["msg"] = lambda **kwargs: recorded_kwargs.update(kwargs)
+
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "hello"}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(recorded_kwargs, {"text": "hello"})
+
+    def test_obj_msg_passes_oob_kwargs_intact(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        captured = []
+        target.__dict__["msg"] = lambda **kwargs: captured.append(kwargs)
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1", "ticket": "abc"},
+            "options": {"raw": True},
+        }
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": kwargs},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(captured, [kwargs])
+
+    def test_obj_msg_target_gone_returns_true_and_inserts_nothing(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": 999_999, "kwargs": {"text": "hi"}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(Message.objects.count(), before_count)
+
+    def test_account_msg_calls_target_msg_with_kwargs(self):
+        from evennia.accounts.models import AccountDB
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = AccountDB.objects.create(
+            username="msg_target",
+            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
+        )
+        recorded_kwargs = {}
+        target.__dict__["msg"] = lambda **kwargs: recorded_kwargs.update(kwargs)
+
+        msg = Message.objects.create(
+            kind="account_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "ooc hi"}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(recorded_kwargs, {"text": "ooc hi"})
+
+    def test_account_msg_target_gone_returns_true_and_inserts_nothing(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="account_msg",
+            payload={"pk": 999_999, "kwargs": {"text": "hi"}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        before_count = Message.objects.count()
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertEqual(Message.objects.count(), before_count)
+
+    def test_subclass_super_handle_dispatches_obj_msg(self):
+        """Consumer subclass calling super().handle() inherits obj_msg dispatch."""
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = ObjectDB.objects.create(
+            db_key="char", db_typeclass_path=TYPECLASS,
+        )
+        captured = []
+        target.__dict__["msg"] = lambda **kwargs: captured.append(kwargs)
+
+        class ConsumerHandler(MessageHandler):
+            def handle(self, message):
+                if super().handle(message):
+                    return True
+                if message.kind == "consumer_kind":
+                    return True
+                return False
+
+        msg = Message.objects.create(
+            kind="obj_msg",
+            payload={"pk": target.pk, "kwargs": {"text": "via super"}},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(ConsumerHandler().handle(msg))
+        self.assertEqual(captured, [{"text": "via super"}])
+
+    # ── flush_from_cache ──────────────────────────────────────────
+
+    def test_flush_from_cache_returns_true(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={"pks": []},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+
+    def test_flush_from_cache_evicts_cached_pk(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = ObjectDB.objects.create(
+            db_key="room", db_typeclass_path=TYPECLASS,
+        )
+        cache = ObjectDB.__dbclass__.__instance_cache__
+        self.assertIn(target.pk, cache)
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={"pks": [target.pk]},
+            to_shard="shard0", from_shard="shard1",
+        )
+        MessageHandler().handle(msg)
+
+        self.assertNotIn(target.pk, cache)
+
+    def test_flush_from_cache_uncached_pk_is_noop(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={"pks": [12345]},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+
+    def test_flush_from_cache_idempotent(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        target = ObjectDB.objects.create(
+            db_key="room", db_typeclass_path=TYPECLASS,
+        )
+        cache = ObjectDB.__dbclass__.__instance_cache__
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={"pks": [target.pk]},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+        self.assertNotIn(target.pk, cache)
+
+        self.assertTrue(MessageHandler().handle(msg))
+
+    def test_flush_from_cache_multiple_pks_each_evicted(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        a = ObjectDB.objects.create(db_key="a", db_typeclass_path=TYPECLASS)
+        b = ObjectDB.objects.create(db_key="b", db_typeclass_path=TYPECLASS)
+        cache = ObjectDB.__dbclass__.__instance_cache__
+        self.assertIn(a.pk, cache)
+        self.assertIn(b.pk, cache)
+
+        msg = Message.objects.create(
+            kind="flush_from_cache",
+            payload={"pks": [a.pk, 999_999, b.pk]},
+            to_shard="shard0", from_shard="shard1",
+        )
+        MessageHandler().handle(msg)
+
+        self.assertNotIn(a.pk, cache)
+        self.assertNotIn(b.pk, cache)
+
+    def test_flush_from_cache_empty_pks_is_noop(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={"pks": []},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+
+    def test_flush_from_cache_missing_pks_key_treated_as_empty(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="flush_from_cache", payload={},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+
+    # ── room_msg ──────────────────────────────────────────────────
+
+    def _make_room(self, key="room"):
+        return ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+
+    def test_room_msg_calls_msg_contents_with_text(self):
+        from unittest import mock
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={"room_pk": room.pk, "text": "ball arrives."},
+            to_shard="shard0", from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        msg_contents.assert_called_once()
+        args, kwargs = msg_contents.call_args
+        self.assertEqual(args[0], "ball arrives.")
+        self.assertEqual(kwargs.get("exclude"), [])
+        self.assertIsNone(kwargs.get("from_obj"))
+
+    def test_room_msg_passes_exclude_pks_resolved_to_instances(self):
+        from unittest import mock
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        room = self._make_room()
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "exclude_pks": [excluded.pk],
+            },
+            to_shard="shard0", from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        excluded_passed = kwargs.get("exclude")
+        self.assertEqual(len(excluded_passed), 1)
+        self.assertEqual(excluded_passed[0].pk, excluded.pk)
+
+    def test_room_msg_skips_stale_exclude_pk_silently(self):
+        from unittest import mock
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "exclude_pks": [999_999],
+            },
+            to_shard="shard0", from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        self.assertEqual(kwargs.get("exclude"), [])
+
+    def test_room_msg_resolves_from_obj_pk(self):
+        from unittest import mock
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        room = self._make_room()
+        sender = ObjectDB.objects.create(
+            db_key="alice", db_typeclass_path=TYPECLASS,
+        )
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "alice says hi.",
+                "from_obj_pk": sender.pk,
+            },
+            to_shard="shard0", from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        from_obj_passed = kwargs.get("from_obj")
+        self.assertIsNotNone(from_obj_passed)
+        self.assertEqual(from_obj_passed.pk, sender.pk)
+
+    def test_room_msg_stale_from_obj_pk_becomes_none(self):
+        from unittest import mock
+
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        room = self._make_room()
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={
+                "room_pk": room.pk,
+                "text": "ball arrives.",
+                "from_obj_pk": 999_999,
+            },
+            to_shard="shard0", from_shard="shard1",
+        )
+
+        msg_contents = mock.MagicMock()
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        with mock.patch.object(cached, "msg_contents", msg_contents):
+            self.assertTrue(MessageHandler().handle(msg))
+
+        _, kwargs = msg_contents.call_args
+        self.assertIsNone(kwargs.get("from_obj"))
+
+    def test_room_msg_missing_room_logs_and_consumes(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="room_msg",
+            payload={"room_pk": 999_999, "text": "lost arrival."},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertTrue(MessageHandler().handle(msg))
+
+
+# ---------------------------------------------------------------------------
+# process_inbox + ProcessInboxTimeout — one polling cycle: poll, dispatch,
+# delete on success; aged-out unhandled messages → undeliverable_reply.
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ProcessInboxTests(BaseEvenniaTestCase):
+    """process_inbox runs one polling cycle."""
+
+    def test_handler_truthy_deletes_message(self):
+        from evennia_shards import MessageHandler, process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        self.assertEqual(process_inbox(AlwaysHandle()), 1)
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_handler_falsy_leaves_message(self):
+        from evennia_shards import MessageHandler, process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class NeverHandle(MessageHandler):
+            def handle(self, message):
+                return False
+
+        self.assertEqual(process_inbox(NeverHandle()), 0)
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_handler_exception_leaves_message(self):
+        from evennia_shards import MessageHandler, process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        class BrokenHandler(MessageHandler):
+            def handle(self, message):
+                raise RuntimeError("oops")
+
+        self.assertEqual(process_inbox(BrokenHandler()), 0)
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+
+    def test_default_handler_processes_ping(self):
+        from evennia_shards import process_inbox
+        from evennia_shards.models import Message
+
+        Message.objects.create(
+            kind="ping", payload={"text": "hi"},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self.assertEqual(process_inbox(), 1)
+        self.assertFalse(Message.objects.filter(kind="ping").exists())
+        self.assertEqual(
+            Message.objects.filter(
+                kind="ping_received", to_shard="shard1",
+            ).count(),
+            1,
+        )
+
+    def test_skips_messages_for_other_shards(self):
+        from evennia_shards import MessageHandler, process_inbox
+        from evennia_shards.models import Message
+
+        Message.objects.create(
+            kind="custom", payload={}, to_shard="shard9", from_shard="shard1",
+        )
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        self.assertEqual(process_inbox(AlwaysHandle()), 0)
+        self.assertEqual(Message.objects.count(), 1)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ProcessInboxTimeoutTests(BaseEvenniaTestCase):
+    """Aged-out unhandled messages produce undeliverable_reply and are deleted."""
+
+    def _age_message(self, msg, seconds):
+        # auto_now_add doesn't honour save()-time mutations; force the
+        # value via QuerySet.update.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from evennia_shards.models import Message
+
+        Message.objects.filter(pk=msg.pk).update(
+            created_at=timezone.now() - timedelta(seconds=seconds),
+        )
+
+    def test_aged_out_message_with_valid_from_shard_inserts_undeliverable_reply(self):
+        from evennia_shards import process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={"data": 1},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self._age_message(msg, seconds=100)
+
+        process_inbox()
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        replies = list(Message.objects.filter(kind="undeliverable_reply"))
+        self.assertEqual(len(replies), 1)
+        reply = replies[0]
+        self.assertEqual(reply.to_shard, "shard1")
+        self.assertEqual(reply.from_shard, "shard0")
+        self.assertEqual(reply.payload["original_kind"], "custom")
+        self.assertEqual(reply.payload["original_payload"], {"data": 1})
+        self.assertEqual(reply.payload["reason"], "timeout")
+
+    def test_aged_out_message_without_from_shard_just_deletes(self):
+        from evennia_shards import process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard=None,
+        )
+        self._age_message(msg, seconds=100)
+
+        process_inbox()
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_non_aged_message_stays_in_queue(self):
+        from evennia_shards import process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={}, to_shard="shard0", from_shard="shard1",
+        )
+
+        process_inbox()
+
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_undeliverable_reply_kind_consumed_silently_by_base_handler(self):
+        from evennia_shards import MessageHandler
+        from evennia_shards.models import Message
+
+        Message.objects.create(
+            kind="undeliverable_reply",
+            payload={"original_kind": "x", "original_payload": {}, "reason": "timeout"},
+            to_shard="shard0", from_shard="shard1",
+        )
+        result = MessageHandler().handle(Message.objects.first())
+        self.assertTrue(result)
+        self.assertEqual(Message.objects.count(), 1)
+
+    @override_settings(SHARDS_MESSAGE_TIMEOUTS={"custom": 60})
+    def test_per_kind_lifespan_override_is_respected(self):
+        from evennia_shards import process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self._age_message(msg, seconds=30)
+
+        process_inbox()
+
+        self.assertTrue(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+    def test_handler_truthy_short_circuits_timeout_check(self):
+        from evennia_shards import MessageHandler, process_inbox
+        from evennia_shards.models import Message
+
+        msg = Message.objects.create(
+            kind="custom", payload={},
+            to_shard="shard0", from_shard="shard1",
+        )
+        self._age_message(msg, seconds=100)
+
+        class AlwaysHandle(MessageHandler):
+            def handle(self, message):
+                return True
+
+        process_inbox(AlwaysHandle())
+
+        self.assertFalse(Message.objects.filter(pk=msg.pk).exists())
+        self.assertFalse(Message.objects.filter(kind="undeliverable_reply").exists())
+
+
+# ---------------------------------------------------------------------------
+# Ticket model + create_ticket / get_ticket / delete_ticket primitives.
+#
+# Ticket has its own table (not ObjectDB), so the multitenant tenancy
+# install doesn't affect these — tests port verbatim from the legacy suite.
+# ---------------------------------------------------------------------------
+
+
+class TicketModelTests(BaseEvenniaTestCase):
+    """The Ticket model is wired and the migration deploys."""
+
+    def test_table_name_is_namespaced(self):
+        from evennia_shards.models import Ticket
+
+        self.assertEqual(Ticket._meta.db_table, "evennia_shards_ticket")
+
+    def test_token_is_primary_key(self):
+        from evennia_shards.models import Ticket
+
+        field = Ticket._meta.get_field("token")
+        self.assertTrue(field.primary_key)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class CreateTicketTests(BaseEvenniaTestCase):
+    """create_ticket inserts a Ticket row and returns a token."""
+
+    def test_returns_token_string(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        self.assertIsInstance(token, str)
+        self.assertEqual(len(token), 32)  # uuid4().hex is 32 chars
+
+    def test_inserts_ticket_row(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        ticket = Ticket.objects.get(token=token)
+        self.assertEqual(ticket.account_id, 1)
+        self.assertEqual(ticket.character_id, 2)
+        self.assertEqual(ticket.to_shard, "shard0")
+
+    def test_each_call_produces_unique_token(self):
+        from evennia_shards import create_ticket
+
+        t1 = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        t2 = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        self.assertNotEqual(t1, t2)
+
+    def test_client_ip_stored_when_provided(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="192.168.1.42",
+        )
+        ticket = Ticket.objects.get(token=token)
+        self.assertEqual(ticket.client_ip, "192.168.1.42")
+
+    def test_client_ip_defaults_to_none(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        ticket = Ticket.objects.get(token=token)
+        self.assertIsNone(ticket.client_ip)
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class GetTicketTests(BaseEvenniaTestCase):
+    """get_ticket looks up a ticket by token with shard check."""
+
+    def test_valid_token_returns_true_and_data(self):
+        from evennia_shards import create_ticket, get_ticket
+
+        token = create_ticket(account_id=10, character_id=20, to_shard="shard0")
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertEqual(data["account_id"], 10)
+        self.assertEqual(data["character_id"], 20)
+        self.assertEqual(data["to_shard"], "shard0")
+
+    def test_invalid_token_returns_false(self):
+        from evennia_shards import get_ticket
+
+        found, data = get_ticket("nonexistent")
+        self.assertFalse(found)
+        self.assertIsNone(data)
+
+    def test_wrong_shard_returns_false(self):
+        from evennia_shards import create_ticket, get_ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard1")
+        found, data = get_ticket(token, shard_id="shard0")
+        self.assertFalse(found)
+        self.assertIsNone(data)
+
+    def test_returns_client_ip(self):
+        from evennia_shards import create_ticket, get_ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertEqual(data["client_ip"], "10.0.0.1")
+
+    def test_returns_none_client_ip_when_not_set(self):
+        from evennia_shards import create_ticket, get_ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        found, data = get_ticket(token)
+        self.assertTrue(found)
+        self.assertIsNone(data["client_ip"])
+
+    def test_does_not_delete_ticket(self):
+        from evennia_shards import create_ticket, get_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        get_ticket(token)
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class DeleteTicketTests(BaseEvenniaTestCase):
+    """delete_ticket removes a ticket by token."""
+
+    def test_deletes_existing_ticket(self):
+        from evennia_shards import create_ticket, delete_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        delete_ticket(token)
+        self.assertFalse(Ticket.objects.filter(token=token).exists())
+
+    def test_silent_on_nonexistent_token(self):
+        from evennia_shards import delete_ticket
+
+        delete_ticket("nonexistent")  # Should not raise
+
+    def test_second_get_after_delete_returns_false(self):
+        from evennia_shards import create_ticket, delete_ticket, get_ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        delete_ticket(token)
+        found, data = get_ticket(token)
+        self.assertFalse(found)
+        self.assertIsNone(data)
+
+
+# ---------------------------------------------------------------------------
+# Protocol-side ticket parsing/validation helpers
+# (ShardWebSocketClient._extract_ticket_token, ._validate_ticket, ._get_client_address).
+# Tests bind the unbound methods onto a _FakeProtocol to avoid standing
+# up Twisted reactor + Autobahn.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTransport:
+    """Minimal stand-in for a Twisted transport."""
+
+    def __init__(self, client=None):
+        self.client = client  # tuple: (ip, port) or None
+
+
+class _FakeProtocol:
+    """Stand-in for ShardWebSocketClient.
+
+    Provides the attributes ``_extract_ticket_token``, ``_validate_ticket``,
+    and ``_get_client_address`` rely on. The protocol methods themselves
+    get bound onto the class below the protocol's own definition.
+    """
+
+    def __init__(self, uri=None, client_ip=None, http_headers=None):
+        self.http_request_uri = uri
+        self.transport = _FakeTransport(
+            client=(client_ip, 0) if client_ip else None
+        )
+        self.http_headers = http_headers or {}
+        self.sent_lines = []
+        self.close_calls = []
+        self.protocol_flags = {}
+
+    def sendLine(self, data):
+        self.sent_lines.append(data)
+
+    def sendClose(self, code=None, reason=None):
+        self.close_calls.append((code, reason))
+
+
+# Bind the unbound methods onto _FakeProtocol so tests can call them
+# without instantiating the real ShardWebSocketClient.
+from evennia_shards.protocols import ShardWebSocketClient as _SWC
+
+_FakeProtocol._extract_ticket_token = _SWC._extract_ticket_token
+_FakeProtocol._validate_ticket = _SWC._validate_ticket
+_FakeProtocol._get_client_address = _SWC._get_client_address
+_FakeProtocol._send_text = _SWC._send_text
+_FakeProtocol._mark_ooc_arrival_if_router = _SWC._mark_ooc_arrival_if_router
+
+
+class ExtractTicketTokenTests(BaseEvenniaTestCase):
+    """_extract_ticket_token parses ?ticket= from the WebSocket URL."""
+
+    def test_extracts_token_from_query_string(self):
+        proto = _FakeProtocol(uri="/websocket?ticket=abc123")
+        self.assertEqual(proto._extract_ticket_token(), "abc123")
+
+    def test_returns_none_when_no_ticket_param(self):
+        proto = _FakeProtocol(uri="/websocket?csessid=xyz")
+        self.assertIsNone(proto._extract_ticket_token())
+
+    def test_returns_none_when_no_uri(self):
+        proto = _FakeProtocol(uri=None)
+        self.assertIsNone(proto._extract_ticket_token())
+
+    def test_returns_first_token_when_multiple(self):
+        proto = _FakeProtocol(uri="/websocket?ticket=first&ticket=second")
+        self.assertEqual(proto._extract_ticket_token(), "first")
+
+    def test_handles_full_url(self):
+        proto = _FakeProtocol(
+            uri="ws://shard0:4002/websocket?ticket=tok123&csessid=abc"
+        )
+        self.assertEqual(proto._extract_ticket_token(), "tok123")
+
+
+class GetClientAddressTests(BaseEvenniaTestCase):
+    """_get_client_address resolves the real client IP."""
+
+    def test_direct_connection_returns_transport_ip(self):
+        proto = _FakeProtocol(client_ip="192.168.1.10")
+        self.assertEqual(proto._get_client_address(), "192.168.1.10")
+
+    def test_no_transport_client_returns_none(self):
+        proto = _FakeProtocol(client_ip=None)
+        self.assertIsNone(proto._get_client_address())
+
+    def test_proxy_returns_forwarded_ip(self):
+        proto = _FakeProtocol(
+            client_ip="127.0.0.1",
+            http_headers={"x-forwarded-for": "10.0.0.5, 127.0.0.1"},
+        )
+        # _UPSTREAM_IPS is a module-level constant; patch in-place.
+        import evennia_shards.protocols as proto_mod
+
+        original = proto_mod._UPSTREAM_IPS
+        proto_mod._UPSTREAM_IPS = ["127.0.0.1"]
+        try:
+            self.assertEqual(proto._get_client_address(), "10.0.0.5")
+        finally:
+            proto_mod._UPSTREAM_IPS = original
+
+    def test_non_proxy_ip_ignores_forwarded_header(self):
+        proto = _FakeProtocol(
+            client_ip="10.0.0.1",
+            http_headers={"x-forwarded-for": "evil.ip"},
+        )
+        self.assertEqual(proto._get_client_address(), "10.0.0.1")
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class ValidateTicketTests(BaseEvenniaTestCase):
+    """_validate_ticket validates, IP-checks, and consumes the ticket."""
+
+    def test_valid_ticket_returns_true_and_data(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(account_id=10, character_id=20, to_shard="shard0")
+        proto = _FakeProtocol()
+        valid, data = proto._validate_ticket(token, "127.0.0.1")
+        self.assertTrue(valid)
+        self.assertEqual(data["account_id"], 10)
+        self.assertEqual(data["character_id"], 20)
+
+    def test_valid_ticket_is_consumed(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "127.0.0.1")
+        self.assertFalse(Ticket.objects.filter(token=token).exists())
+
+    def test_second_use_of_same_token_rejected(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "127.0.0.1")
+        valid, error = proto._validate_ticket(token, "127.0.0.1")
+        self.assertFalse(valid)
+        self.assertIn("not found", error)
+
+    def test_invalid_token_returns_false_and_error(self):
+        proto = _FakeProtocol()
+        valid, error = proto._validate_ticket("nonexistent", "127.0.0.1")
+        self.assertFalse(valid)
+        self.assertIn("not found", error)
+
+    def test_invalid_token_does_not_delete_anything(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(account_id=1, character_id=2, to_shard="shard0")
+        proto = _FakeProtocol()
+        proto._validate_ticket("wrong_token", "127.0.0.1")
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+    def test_ip_match_passes(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol()
+        valid, _ = proto._validate_ticket(token, "10.0.0.1")
+        self.assertTrue(valid)
+
+    def test_ip_mismatch_rejected(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol()
+        valid, error = proto._validate_ticket(token, "192.168.1.99")
+        self.assertFalse(valid)
+        self.assertIn("IP mismatch", error)
+
+    def test_ip_mismatch_does_not_consume_ticket(self):
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="10.0.0.1",
+        )
+        proto = _FakeProtocol()
+        proto._validate_ticket(token, "192.168.1.99")
+        self.assertTrue(Ticket.objects.filter(token=token).exists())
+
+    def test_no_ip_on_ticket_skips_ip_check(self):
+        from evennia_shards import create_ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+        )
+        proto = _FakeProtocol()
+        valid, _ = proto._validate_ticket(token, "192.168.1.99")
+        self.assertTrue(valid)
+
+
+# ---------------------------------------------------------------------------
+# Cross-shard messaging helpers (send_cross_shard_message,
+# send_cross_shard_room_message). Sender-side wrappers on top of the obj_msg
+# and room_msg bus primitives, with local-vs-remote dispatch.
+#
+# Under multitenant the helpers escape the auto-filter for the initial
+# visibility lookup (same pattern as search.py) so foreign-shard targets
+# are visible to the dispatch logic. The tests below exercise both the
+# local fast-path (auto-filtered .get) and the remote bus path.
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class SendCrossShardMessageTests(BaseEvenniaTestCase):
+    """Sender-side helper built on top of the ``obj_msg`` primitive."""
+
+    def _make_target(self, shard_id="shard0", typeclass=TYPECLASS):
+        target = ObjectDB.objects.create(
+            db_key="target", db_typeclass_path=typeclass,
+        )
+        if shard_id != "shard0":
+            _forge_db_shard(target.pk, shard_id)
+        return target
+
+    def test_local_target_calls_msg_directly_no_bus_row(self):
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        target = self._make_target(shard_id="shard0")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "local hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [{"text": "local hi"}])
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_global_star_target_treated_as_local(self):
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        target = self._make_target(shard_id="*")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "global hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [{"text": "global hi"}])
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_remote_target_inserts_obj_msg_bus_row(self):
+        """Target on another shard → obj_msg bus row, no local .msg call.
+
+        Validates the multitenant fix: the helper's visibility lookup
+        wraps its values_list in ``shard_context(None)`` so the foreign
+        row is visible to the dispatch decision.
+        """
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        target = self._make_target(shard_id="shard1")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "remote hi"}, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [])
+        msgs = list(Message.objects.all())
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].kind, "obj_msg")
+        self.assertEqual(msgs[0].to_shard, "shard1")
+        self.assertEqual(msgs[0].from_shard, "shard0")
+        self.assertEqual(
+            msgs[0].payload, {"pk": target.pk, "kwargs": {"text": "remote hi"}}
+        )
+
+    def test_target_gone_returns_false_no_bus_row(self):
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        result = send_cross_shard_message(999_999, {"text": "ghost"})
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_typeclass_mismatch_returns_false_no_bus_row(self):
+        from evennia.objects.objects import DefaultCharacter
+
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        # DefaultObject is NOT a subclass of DefaultCharacter (DC inherits
+        # from DO, not the other way around). Filter rejects.
+        target = self._make_target(
+            shard_id="shard1",
+            typeclass="evennia.objects.objects.DefaultObject",
+        )
+
+        result = send_cross_shard_message(
+            target.pk, {"text": "hi"}, target_typeclass=DefaultCharacter,
+        )
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    @override_settings(
+        SHARD_ID="shard0",
+        SHARDS_ROLE="shard",
+        BASE_CHARACTER_TYPECLASS="evennia.objects.objects.DefaultObject",
+    )
+    def test_default_typeclass_resolves_from_settings_at_call_time(self):
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        target = self._make_target(shard_id="shard1")
+
+        result = send_cross_shard_message(target.pk, {"text": "hi"})
+
+        self.assertTrue(result)
+        self.assertEqual(Message.objects.count(), 1)
+
+    def test_kwargs_pass_through_to_remote_payload(self):
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+        from evennia_shards.models import Message
+
+        target = self._make_target(shard_id="shard1")
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1", "ticket": "abc"},
+            "options": {"raw": True},
+        }
+        result = send_cross_shard_message(
+            target.pk, kwargs, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        msg = Message.objects.first()
+        self.assertEqual(msg.payload["kwargs"], kwargs)
+
+    def test_kwargs_pass_through_to_local_msg(self):
+        from evennia.objects.objects import DefaultObject
+
+        from evennia_shards import send_cross_shard_message
+
+        target = self._make_target(shard_id="shard0")
+        captured = []
+        target.__dict__["msg"] = lambda **kw: captured.append(kw)
+
+        kwargs = {
+            "text": "look",
+            "shard_redirect": {"host": "shard1"},
+            "options": {"raw": True},
+        }
+        result = send_cross_shard_message(
+            target.pk, kwargs, target_typeclass=DefaultObject,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(captured, [kwargs])
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class SendCrossShardRoomMessageTests(BaseEvenniaTestCase):
+    """Sender-side helper built on top of the ``room_msg`` primitive."""
+
+    def _make_room(self, shard_id="shard0", key="room"):
+        target = ObjectDB.objects.create(
+            db_key=key, db_typeclass_path=TYPECLASS,
+        )
+        if shard_id != "shard0":
+            _forge_db_shard(target.pk, shard_id)
+        return target
+
+    def test_local_room_calls_msg_contents_directly_no_bus_row(self):
+        from unittest import mock
+
+        from evennia_shards.messaging import send_cross_shard_room_message
+        from evennia_shards.models import Message
+
+        room = self._make_room(shard_id="shard0")
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            result = send_cross_shard_room_message(room.pk, "ball arrives.")
+
+        self.assertTrue(result)
+        spy.assert_called_once()
+        args, kwargs = spy.call_args
+        self.assertEqual(args[0], "ball arrives.")
+        self.assertEqual(kwargs.get("exclude"), [])
+        self.assertIsNone(kwargs.get("from_obj"))
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_remote_room_inserts_bus_row_with_payload(self):
+        """Room on another shard → room_msg bus row addressed to that shard.
+
+        Validates the multitenant fix on the room helper.
+        """
+        from evennia_shards.messaging import send_cross_shard_room_message
+        from evennia_shards.models import Message
+
+        room = self._make_room(shard_id="shard1")
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+
+        result = send_cross_shard_room_message(
+            room.pk,
+            "ball arrives.",
+            exclude_pks=[excluded.pk],
+            from_obj_pk=excluded.pk,
+        )
+
+        self.assertTrue(result)
+        rows = list(Message.objects.filter(kind="room_msg"))
+        self.assertEqual(len(rows), 1)
+        msg = rows[0]
+        self.assertEqual(msg.to_shard, "shard1")
+        self.assertEqual(msg.payload["room_pk"], room.pk)
+        self.assertEqual(msg.payload["text"], "ball arrives.")
+        self.assertEqual(msg.payload["exclude_pks"], [excluded.pk])
+        self.assertEqual(msg.payload["from_obj_pk"], excluded.pk)
+
+    def test_remote_room_omits_optional_fields_when_unused(self):
+        from evennia_shards.messaging import send_cross_shard_room_message
+        from evennia_shards.models import Message
+
+        room = self._make_room(shard_id="shard1")
+        send_cross_shard_room_message(room.pk, "ball arrives.")
+
+        msg = Message.objects.get(kind="room_msg")
+        self.assertNotIn("exclude_pks", msg.payload)
+        self.assertNotIn("from_obj_pk", msg.payload)
+
+    def test_global_sentinel_room_is_local(self):
+        from unittest import mock
+
+        from evennia_shards.messaging import send_cross_shard_room_message
+        from evennia_shards.models import Message
+
+        room = self._make_room(shard_id="*")
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            self.assertTrue(send_cross_shard_room_message(room.pk, "hi."))
+
+        spy.assert_called_once()
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_missing_room_logs_and_returns_false(self):
+        from evennia_shards.messaging import send_cross_shard_room_message
+        from evennia_shards.models import Message
+
+        result = send_cross_shard_room_message(999_999, "ghost.")
+
+        self.assertFalse(result)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_local_path_resolves_optional_pks_to_instances(self):
+        from unittest import mock
+
+        from evennia_shards.messaging import send_cross_shard_room_message
+
+        room = self._make_room(shard_id="shard0")
+        excluded = ObjectDB.objects.create(
+            db_key="ball", db_typeclass_path=TYPECLASS,
+        )
+        sender = ObjectDB.objects.create(
+            db_key="alice", db_typeclass_path=TYPECLASS,
+        )
+        cached = ObjectDB.__dbclass__.__instance_cache__.get(room.pk)
+        spy = mock.MagicMock()
+
+        with mock.patch.object(cached, "msg_contents", spy):
+            send_cross_shard_room_message(
+                room.pk, "hi.",
+                exclude_pks=[excluded.pk],
+                from_obj_pk=sender.pk,
+            )
+
+        _, kwargs = spy.call_args
+        ex_passed = kwargs.get("exclude")
+        self.assertEqual(len(ex_passed), 1)
+        self.assertEqual(ex_passed[0].pk, excluded.pk)
+        from_obj_passed = kwargs.get("from_obj")
+        self.assertEqual(from_obj_passed.pk, sender.pk)
