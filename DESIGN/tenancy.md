@@ -228,6 +228,36 @@ The immutability check is meant to catch *accidental* tenant-column mutation. `c
 
 External contract is preserved: same args, same return type, same side effects.
 
+## Cross-shard reads: the load-evict pattern
+
+Multitenant enables a category of operation that was *structurally impossible* under the chokepoint design: materialising a foreign-shard row's Python instance to call read-only methods on it. The chokepoints refused `from_db` construction of any foreign row; the bypass primitive needed the instance as an argument, but you couldn't get the instance without first constructing it. The closest substitute was a bus round-trip ("ask the destination shard to do the work, await the reply"), which was high-latency and required a new message kind per operation.
+
+Under multitenant the same operation is a narrow scope switch:
+
+```python
+with shard_context(target_shard):
+    target = ObjectDB.objects.get(pk=target_pk)
+    result = target.some_read_only_method(...)
+    target.flush_from_cache(force=True)
+```
+
+Four steps:
+
+1. **Scope-switch** to the target shard so the auto-filter admits its rows.
+2. **Materialize** the row through the normal ORM. Real Python instance, full Evennia semantics.
+3. **Call** the read-only method (`access`, attribute reads, etc.). Pure in-memory; no further DB hit.
+4. **Evict** the foreign instance from the idmapper. Without this, the next default-scoped read on the same pk on this process would return the cached foreign instance instead of the auto-filter excluding it. Subtle bug class — always pair the load with the evict.
+
+**Use case worth shipping:** the destination-side `teleport_here` lock check in `ShardAwareCmdTeleport`'s cross-shard branch. The teleport.py docstring at the cross-shard branch notes the gap explicitly ("Vanilla's `teleport_here` lock check on the destination — deferred until a bus primitive lands"); the load-evict pattern closes it without a bus primitive.
+
+**Caveats:**
+
+- **Side-effecting lockfuncs:** Most stock lockfuncs (`perm()`, `id()`, `tag()`, `holds()`, etc.) are read-only and scope-safe. Custom lockfuncs that write DB state will write to the target shard inside the `with` block — usually the right thing, but worth knowing.
+- **Lockfuncs that themselves query:** A lockfunc that reads the caller's own rows (e.g. `same_guild(caller)` looking up the caller's guild membership) runs under the *target* shard's scope inside the block. If the caller's relevant rows live on the caller's home shard, the lookup will silently see only the target shard's rows. Wrap such cases in a nested `shard_context(caller.shard_id)` if you hit one.
+- **Strictly for reads.** Don't use this pattern to *write* to foreign rows — that's what `cross_shard_move`'s `qs.update` path is for. Writes via instance `save()` inside `shard_context(target)` would land on the target, but they'd also fight the tenant-column immutability machinery if the row's `shard_id` is touched. Stay on the read side.
+
+A future helper in `tenancy.py` (e.g. `with_remote_row(pk, shard_id) as obj:`) could encapsulate the load + evict pair so call sites don't have to repeat the eviction step. Worth doing once a second use case lands; one use case (the lock check) doesn't justify the abstraction yet.
+
 ## Known gaps not yet addressed in the trial
 
 - **Idmapper cache.** Evennia's `SharedMemoryManager` caches model instances by pk and serves them on `get()` without re-hitting the DB (and therefore without re-applying the tenant filter). Under multitenant the cache is *implicitly* scoped because every populating read goes through the filter — but legitimate cross-shard reads (via `shard_context()`) can poison the cache with foreign instances visible to later same-process scoped reads. Not exercised by the trial yet.
