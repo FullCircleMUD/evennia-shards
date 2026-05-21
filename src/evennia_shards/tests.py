@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Unit tests for the evennia-shards library.
-
-This file is being rebuilt progressively as the library is refactored onto
-django-multitenant. The previous test suite is preserved at
-``_legacy_tests.py`` (excluded from discovery by the leading underscore);
-unchanged tests will be ported back as each subsystem is verified against
-the new tenancy model.
-"""
+"""Unit tests for the evennia-shards library."""
 
 import unittest
 
@@ -33,11 +26,14 @@ TYPECLASS = "evennia.objects.objects.DefaultObject"
 
 
 def _forge_db_shard(pk: int, shard_id: str | None) -> None:
-    """Force a row's ``shard_id`` via raw SQL — bypasses every chokepoint.
+    """Force a row's ``shard_id`` via raw SQL — bypasses the multitenant
+    auto-filter and the tenant-column immutability check.
 
     Used by tests that need to set up "this row lives on another shard"
     scenarios without going through any of the library's safeguards.
-    Same helper shape as the legacy chokepoint tests.
+    Raw cursor SQL routes around Django's ORM entirely, so the patched
+    manager, ``__setattr__``, and global query decorators all stay
+    out of the way.
     """
     from django.db import connection
 
@@ -338,21 +334,75 @@ class AutoStampAndFilterTests(BaseEvenniaTestCase):
         with self.assertRaises(ObjectDB.DoesNotExist):
             ObjectDB.objects.get(pk=obj.pk)
 
+    def test_bulk_create_auto_stamps_each_instance(self):
+        # bulk_create bypasses Django's normal save() path, so the
+        # auto-stamp on save() doesn't run. The patched manager method
+        # must stamp each unsaved instance before delegating.
+        objs = [
+            ObjectDB(db_key=f"bulk_{i}", db_typeclass_path=TYPECLASS)
+            for i in range(3)
+        ]
+        for obj in objs:
+            self.assertIsNone(obj.shard_id)  # pre-stamp
+
+        ObjectDB.objects.bulk_create(objs)
+
+        for obj in objs:
+            self.assertEqual(obj.shard_id, "shard0")
+
+        # And the rows actually landed in the DB with that stamp —
+        # round-trip via the auto-filtered manager to confirm.
+        keys = [f"bulk_{i}" for i in range(3)]
+        rows = list(
+            ObjectDB.objects.filter(db_key__in=keys)
+            .values_list("db_key", "shard_id")
+        )
+        self.assertEqual(sorted(rows), [(k, "shard0") for k in keys])
+
+    def test_bulk_delete_scopes_to_current_shard(self):
+        # ``QuerySet.delete()`` and the underlying Collector route
+        # through the wrap_delete + related_objects decorators that
+        # multitenant installs. A bulk delete that names both local and
+        # foreign rows must only touch the local row.
+        local = ObjectDB.objects.create(
+            db_key="bulk_del_local", db_typeclass_path=TYPECLASS,
+        )
+        foreign = ObjectDB.objects.create(
+            db_key="bulk_del_foreign", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(foreign.pk, "shard1")
+
+        from evennia.utils.idmapper.models import flush_cache
+
+        flush_cache()
+
+        # Default-scoped queryset: filter sees local only (foreign is
+        # already excluded by the auto-filter). Naming both pks
+        # explicitly in pk__in proves the SQL WHERE clause still
+        # carries the tenant filter — the foreign row survives.
+        ObjectDB.objects.filter(pk__in=[local.pk, foreign.pk]).delete()
+
+        # Local is gone; foreign survives. Read past the auto-filter
+        # to confirm both halves of the assertion.
+        with shard_context(None):
+            survivors = set(
+                ObjectDB.objects.filter(pk__in=[local.pk, foreign.pk])
+                .values_list("pk", flat=True)
+            )
+        self.assertEqual(survivors, {foreign.pk})
+
 
 class ShardContextReadTests(BaseEvenniaTestCase):
     """Verifies that ``shard_context(...)`` correctly switches the
     auto-filter scope for reads. Test bodies use ``.count()`` /
-    ``.exists()`` / ``.values()`` instead of materialising instances
-    via ``.get()`` or queryset iteration — those paths go through
-    ``from_db``, which the legacy chokepoints in ``isolation.py``
-    still guard. Once the chokepoints are removed, these tests can
-    be extended to cover instance materialisation under foreign
-    context.
+    ``.exists()`` / ``.values()`` rather than ``.get()`` or queryset
+    iteration — instance materialisation is exercised separately in
+    :class:`CrossShardWriteTests`.
 
     The auto-filter is the single thing all read primitives funnel
-    through (P1 in the survey doc), so verifying it via ``.count()``
-    establishes that the filter is being applied with the right
-    scope. Full materialisation paths inherit the same filter."""
+    through, so verifying it via ``.count()`` establishes that the
+    filter is being applied with the right scope. Full materialisation
+    paths inherit the same filter."""
 
     def _make_row(self, key: str, shard_id: str) -> int:
         # Helper: create a row under the default shard0 context (so
