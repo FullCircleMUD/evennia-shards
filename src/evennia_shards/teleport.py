@@ -125,25 +125,34 @@ class ShardAwareCmdTeleport(CmdTeleport):
             if dest_result.state == "multiple":
                 self.msg(_format_multiple(self.rhs, dest_result.candidates))
                 raise InterruptCommand
-            if dest_result.state == "found":
-                self.destination = dest_result.obj  # None if cross-shard
-                self.dest_pk = dest_result.pk
-                self.dest_shard = dest_result.shard_id
-                self.dest_key = dest_result.db_key
-            # If destination not found, vanilla func() handles the
-            # "Destination not found." message via its existing
-            # `if not destination: ...` guard.
+            if dest_result.state == "not_found":
+                # Vanilla's "Destination not found." message. The
+                # original comment here said vanilla's func() would
+                # emit it, but our func() dispatch routes around
+                # vanilla when ``destination is None`` (branch 2
+                # requires both targets present), so we have to
+                # surface it ourselves.
+                self.msg("Destination not found.")
+                raise InterruptCommand
+            # state == "found"
+            self.destination = dest_result.obj  # None if cross-shard
+            self.dest_pk = dest_result.pk
+            self.dest_shard = dest_result.shard_id
+            self.dest_key = dest_result.db_key
 
         elif self.lhs:
             dest_result = shard_aware_global_search(self.caller, self.lhs)
             if dest_result.state == "multiple":
                 self.msg(_format_multiple(self.lhs, dest_result.candidates))
                 raise InterruptCommand
-            if dest_result.state == "found":
-                self.destination = dest_result.obj  # None if cross-shard
-                self.dest_pk = dest_result.pk
-                self.dest_shard = dest_result.shard_id
-                self.dest_key = dest_result.db_key
+            if dest_result.state == "not_found":
+                self.msg("Destination not found.")
+                raise InterruptCommand
+            # state == "found"
+            self.destination = dest_result.obj  # None if cross-shard
+            self.dest_pk = dest_result.pk
+            self.dest_shard = dest_result.shard_id
+            self.dest_key = dest_result.db_key
 
     def func(self):
         # Branch 1 — /tonone. Vanilla's body handles obj at /tonone time;
