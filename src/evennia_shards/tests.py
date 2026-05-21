@@ -169,6 +169,140 @@ class TenancyContextTests(unittest.TestCase):
         self.assertIsNone(get_current_tenant())
 
 
+class PreserveTenantContextTests(unittest.TestCase):
+    """``preserve_tenant_context`` captures the active tenant at wrap
+    time and re-applies it inside the wrapped callable. The canonical
+    use case is dispatching ORM work into a separate thread via
+    ``deferToThread`` or similar, where ``threading.local`` does not
+    propagate."""
+
+    def setUp(self):
+        unset_current_tenant()
+
+    def tearDown(self):
+        unset_current_tenant()
+
+    def test_captures_tenant_at_wrap_time(self):
+        from evennia_shards import preserve_tenant_context
+
+        set_current_shard("shard0")
+        wrapped = preserve_tenant_context(lambda: get_current_tenant_value())
+
+        # Change tenant after the wrap — the captured value should
+        # still be the one at wrap time.
+        set_current_shard("shard1")
+        self.assertEqual(wrapped(), ["shard0", "*"])
+
+    def test_restores_previous_tenant_on_exit(self):
+        from evennia_shards import preserve_tenant_context
+
+        set_current_shard("shard0")
+        wrapped = preserve_tenant_context(lambda: None)
+
+        set_current_shard("shard1")
+        wrapped()
+        # After wrapped() returns, the tenant active *before* the call
+        # is restored — not the captured one.
+        self.assertEqual(get_current_tenant_value(), ["shard1", "*"])
+
+    def test_captured_none_runs_unscoped(self):
+        from evennia_shards import preserve_tenant_context
+
+        # No tenant set at wrap time → captured is None → wrapped
+        # callable runs unscoped.
+        wrapped = preserve_tenant_context(lambda: get_current_tenant())
+
+        set_current_shard("shard0")  # set after wrap; should be ignored inside
+        self.assertIsNone(wrapped())
+        # And the outer tenant is restored on exit.
+        self.assertEqual(get_current_tenant_value(), ["shard0", "*"])
+
+    def test_propagates_across_threads(self):
+        """Cross-thread propagation — the canonical use case.
+
+        Without the wrap, a thread spawned via ``threading.Thread``
+        sees ``get_current_tenant() is None`` because ``threading.
+        local`` does not propagate. With the wrap, the captured value
+        is set inside the thread on entry.
+        """
+        import threading
+
+        from evennia_shards import preserve_tenant_context
+
+        set_current_shard("shard0")
+
+        observed = {"with_wrap": None, "without_wrap": None}
+
+        def _read_tenant_into(key):
+            observed[key] = get_current_tenant_value()
+
+        # Without the wrap: thread sees no tenant.
+        t1 = threading.Thread(target=_read_tenant_into, args=("without_wrap",))
+        t1.start()
+        t1.join()
+
+        # With the wrap: thread sees the captured tenant.
+        t2 = threading.Thread(
+            target=preserve_tenant_context(_read_tenant_into),
+            args=("with_wrap",),
+        )
+        t2.start()
+        t2.join()
+
+        self.assertIsNone(observed["without_wrap"])
+        self.assertEqual(observed["with_wrap"], ["shard0", "*"])
+
+    def test_restores_on_exception(self):
+        from evennia_shards import preserve_tenant_context
+
+        set_current_shard("shard0")
+
+        def _raise():
+            self.assertEqual(get_current_tenant_value(), ["shard1", "*"])
+            raise RuntimeError("boom")
+
+        set_current_shard("shard1")
+        wrapped = preserve_tenant_context(_raise)
+        # Re-set captured value to shard1 by re-wrapping with shard1 active.
+        wrapped = preserve_tenant_context(_raise)
+
+        set_current_shard("shard2")
+        with self.assertRaises(RuntimeError):
+            wrapped()
+        # Even on exception, the outer tenant is restored — not leaked
+        # to the captured value.
+        self.assertEqual(get_current_tenant_value(), ["shard2", "*"])
+
+    def test_preserves_function_metadata(self):
+        """``functools.wraps`` carries ``__name__`` / ``__doc__`` through."""
+        from evennia_shards import preserve_tenant_context
+
+        def my_function(x, y):
+            """My docstring."""
+            return x + y
+
+        wrapped = preserve_tenant_context(my_function)
+        self.assertEqual(wrapped.__name__, "my_function")
+        self.assertEqual(wrapped.__doc__, "My docstring.")
+
+    def test_passes_args_and_kwargs_through(self):
+        from evennia_shards import preserve_tenant_context
+
+        def add(a, b, *, c):
+            return a + b + c
+
+        set_current_shard("shard0")
+        wrapped = preserve_tenant_context(add)
+        self.assertEqual(wrapped(1, 2, c=3), 6)
+
+    def test_returns_callables_return_value(self):
+        from evennia_shards import preserve_tenant_context
+
+        set_current_shard("shard0")
+        wrapped = preserve_tenant_context(lambda: "result")
+        self.assertEqual(wrapped(), "result")
+
+
 class BootstrapTenantContextTests(unittest.TestCase):
     """Tests the role -> tenant-context decision invoked from apps.ready().
 

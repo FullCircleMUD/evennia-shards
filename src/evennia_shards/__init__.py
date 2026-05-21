@@ -27,6 +27,7 @@ from .tenancy import (
     GLOBAL_SHARD_ID,
     Shard,
     clear_shard_context,
+    preserve_tenant_context,
     set_current_shard,
     shard_context,
 )
@@ -68,5 +69,6 @@ __all__ = [
     "set_current_shard",
     "clear_shard_context",
     "shard_context",
+    "preserve_tenant_context",
     "__version__",
 ]

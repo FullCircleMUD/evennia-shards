@@ -21,6 +21,7 @@ The module is import-safe before Django settings are configured — it does
 not read settings or models at import time.
 """
 
+import functools
 from contextlib import contextmanager
 
 from django_multitenant.utils import (
@@ -448,3 +449,56 @@ def shard_context(shard_id: str | None):
             unset_current_tenant()
         else:
             set_current_tenant(previous)
+
+
+def preserve_tenant_context(fn):
+    """Wrap a callable so it carries the current tenant context across
+    threads or asyncio tasks.
+
+    Multitenant stores the active tenant in thread-local storage. Code
+    dispatched into a different thread (``twisted.internet.threads.
+    deferToThread``, ``ThreadPoolExecutor.submit``, ``asyncio.to_thread``,
+    etc.) executes with a fresh thread-local and so sees no tenant set —
+    queries inside that callable run unscoped, and the auto-stamp on
+    insert is skipped. This helper captures the tenant at wrap time and
+    re-applies it inside the wrapped callable, restoring whatever was
+    active before on exit.
+
+    The capture happens **eagerly** at wrap time, not lazily at call
+    time. Wrap and dispatch in the same expression::
+
+        deferToThread(preserve_tenant_context(do_work), arg1, arg2)
+
+    Designed as the canonical integration point for other Evennia
+    libraries (world-builder, mob-spawner, future contribs) that
+    dispatch ORM work into threads. Consumers detect whether the shards
+    library is installed and fall back to an identity passthrough when
+    it isn't::
+
+        try:
+            from evennia_shards import preserve_tenant_context
+        except ImportError:
+            def preserve_tenant_context(fn):
+                return fn
+
+    No-op when no tenant is set at wrap time — the wrapped function
+    runs unscoped, same as it would without the wrap.
+    """
+    captured = get_current_tenant()
+
+    @functools.wraps(fn)
+    def _tenant_wrapped(*args, **kwargs):
+        previous = get_current_tenant()
+        try:
+            if captured is None:
+                unset_current_tenant()
+            else:
+                set_current_tenant(captured)
+            return fn(*args, **kwargs)
+        finally:
+            if previous is None:
+                unset_current_tenant()
+            else:
+                set_current_tenant(previous)
+
+    return _tenant_wrapped
