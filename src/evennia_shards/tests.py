@@ -668,15 +668,41 @@ class _FakeAccount:
 
 
 class _FakeCaller:
-    """Caller stand-in for admin command tests.
+    """Caller stand-in for admin- and teleport-command tests.
 
     Captures ``msg(...)`` calls and resolves ``search(...)`` to a
-    pre-set target object (or ``None``).
+    pre-set target object (or ``None``). Carries the location /
+    permissions / lock surface ``ShardAwareCmdTeleport`` exercises;
+    admin commands ignore those fields.
     """
 
-    def __init__(self, search_returns=None):
+    def __init__(self, search_returns=None, is_admin=True, access_allowed=True):
+        import types
+
         self.messages = []
         self.search_returns = search_returns
+        # Set on the instance so it never accidentally collides with the
+        # destination pk during ShardAwareCmdTeleport short-circuit checks.
+        self.db_location_id = None
+        # ``.location`` is read by the cross-shard announce wiring.
+        # None is the in-limbo / no-source-room case.
+        self.location = None
+        # ``.key`` and ``.pk`` feed the cross-shard success message and
+        # announce text.
+        self.key = "fakecaller"
+        self.pk = 1
+        # Lock-check surfaces. ``permissions.check`` is consulted on
+        # the caller; ``access`` is consulted on the obj being teleported.
+        # Defaults match the admin-bypass path so tests that don't care
+        # about locks stay green. Override via kwargs when testing the
+        # lock branch itself.
+        self.permissions = types.SimpleNamespace(
+            check=lambda name: is_admin,
+        )
+        self._access_allowed = access_allowed
+
+    def access(self, accessing_obj, access_type, default=False):
+        return self._access_allowed
 
     def search(self, searchdata):
         return self.search_returns
@@ -4129,3 +4155,1151 @@ class SendCrossShardRoomMessageTests(BaseEvenniaTestCase):
         self.assertEqual(ex_passed[0].pk, excluded.pk)
         from_obj_passed = kwargs.get("from_obj")
         self.assertEqual(from_obj_passed.pk, sender.pk)
+
+
+# ---------------------------------------------------------------------------
+# ShardAwareCmdTeleport — shard-aware @tel override
+#
+# Two test groups: Func dispatch (branch routing into /tonone /
+# both-local-vanilla / cross-shard), and Parse (shard_aware_global_search
+# result stashing). Most tests mock the search and the cross_shard_move
+# primitive so dispatch logic is tested in isolation from the DB.
+# ---------------------------------------------------------------------------
+
+
+def _make_teleport_cmd(args="", switches=None, caller=None):
+    """Build a ShardAwareCmdTeleport instance wired up for testing.
+
+    Bypasses ``parse()`` setup — caller is responsible for setting the
+    post-parse state slots (``obj_to_teleport``, ``destination``,
+    ``obj_pk`` / ``obj_shard``, ``dest_pk`` / ``dest_shard`` /
+    ``dest_key``) before calling ``func()``. The few tests that
+    exercise ``parse()`` itself set ``self.args`` and let the real
+    parse run.
+    """
+    from evennia_shards.teleport import ShardAwareCmdTeleport
+
+    cmd = ShardAwareCmdTeleport()
+    cmd.args = args
+    cmd.raw_string = f"@tel {args}"
+    cmd.cmdstring = "@tel"
+    cmd.switches = switches or []
+    cmd.lhs = ""
+    cmd.rhs = None
+    cmd.caller = caller if caller is not None else _FakeCaller()
+    cmd._messages = []
+    cmd.msg = lambda text=None, **kwargs: (
+        cmd._messages.append(text) if text is not None else None
+    )
+    return cmd
+
+
+def _vanilla_cmd_teleport_cls():
+    """Resolve the vanilla CmdTeleport class behind the library swap.
+
+    ``apps.py`` swaps ``evennia.commands.default.building.CmdTeleport``
+    to our subclass, so patching the dotted path patches the subclass —
+    not what ``super().func()`` reaches. The unswapped parent is the
+    subclass's first base, accessible via ``__bases__[0]``.
+    """
+    from evennia_shards.teleport import ShardAwareCmdTeleport
+
+    return ShardAwareCmdTeleport.__bases__[0]
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "ws://localhost:4011/", "shard1": "ws://localhost:4021/"},
+)
+class ShardAwareCmdTeleportFuncDispatchTests(BaseEvenniaTestCase):
+    """``ShardAwareCmdTeleport.func`` routes into three branches:
+    /tonone, both-local-delegate-to-vanilla, cross-shard-route.
+    """
+
+    # ── Branch 1: /tonone ─────────────────────────────────────────
+
+    def test_tonone_local_obj_delegates_to_vanilla(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(switches=["tonone"])
+        cmd.obj_to_teleport = cmd.caller  # local
+        cmd.lhs = "ball"
+
+        with mock.patch.object(
+            _vanilla_cmd_teleport_cls(), "func",
+        ) as vanilla_func:
+            cmd.func()
+
+        vanilla_func.assert_called_once()
+        self.assertEqual(cmd.caller.messages, [])
+
+    def test_tonone_foreign_obj_refuses_with_cross_shard_pointer(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(switches=["tonone"])
+        cmd.obj_to_teleport = None  # foreign
+        cmd.obj_pk = 42
+        cmd.obj_shard = "shard1"
+        cmd.lhs = "ball"
+
+        with mock.patch.object(
+            _vanilla_cmd_teleport_cls(), "func",
+        ) as vanilla_func:
+            cmd.func()
+
+        vanilla_func.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("shard1", msg)
+        self.assertIn("@tel", msg)
+        self.assertIn("not yet implemented", msg)
+
+    # ── Branch 2: both-local delegate ─────────────────────────────
+
+    def test_both_targets_local_delegates_to_vanilla(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = cmd.caller
+
+        with mock.patch.object(
+            _vanilla_cmd_teleport_cls(), "func",
+        ) as vanilla_func:
+            cmd.func()
+
+        vanilla_func.assert_called_once()
+
+    # ── Branch 3: cross-shard ─────────────────────────────────────
+
+    def test_foreign_obj_refuses(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = None  # foreign
+        cmd.obj_pk = 42
+        cmd.obj_shard = "shard1"
+        cmd.destination = cmd.caller
+        cmd.lhs = "remote_obj"
+        cmd.rhs = "anywhere"
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("shard1", msg)
+        self.assertIn("@tel", msg)
+        self.assertIn("not yet implemented", msg)
+
+    def test_local_obj_foreign_dest_calls_cross_shard_move(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = None  # foreign
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=1, failures=[],
+            ),
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_called_once_with(cmd.caller, "shard1", 99)
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("newroom", msg)
+        self.assertIn("shard1", msg)
+
+    def test_already_at_cross_shard_destination_short_circuits(self):
+        from unittest import mock
+
+        class _StubObj:
+            def __init__(self):
+                self.db_location_id = 99
+                self.pk = 5
+
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _StubObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("already at", msg)
+        self.assertIn("newroom", msg)
+
+    def test_already_at_falls_back_to_dbref_when_dest_key_missing(self):
+        from unittest import mock
+
+        class _StubObj:
+            def __init__(self):
+                self.db_location_id = 99
+                self.pk = 5
+
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _StubObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = None
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("#99", msg)
+
+    def test_teleport_lock_blocks_non_admin_caller(self):
+        from unittest import mock
+
+        caller = _FakeCaller(is_admin=False)
+
+        class _LockedObj:
+            db_location_id = None
+            pk = 5
+
+            def access(self, accessing_obj, access_type, default=False):
+                return False
+
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _LockedObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(caller.messages)
+        self.assertIn("'teleport'-lock", msg)
+        self.assertIn("ball", msg)
+
+    def test_teleport_lock_bypassed_by_admin_caller(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        caller = _FakeCaller(is_admin=True)
+
+        class _LockedObj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            location = None
+
+            def access(self, accessing_obj, access_type, default=False):
+                return False  # lock denies, but Admin bypasses
+
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _LockedObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_called_once_with(cmd.obj_to_teleport, "shard1", 99)
+
+    def test_teleport_lock_allows_non_admin_when_obj_grants_access(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        caller = _FakeCaller(is_admin=False)
+
+        class _PermissiveObj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            location = None
+
+            def access(self, accessing_obj, access_type, default=False):
+                return True
+
+            def __str__(self):
+                return "ball"
+
+        cmd = _make_teleport_cmd(caller=caller)
+        cmd.obj_to_teleport = _PermissiveObj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ) as primitive:
+            cmd.func()
+
+        primitive.assert_called_once()
+
+    def test_local_obj_foreign_dest_failure_emits_error(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            side_effect=RuntimeError("simulated"),
+        ):
+            cmd.func()
+
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("failed", msg.lower())
+        self.assertIn("simulated", msg)
+
+    def test_loc_with_cross_shard_dest_refuses(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(switches=["loc"])
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("/loc", msg)
+        self.assertIn("not yet supported", msg)
+
+    def test_intoexit_with_cross_shard_dest_refuses(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(switches=["intoexit"])
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+
+        with mock.patch("evennia_shards.handoff.cross_shard_move") as primitive:
+            cmd.func()
+
+        primitive.assert_not_called()
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("/intoexit", msg)
+        self.assertIn("not yet supported", msg)
+
+    def test_quiet_does_not_suppress_caller_confirmation(self):
+        """/quiet must NOT silence the caller's own confirmation.
+
+        Vanilla CmdTeleport.func emits "Teleported X -> Y."
+        unconditionally; /quiet only suppresses the source/destination
+        room announces.
+        """
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        cmd = _make_teleport_cmd(switches=["quiet"])
+        cmd.obj_to_teleport = cmd.caller
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=1, failures=[],
+            ),
+        ):
+            cmd.func()
+
+        msg = "\n".join(cmd.caller.messages)
+        self.assertIn("Teleported", msg)
+        self.assertIn("newroom", msg)
+
+    # ── leave/arrive announces ────────────────────────────────────
+
+    def test_source_announce_fires_before_cross_shard_move(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        class _Obj:
+            db_location_id = 2  # different from dest_pk
+            pk = 5
+            key = "ball"
+            location = source
+
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ):
+                cmd.func()
+
+        source.msg_contents.assert_called_once()
+        args, kwargs = source.msg_contents.call_args
+        text = args[0]
+        self.assertIn("ball", text)
+        self.assertIn("leaving", text)
+        self.assertIn("Limbo", text)
+        self.assertIn("newroom", text)
+        self.assertEqual(kwargs["exclude"], [cmd.obj_to_teleport])
+
+    def test_quiet_suppresses_source_announce(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = source
+
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd(switches=["quiet"])
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ):
+                cmd.func()
+
+        source.msg_contents.assert_not_called()
+
+    def test_no_source_announce_when_obj_has_no_location(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        class _Obj:
+            db_location_id = None
+            pk = 5
+            key = "ball"
+            location = None
+
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        send_room.assert_called_once()
+
+    def test_destination_announce_routes_via_bus_helper(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        source = mock.MagicMock()
+        source.key = "Limbo"
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = source
+
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd()
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        send_room.assert_called_once()
+        args, kwargs = send_room.call_args
+        self.assertEqual(args[0], 99)
+        text = args[1]
+        self.assertIn("ball", text)
+        self.assertIn("arrives", text)
+        self.assertIn("Limbo", text)
+        self.assertEqual(kwargs.get("exclude_pks"), [5])
+
+    def test_quiet_suppresses_destination_announce(self):
+        from unittest import mock
+
+        from evennia_shards.handoff import MoveResult
+
+        class _Obj:
+            db_location_id = 2
+            pk = 5
+            key = "ball"
+            location = None
+
+            def access(self, *a, **kw):
+                return True
+
+        cmd = _make_teleport_cmd(switches=["quiet"])
+        cmd.obj_to_teleport = _Obj()
+        cmd.destination = None
+        cmd.dest_pk = 99
+        cmd.dest_shard = "shard1"
+        cmd.dest_key = "newroom"
+
+        with mock.patch(
+            "evennia_shards.handoff.cross_shard_move",
+            return_value=MoveResult(
+                objects_moved=1, sessions_redirected=0, failures=[],
+            ),
+        ):
+            with mock.patch(
+                "evennia_shards.messaging.send_cross_shard_room_message"
+            ) as send_room:
+                cmd.func()
+
+        send_room.assert_not_called()
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "ws://localhost:4011/", "shard1": "ws://localhost:4021/"},
+)
+class ShardAwareCmdTeleportParseTests(BaseEvenniaTestCase):
+    """``ShardAwareCmdTeleport.parse`` stashes search-result state on self.
+
+    Parse calls super(CmdTeleport, self).parse() to split
+    args/lhs/rhs/switches, then uses shard_aware_global_search for each
+    of vanilla's three call sites. Tests mock the search to control
+    state without setting up real ObjectDB rows.
+    """
+
+    def _result(self, **kw):
+        from evennia_shards.search import ShardSearchResult
+
+        defaults = dict(state="not_found")
+        defaults.update(kw)
+        return ShardSearchResult(**defaults)
+
+    def test_no_args_leaves_defaults(self):
+        cmd = _make_teleport_cmd(args="")
+        cmd.parse()
+
+        self.assertIs(cmd.obj_to_teleport, cmd.caller)
+        self.assertIsNone(cmd.destination)
+        self.assertIsNone(cmd.dest_pk)
+        self.assertIsNone(cmd.dest_shard)
+
+    def test_lhs_only_search_populates_destination(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(args="newroom")
+
+        fake_dest = object()
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(
+                state="found", obj=fake_dest, pk=99,
+                shard_id="shard1", db_key="newroom",
+            ),
+        ) as search:
+            cmd.parse()
+
+        search.assert_called_once_with(cmd.caller, "newroom")
+        self.assertIs(cmd.destination, fake_dest)
+        self.assertEqual(cmd.dest_pk, 99)
+        self.assertEqual(cmd.dest_shard, "shard1")
+        self.assertEqual(cmd.dest_key, "newroom")
+        self.assertIs(cmd.obj_to_teleport, cmd.caller)
+
+    def test_rhs_present_searches_both_obj_and_dest(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(args="ball = newroom")
+
+        fake_obj = object()
+        fake_dest = object()
+
+        def search_side_effect(caller, name):
+            if name == "ball":
+                return self._result(
+                    state="found", obj=fake_obj, pk=5,
+                    shard_id="shard0", db_key="ball",
+                )
+            if name == "newroom":
+                return self._result(
+                    state="found", obj=fake_dest, pk=99,
+                    shard_id="shard1", db_key="newroom",
+                )
+            return self._result(state="not_found")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            side_effect=search_side_effect,
+        ):
+            cmd.parse()
+
+        self.assertIs(cmd.obj_to_teleport, fake_obj)
+        self.assertEqual(cmd.obj_pk, 5)
+        self.assertEqual(cmd.obj_shard, "shard0")
+        self.assertEqual(cmd.obj_key, "ball")
+        self.assertIs(cmd.destination, fake_dest)
+        self.assertEqual(cmd.dest_pk, 99)
+        self.assertEqual(cmd.dest_shard, "shard1")
+        self.assertEqual(cmd.dest_key, "newroom")
+
+    def test_cross_shard_match_stashes_pk_shard_no_instance(self):
+        from unittest import mock
+
+        cmd = _make_teleport_cmd(args="newroom")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(
+                state="found", obj=None, pk=99,
+                shard_id="shard1", db_key="newroom",
+            ),
+        ):
+            cmd.parse()
+
+        self.assertIsNone(cmd.destination)
+        self.assertEqual(cmd.dest_pk, 99)
+        self.assertEqual(cmd.dest_shard, "shard1")
+        self.assertEqual(cmd.dest_key, "newroom")
+
+    def test_obj_not_found_raises_interrupt(self):
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="missing = somewhere")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(state="not_found"),
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Did not find object", msg)
+
+    def test_obj_multiple_matches_raises_interrupt(self):
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="ambiguous = somewhere")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(
+                state="multiple",
+                candidates=[(1, "shard0", "ambiguous"), (2, "shard1", "ambiguous")],
+            ),
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Multiple matches", msg)
+        self.assertIn("dbref", msg.lower())
+        self.assertIn("#1 (ambiguous, shard0)", msg)
+        self.assertIn("#2 (ambiguous, shard1)", msg)
+
+    def test_dest_multiple_matches_in_rhs_path_raises_interrupt(self):
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="ball = tavern")
+        fake_obj = object()
+
+        def search_side_effect(caller, name):
+            if name == "ball":
+                return self._result(
+                    state="found", obj=fake_obj, pk=5,
+                    shard_id="shard0", db_key="ball",
+                )
+            return self._result(
+                state="multiple",
+                candidates=[(7, "shard0", "Tavern"), (8, "shard1", "Tavern")],
+            )
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            side_effect=search_side_effect,
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Multiple matches", msg)
+        self.assertIn("#7 (Tavern, shard0)", msg)
+        self.assertIn("#8 (Tavern, shard1)", msg)
+
+    def test_dest_multiple_matches_in_lhs_only_path_raises_interrupt(self):
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="tavern")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(
+                state="multiple",
+                candidates=[(7, "shard0", "Tavern"), (8, "shard1", "Tavern")],
+            ),
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Multiple matches", msg)
+        self.assertIn("#7 (Tavern, shard0)", msg)
+        self.assertIn("#8 (Tavern, shard1)", msg)
+
+    def test_dest_not_found_in_rhs_path_raises_interrupt_with_message(self):
+        """Destination not_found (with rhs given) → ``Destination not found.``
+
+        Legacy behaviour: parse left ``destination=None`` and trusted
+        vanilla ``func()`` to emit the message. Under the trial's
+        func() dispatch that path bypasses vanilla whenever
+        ``destination is None`` (because the branch routes into
+        cross-shard handling), so parse now emits the message itself
+        and raises ``InterruptCommand``. Regression cover for the
+        bug surfaced during the demo-gamedir smoke test.
+        """
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="ball = nowhere")
+        fake_obj = object()
+
+        def search_side_effect(caller, name):
+            if name == "ball":
+                return self._result(
+                    state="found", obj=fake_obj, pk=5,
+                    shard_id="shard0", db_key="ball",
+                )
+            return self._result(state="not_found")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            side_effect=search_side_effect,
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Destination not found", msg)
+
+    def test_dest_not_found_in_lhs_only_path_raises_interrupt_with_message(self):
+        """Lhs-only @tel <unknown> → ``Destination not found.`` regression.
+
+        Same root cause as the rhs path: previously fell through with
+        ``destination=None``, which routed into cross_shard_move with
+        ``target_shard=None`` and surfaced as
+        ``"target_shard None is not configured"``. Now parse emits
+        the right message.
+        """
+        from unittest import mock
+
+        from evennia.commands.cmdhandler import InterruptCommand
+
+        cmd = _make_teleport_cmd(args="nowhere")
+
+        with mock.patch(
+            "evennia_shards.teleport.shard_aware_global_search",
+            return_value=self._result(state="not_found"),
+        ):
+            with self.assertRaises(InterruptCommand):
+                cmd.parse()
+
+        msg = "\n".join(cmd._messages)
+        self.assertIn("Destination not found", msg)
+
+
+# ---------------------------------------------------------------------------
+# AppConfig setup — shard_id field wired onto ObjectDB
+# ---------------------------------------------------------------------------
+
+
+class AppSetupTests(BaseEvenniaTestCase):
+    """AppConfig.ready() → install_tenancy_on_objectdb() wires shard_id."""
+
+    def test_shard_id_field_wired_on_objectdb(self):
+        from django.db import models
+
+        field = ObjectDB._meta.get_field("shard_id")
+        self.assertIsInstance(field, models.CharField)
+        self.assertEqual(field.max_length, 64)
+        self.assertTrue(field.null)
+        self.assertTrue(field.blank)
+        self.assertTrue(field.db_index)
+
+
+# ---------------------------------------------------------------------------
+# Role gating + portal-side OOC-arrival marker
+# ---------------------------------------------------------------------------
+
+
+@override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
+class RoleGatingTests(BaseEvenniaTestCase):
+    """onOpen Phase 1: role-based gating when no ticket is present.
+
+    Tests the gating *logic* (not the full onOpen — that needs Twisted).
+    Shard with no ticket → redirect to router; router → fall through.
+    """
+
+    @override_settings(ROUTER_URL="ws://localhost:4002/")
+    def test_shard_no_token_redirects_to_router(self):
+        import json as _json
+
+        from evennia_shards import get_role, get_router_url
+
+        proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
+        self.assertIsNone(proto._extract_ticket_token())
+
+        self.assertEqual(get_role(), "shard")
+
+        router_url = get_router_url()
+        proto.sendLine(_json.dumps(["shard_redirect", [router_url], {}]))
+        proto.sendClose(1000, "Redirecting to router for login")
+
+        self.assertEqual(len(proto.sent_lines), 1)
+        self.assertIn("shard_redirect", proto.sent_lines[0])
+        self.assertIn(router_url, proto.sent_lines[0])
+        self.assertEqual(len(proto.close_calls), 1)
+        self.assertEqual(proto.close_calls[0][0], 1000)
+
+    @override_settings(SHARDS_ROLE="router")
+    def test_router_no_token_proceeds(self):
+        from evennia_shards import get_role
+
+        proto = _FakeProtocol(uri="/websocket", client_ip="127.0.0.1")
+        self.assertIsNone(proto._extract_ticket_token())
+        self.assertEqual(get_role(), "router")
+        self.assertEqual(len(proto.sent_lines), 0)
+        self.assertEqual(len(proto.close_calls), 0)
+
+
+class MarkOocArrivalIfRouterTests(BaseEvenniaTestCase):
+    """_mark_ooc_arrival_if_router sets a protocol_flag on routers only.
+
+    Runs in the Portal process. Sets
+    ``protocol_flags["SHARDS_TICKET_AUTHED"]=True``; Evennia AMP-syncs
+    the flag to the Server, where ``shard_aware_at_post_login`` reads
+    it. The Portal does NOT write to account.db — that would be a
+    cross-process write the Server's idmappers wouldn't see.
+    """
+
+    @override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+    def test_router_sets_protocol_flag(self):
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account_id=1)
+
+        self.assertTrue(proto.protocol_flags.get("SHARDS_TICKET_AUTHED"))
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_shard_does_not_set_protocol_flag(self):
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account_id=1)
+
+        self.assertNotIn("SHARDS_TICKET_AUTHED", proto.protocol_flags)
+
+    @override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+    def test_router_does_not_touch_account_db(self):
+        """Cross-process safety guard — Portal must not write account.db."""
+        from evennia.accounts.models import AccountDB
+
+        account = AccountDB.objects.create(
+            username="portal_no_account_write",
+            db_typeclass_path="evennia.accounts.accounts.DefaultAccount",
+        )
+        account.db._shards_at_ooc_menu = "untouched-sentinel"
+        proto = _FakeProtocol()
+        proto._mark_ooc_arrival_if_router(account.pk)
+
+        account.refresh_from_db()
+        self.assertEqual(
+            account.db._shards_at_ooc_menu, "untouched-sentinel",
+        )
+
+
+# ---------------------------------------------------------------------------
+# _redirect_to_character_shard helper (shared by IC + at_post_login paths)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARDS_ROLE="router", SHARD_ID="router",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+)
+class RedirectToCharacterShardHelperTests(BaseEvenniaTestCase):
+    """Direct tests for ``_redirect_to_character_shard``.
+
+    Shared mechanism between the IC command path and the
+    at_post_login override path. Tests cover only the side-effects
+    the helper itself performs; validation is the caller's job.
+    """
+
+    def test_redirect_creates_ticket_sets_last_puppet_and_sends_oob(self):
+        from evennia_shards.handoff import _redirect_to_character_shard
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        session = _FakeSession(address="10.0.0.1")
+
+        url = _redirect_to_character_shard(account, session, char)
+
+        self.assertIs(account.db._last_puppet, char)
+
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        ticket = tickets[0]
+        self.assertEqual(ticket.account_id, 7)
+        self.assertEqual(ticket.character_id, 42)
+        self.assertEqual(ticket.to_shard, "shard0")
+        self.assertEqual(ticket.client_ip, "10.0.0.1")
+
+        self.assertIn("shard_redirect", session.oob_messages)
+        oob_url = session.oob_messages["shard_redirect"][0][0]
+        self.assertIn("ws://localhost:4011/?ticket=", oob_url)
+        self.assertIn(ticket.token, oob_url)
+
+        self.assertEqual(url, oob_url)
+
+    def test_redirect_does_not_touch_at_ooc_menu_flag(self):
+        """The helper must NOT touch ``account.db._shards_at_ooc_menu``.
+
+        That flag is owned by the router's Server process and is
+        written there in two places only — the at_post_login override
+        on fresh ticket auth (True), and CmdIC on @ic (False).
+        Touching it from this helper would create a cross-process
+        write the router wouldn't see.
+        """
+        from evennia_shards.handoff import _redirect_to_character_shard
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount(pk=7)
+        account.db._shards_at_ooc_menu = "untouched-sentinel"
+        session = _FakeSession(address="10.0.0.1")
+
+        _redirect_to_character_shard(account, session, char)
+
+        self.assertEqual(account.db._shards_at_ooc_menu, "untouched-sentinel")
+
+
+# ---------------------------------------------------------------------------
+# Portal services plugin (start_plugin_services) — registers the
+# webclient WebSocket independently when WEBSERVER_ENABLED=False.
+# ---------------------------------------------------------------------------
+
+
+class _FakePortalService:
+    """Minimal stand-in for Evennia's PortalServerFactory."""
+
+    def __init__(self):
+        self.children = []
+        self.info_dict = {}
+
+
+class StartPluginServicesTests(BaseEvenniaTestCase):
+    """``portal_services.start_plugin_services`` registers WS only when needed."""
+
+    @override_settings(
+        WEBSERVER_ENABLED=True,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4002,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_webserver_enabled(self):
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+        self.assertNotIn("webclient", portal.info_dict)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=False,
+        WEBSOCKET_CLIENT_PORT=4002,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_websocket_client_disabled(self):
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=None,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_no_op_when_websocket_port_missing(self):
+        from evennia_shards.portal_services import start_plugin_services
+
+        portal = _FakePortalService()
+        start_plugin_services(portal)
+        self.assertEqual(len(portal.children), 0)
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4012,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=False,
+    )
+    def test_registers_websocket_when_webserver_disabled(self):
+        from twisted.application import internet
+
+        from evennia_shards.portal_services import start_plugin_services
+
+        registered = []
+        original = internet.TCPServer.setServiceParent
+        try:
+            def _record(self, parent):
+                registered.append((self, parent))
+
+            internet.TCPServer.setServiceParent = _record
+            portal = _FakePortalService()
+            start_plugin_services(portal)
+        finally:
+            internet.TCPServer.setServiceParent = original
+
+        self.assertEqual(len(registered), 1)
+        ws_service, parent = registered[0]
+        self.assertIs(parent, portal)
+        self.assertIn("4012", ws_service.name)
+
+        self.assertIn("webclient", portal.info_dict)
+        self.assertEqual(len(portal.info_dict["webclient"]), 1)
+        self.assertIn("4012", portal.info_dict["webclient"][0])
+
+    @override_settings(
+        WEBSERVER_ENABLED=False,
+        WEBSOCKET_CLIENT_ENABLED=True,
+        WEBSOCKET_CLIENT_PORT=4012,
+        WEBSOCKET_CLIENT_INTERFACE="0.0.0.0",
+        LOCKDOWN_MODE=True,
+    )
+    def test_lockdown_mode_forces_localhost_interface(self):
+        """LOCKDOWN_MODE → bind to 127.0.0.1 regardless of configured interface."""
+        from twisted.application import internet
+
+        from evennia_shards.portal_services import start_plugin_services
+
+        registered = []
+        original = internet.TCPServer.setServiceParent
+        try:
+            def _record(self, parent):
+                registered.append((self, parent))
+
+            internet.TCPServer.setServiceParent = _record
+            portal = _FakePortalService()
+            start_plugin_services(portal)
+        finally:
+            internet.TCPServer.setServiceParent = original
+
+        self.assertEqual(len(registered), 1)
+        ws_service, _ = registered[0]
+        self.assertIn("127.0.0.1", ws_service.name)
