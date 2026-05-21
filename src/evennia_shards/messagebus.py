@@ -317,8 +317,6 @@ class MessageHandler:
         """
         from evennia.objects.models import ObjectDB
 
-        from .errors import ShardIsolationError
-
         pk = message.payload.get("room_pk")
         text = message.payload.get("text")
         try:
@@ -335,7 +333,7 @@ class MessageHandler:
         for ex_pk in message.payload.get("exclude_pks") or []:
             try:
                 exclude.append(ObjectDB.objects.get(pk=ex_pk))
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 # Stale or misrouted hint — drop silently and proceed.
                 continue
 
@@ -344,7 +342,7 @@ class MessageHandler:
         if from_obj_pk is not None:
             try:
                 from_obj = ObjectDB.objects.get(pk=from_obj_pk)
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 # Attribution lost but the message still goes.
                 from_obj = None
 

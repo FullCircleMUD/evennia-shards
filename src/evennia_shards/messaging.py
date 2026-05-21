@@ -77,14 +77,22 @@ def send_cross_shard_message(target_pk, kwargs, target_typeclass=None):
 
     from .config import get_shard_id
     from .messagebus import send_message
+    from .tenancy import shard_context
 
     if target_typeclass is None:
         target_typeclass = class_from_module(settings.BASE_CHARACTER_TYPECLASS)
 
-    rows = list(
-        ObjectDB.objects.filter(pk=target_pk)
-        .values_list("db_typeclass_path", "shard_id")[:1]
-    )
+    # Escape the multitenant auto-filter for the visibility lookup —
+    # if the target lives on a foreign shard, the auto-filter would
+    # exclude its row from values_list and the helper would falsely
+    # report "does not exist". Building the queryset inside the
+    # context block is the gating step (get_queryset reads the tenant
+    # at construction, not at execute). Same pattern as search.py.
+    with shard_context(None):
+        rows = list(
+            ObjectDB.objects.filter(pk=target_pk)
+            .values_list("db_typeclass_path", "shard_id")[:1]
+        )
     if not rows:
         log.warning(
             "send_cross_shard_message: target ObjectDB pk=%r does not "
@@ -169,13 +177,16 @@ def send_cross_shard_room_message(
     from evennia.objects.models import ObjectDB
 
     from .config import get_shard_id
-    from .errors import ShardIsolationError
     from .messagebus import send_message
+    from .tenancy import shard_context
 
-    rows = list(
-        ObjectDB.objects.filter(pk=room_pk)
-        .values_list("shard_id", flat=True)[:1]
-    )
+    # Escape the multitenant auto-filter for the visibility lookup —
+    # see send_cross_shard_message above for the rationale.
+    with shard_context(None):
+        rows = list(
+            ObjectDB.objects.filter(pk=room_pk)
+            .values_list("shard_id", flat=True)[:1]
+        )
     if not rows:
         log.warning(
             "send_cross_shard_room_message: target room pk=%r does "
@@ -195,13 +206,13 @@ def send_cross_shard_room_message(
         for ex_pk in exclude_pks or ():
             try:
                 exclude.append(ObjectDB.objects.get(pk=ex_pk))
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 continue
         from_obj = None
         if from_obj_pk is not None:
             try:
                 from_obj = ObjectDB.objects.get(pk=from_obj_pk)
-            except (ObjectDB.DoesNotExist, ShardIsolationError):
+            except ObjectDB.DoesNotExist:
                 from_obj = None
         room.msg_contents(text, exclude=exclude, from_obj=from_obj)
         return True

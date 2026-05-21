@@ -1,4 +1,6 @@
-# Shard Isolation Mechanism
+# Shard Isolation Mechanism (archived)
+
+> **Superseded by [tenancy.md](tenancy.md).** This document describes the earlier four-chokepoint design. The chokepoint machinery (`isolation.py`, the `pre_save` / `pre_delete` signals, the `from_db` and `QuerySet.update` patches, the `shard_writes_allowed_for` bypass, and `ShardIsolationError`) does not exist in the codebase. Kept as historical reference, primarily for the design rationale in the "Decision: bespoke chokepoints vs `django-multitenant`" section — useful background for *why* the library ended up where it is.
 
 How the library enforces the partition between shards at the Django/Evennia level — what stops one shard's process from accidentally reading, instantiating, or writing to another shard's rows.
 

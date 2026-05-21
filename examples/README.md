@@ -76,8 +76,8 @@ to resolve symlinks back to the real conf directory.
 
 Boot `shard0` first. Evennia's initial-setup runs on the first
 `evennia migrate` / `evennia start` it sees and creates the bootstrap
-rows (`#1` superuser character, `#2` Limbo). The library's `pre_save`
-chokepoint auto-stamps those rows with the booting process's shard
+rows (`#1` superuser character, `#2` Limbo). The tenancy install
+auto-stamps those rows with the booting process's shard
 ID, so **whichever role boots first owns Limbo**.
 
 Chargen happens on the **router** (it's an OOC operation), so the

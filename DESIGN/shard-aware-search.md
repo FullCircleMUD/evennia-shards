@@ -1,12 +1,10 @@
 # Shard-aware global search
 
-The substitute for `caller.search(name, global_search=True)` in code that runs on a sharded process. Returns enough metadata for the caller to decide whether to use a loaded instance (local match) or route via cross-shard primitives (foreign match), without ever instantiating a foreign row.
+The substitute for `caller.search(name, global_search=True)` in code that runs on a sharded process and needs to see rows on *every* shard. Returns enough metadata for the caller to decide whether to use a loaded instance (local match) or route via cross-shard primitives (foreign match), without ever instantiating a foreign row.
 
 ## The problem
 
-Vanilla `caller.search(name, global_search=True)` walks Evennia's search machinery against the whole `ObjectDB` table. Match resolution returns instances. On a sharded process, instantiating any row whose `shard_id` doesn't match the current process trips the `from_db` chokepoint with `ShardIsolationError`. The call site does not get an opportunity to inspect the match before the chokepoint fires.
-
-Anywhere a consumer (or the library itself) needs to find an object by name across the whole game world — admin commands, recall spells, `look <character>`, future cross-shard tells / who / where features — the same trip is waiting.
+`ObjectDB.objects` carries the multitenant auto-filter (`WHERE shard_id IN (current, '*')`). A stock global search on a shard process therefore silently sees only local + global rows; foreign-shard rows are invisible. Anywhere the library or a consumer needs to find an object by name across the whole game world — admin commands, `@tel`, future cross-shard tells / who / where features — that's the wrong shape.
 
 ## The shape
 
@@ -58,12 +56,12 @@ Three states drive caller dispatch:
 Three stages, in order:
 
 0. **Caller-relative short-circuit.** `name` is lowered and stripped; if it's `"me"` / `"self"`, the helper returns the caller as the match without hitting the database. If it's `"here"`, the helper reads `caller.location` (always local by construction — the caller is on this process) and returns that. These tokens never reach the SQL path. Vanilla `caller.search` handles them the same way.
-1. **SQL-level metadata query.** `ObjectDB.objects.filter(...).values_list("pk", "shard_id", "db_key")` against the matching rows. The match predicate is `db_key` OR an alias tag (`db_tags__db_key` AND `db_tags__db_tagtype="alias"`) — `.distinct()` collapses the m2m duplicates the OR produces. For dbref input the predicate is just `pk=`. When set, `db_tags__db_key` / `db_tags__db_category` for tag scoping is composed as a separate `filter()` call so it gets its own join (the alias join and the tag-scope join then restrict the parent ObjectDB row independently — which is the intended semantics). This step returns column data only — no `from_db` is called per row, so the chokepoint is not invoked.
+1. **SQL-level metadata query, scope-escaped.** The queryset is *constructed inside* `with shard_context(None):` so the multitenant auto-filter doesn't bake into the `WHERE` clause: `ObjectDB.objects.filter(...).values_list("pk", "shard_id", "db_key")` then sees rows on every shard. The match predicate is `db_key` OR an alias tag (`db_tags__db_key` AND `db_tags__db_tagtype="alias"`) — `.distinct()` collapses the m2m duplicates the OR produces. For dbref input the predicate is just `pk=`. When set, `db_tags__db_key` / `db_tags__db_category` for tag scoping is composed as a separate `filter()` call so it gets its own join (the alias join and the tag-scope join then restrict the parent ObjectDB row independently — which is the intended semantics). `values_list` keeps the read SQL-only — no row instantiation, no FK dereferences, so leaving the scope here can't accidentally load a foreign row's related objects.
 2. **Conditional instantiation.** Once the match's shard is known:
-   - If the match is local (`shard_id == get_shard_id()` or `shard_id == "*"`), load the instance via the regular ORM (`ObjectDB.objects.get(pk=...)`). The chokepoint sees a local row and allows the load.
+   - If the match is local (`shard_id == get_shard_id()` or `shard_id == "*"`), load the instance via the regular (auto-filtered) ORM (`ObjectDB.objects.get(pk=...)`). The match's shard is known to be in scope, so the auto-filter passes the row through.
    - If the match is on another shard, the helper returns the metadata only.
 
-The chokepoint never fires inside the helper. The caller never receives a cross-shard instance.
+The caller never receives a foreign-shard instance.
 
 ### Why the alias predicate uses `db_tagtype`, not `db_category`
 
@@ -99,4 +97,4 @@ These are extensions that fit cleanly under the same call signature when a consu
 ## Related
 
 - [`library-integration-risks.md`](library-integration-risks.md) § `CmdTeleport` — the first consumer of this helper.
-- [`shard-isolation.md`](shard-isolation.md) — the chokepoint architecture this helper is designed to navigate.
+- [`tenancy.md`](tenancy.md) — the underlying multitenant auto-filter this helper escapes.

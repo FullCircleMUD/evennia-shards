@@ -4,7 +4,25 @@ A running log of high-level milestones as the project moves from design into bui
 
 This is not a changelog (use `git log` for that) and not a roadmap (the phasing lives in [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md#phased-poc-plan)). It is a thin index of "what has actually happened so far."
 
+> **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
+
 ## Milestones
+
+### 2026-05-21 — Shard partition: django-multitenant adopted
+
+The library's shard partition is enforced via [django-multitenant](https://github.com/citusdata/django-multitenant) 4.1.1. Every query through `ObjectDB.objects` carries `WHERE shard_id IN (current, '*')` automatically; the boundary is in the database, not in Python. See [tenancy.md](tenancy.md) for the live design.
+
+Library entry points: `src/evennia_shards/tenancy.py` — `bootstrap_tenant_context()` sets the process-wide scope based on `SHARDS_ROLE`; `install_tenancy_on_objectdb()` late-binds `TenantMeta`, the three identity properties, wrapped `save` / `_do_update` / `__setattr__`, the global Django query decorators, and the patched `get_queryset` / `bulk_create` on the manager class. The two-element tenant list (`[Shard(current), Shard("*")]`) gives every shard visibility of its own rows plus `"*"`-stamped globals natively via multitenant's IN-filter mode, without subclassing any QuerySet.
+
+`cross_shard_move` uses `qs.update(shard_id=..., db_location_id=...)` for the cross-shard write — bypasses the tenant-column immutability check at the SQL level. Two narrow rule-breaks documented inline at the call site: `with shard_context(None):` for the target-shard validation read, and `object.__setattr__` to sync the in-memory instance after `qs.update`.
+
+`shard_aware_global_search` wraps its `values_list` queryset construction inside `shard_context(None)` to escape the auto-filter and find rows on every shard; the post-resolution instance load stays on the auto-filtered manager (only local matches are loaded).
+
+`make_shard_at_post_login` (shard-side) gates `refresh_from_db` behind an explicit `ObjectDB.objects.filter(pk).exists()` check, because Django's `refresh_from_db` routes through `_base_manager` (unfiltered) and would otherwise silently load a foreign row.
+
+Smoke-tested end-to-end against the three demo gamedirs: login flow → router auto-redirect to character's shard → IC on shard → cross-shard `@tel` between shard0 and shard1 → `cross_shard_dig` on a remote shard → ticket auth + session reattach. Tests: 290 passing in `src/evennia_shards/tests.py`.
+
+The library previously enforced the partition via a four-chokepoint design (`from_db` override, `pre_save` / `pre_delete` signals, `QuerySet.update` override, `shard_writes_allowed_for` bypass). That design is archived at [archive/shard-isolation.md](archive/shard-isolation.md) for historical context.
 
 ### 2026-05-20 — `@tel`: cross-shard leave/arrive announces via new `room_msg` bus kind
 
@@ -348,11 +366,11 @@ Live smoke testing of `cross_shard_move` (shard0 → shard1 → shard0 round-tri
 - **Root cause:** The Account's Attribute-handler cache on shard0 still held the Python object from the outbound move (whose `shard_id` field was `"shard1"`). Evennia's default `at_post_login` read `_last_puppet` from this stale cache and handed the stale object to `puppet_object`, which tried to save it — tripping the `pre_save` chokepoint.
 - **Fix:** Installed a thin `at_post_login` wrapper on shards (`make_shard_at_post_login` in `hooks.py`) that flushes the `_last_puppet` character from the idmapper and refreshes its fields from the DB before delegating to Evennia's original `at_post_login`.
 
-**General pattern documented:** Any code path that reads an `ObjectDB` field which may have been updated by another process must use `flush_from_cache(force=True)` + `refresh_from_db()` before acting on the value. See [shard-isolation.md](shard-isolation.md#cross-process-cache-staleness) for the full write-up.
+**General pattern documented:** Any code path that reads an `ObjectDB` field which may have been updated by another process must use `flush_from_cache(force=True)` + `refresh_from_db()` before acting on the value. See [shard-isolation.md](archive/shard-isolation.md#cross-process-cache-staleness) for the full write-up.
 
 **Files changed:** `hooks.py` (flush+refresh in `_is_redirectable_character`, new `make_shard_at_post_login` factory), `commands.py` (flush+refresh in `ShardAwareCmdIC.func()`), `apps.py` (shard-side `at_post_login` wrapper installation alongside existing router override), `tests.py` (`flush_from_cache` stub on `_FakeCharacter`).
 
-**Docs updated:** [ticket-auth-flow.md](ticket-auth-flow.md) (shards no longer use vanilla `at_post_login`), [library-integration-risks.md](library-integration-risks.md) (shard wrapper added to `at_post_login` coupling section), [shard-isolation.md](shard-isolation.md) (new "Cross-process cache staleness" section).
+**Docs updated:** [ticket-auth-flow.md](ticket-auth-flow.md) (shards no longer use vanilla `at_post_login`), [library-integration-risks.md](library-integration-risks.md) (shard wrapper added to `at_post_login` coupling section), [shard-isolation.md](archive/shard-isolation.md) (new "Cross-process cache staleness" section).
 
 164 tests passing.
 
@@ -389,7 +407,7 @@ The shard isolation mechanism was reorganised into a dedicated module and gained
 
 Scoped to the `with` block, nesting-safe, exception-safe (cleanup runs in `finally`). Public API, exported from `evennia_shards.__init__`.
 
-Documented in [shard-isolation.md](shard-isolation.md#bypass-shard_writes_allowed_for) — the doc gained a new "Bypass" section explaining the semantics, identity tracking, and composition with `transaction.atomic()` and `flush_from_cache()` for handoff scenarios.
+Documented in [shard-isolation.md](archive/shard-isolation.md#bypass-shard_writes_allowed_for) — the doc gained a new "Bypass" section explaining the semantics, identity tracking, and composition with `transaction.atomic()` and `flush_from_cache()` for handoff scenarios.
 
 148 tests passing (138 prior + 10 new in `ShardWritesAllowedForTests`): allows-remote-save, scoped-cleanup, no-auto-stamp-of-explicit-id, allows-remote-delete, only-listed-objects, nested-bypass, exception-cleanup, allows-from-db, allows-qs-update, partial-qs-update-still-raises.
 
@@ -593,7 +611,7 @@ The bus from [cross-shard-message-bus.md](cross-shard-message-bus.md) is in plac
 
 ### 2026-04-29 — Bespoke spike: all four chokepoints land with isolated tests
 
-The `bespoke` branch now carries all four chokepoints documented in [shard-isolation.md](shard-isolation.md), with full automated test coverage. The four-chokepoint spike is functionally complete.
+The `bespoke` branch now carries all four chokepoints documented in [shard-isolation.md](archive/shard-isolation.md), with full automated test coverage. The four-chokepoint spike is functionally complete.
 
 - **`pre_save` chokepoint** (commit `80226be`): the existing auto-stamp handler grew a second arm — refuse the save if `instance.shard_id` is set and is neither the current shard nor `"*"`. New `ShardIsolationError` exception type. Live smoke test confirmed via in-game `@py`.
 - **`pre_delete` chokepoint** (commit `0bcce76`): mirrors `pre_save` minus the auto-stamp arm. Refuses to delete a row whose `shard_id` is neither current nor `"*"` (and not `None`, since legacy/unstamped rows are tolerated). Covers both `instance.delete()` and `qs.delete()` because Django fires `pre_delete` per affected row even on bulk queryset deletes.
@@ -613,7 +631,7 @@ The `bespoke` branch now carries all four chokepoints documented in [shard-isola
 
 - ~~Cross-shard ownership handoff and the bypass primitive (`shard_writes_allowed_for(...)`).~~ *Both landed 2026-05-02 — bypass primitive and cross_shard_move spike 1 (single-object move) are working with full unit-test coverage. See milestones above.*
 - Backfill migration for legacy NULL rows.
-- ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
+- ~~Revisit the comparison with `django-multitenant` on the parallel `django-multitenant` branch.~~ *Decided in favour of bespoke chokepoints — see [shard-isolation.md](archive/shard-isolation.md#decision-bespoke-chokepoints-vs-django-multitenant). The `django-multitenant` branch was discontinued without merging.*
 
 ### 2026-04-29 — Auto-stamp on save works (hybrid pre_save signal)
 
