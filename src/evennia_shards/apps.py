@@ -103,6 +103,20 @@ class EvenniaShardsConfig(AppConfig):
                     DefaultAccount.at_post_login
                 )
 
+                # Suppress MudInfo "X connected" / "X disconnected"
+                # announces on shards. _send_to_connect_channel fires
+                # on every session login / logout; on a shard, every
+                # session arrival is a cross-process hop from the
+                # router (or another shard via @tel) and every exit is
+                # a hop or session close — never a real cold connect
+                # or graceful disconnect — so the announce is
+                # misleading noise to admins watching the system
+                # channel. Inert on router and in monolith (this
+                # branch only runs in ROLE_SHARD).
+                DefaultAccount._send_to_connect_channel = (
+                    lambda self, message: None
+                )
+
             # Wrap create_character on the consumer's configured
             # account class so newly created characters get their
             # shard_id stamped from the start-location row's
