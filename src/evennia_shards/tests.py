@@ -768,13 +768,19 @@ class _FakeSession:
 
 
 class _FakeAttributes:
-    """Stand-in for AccountDB.attributes."""
+    """Stand-in for AccountDB.attributes / ObjectDB.attributes."""
 
     def __init__(self, store=None):
         self._store = dict(store or {})
 
-    def get(self, name, default=None):
+    def get(self, name, default=None, **kwargs):
         return self._store.get(name, default)
+
+    def add(self, name, value, category=None, **kwargs):
+        self._store[name] = value
+
+    def remove(self, name, category=None, **kwargs):
+        self._store.pop(name, None)
 
     def reset_cache(self):
         # No-op: the fake doesn't keep a separate cache to invalidate.
@@ -922,6 +928,7 @@ class _FakeCharacter:
         self.pk = pk
         self.shard_id = shard_id
         self.name = key
+        self.attributes = _FakeAttributes()
 
     def flush_from_cache(self, force=False):
         pass
@@ -2342,6 +2349,142 @@ class ShardAwareCmdOOCShardTests(BaseEvenniaTestCase):
         cmd.func()
 
         self.assertIs(account.db._last_puppet, char)
+
+
+# ---------------------------------------------------------------------------
+# redirect_to_router (public mechanism shared by ShardAwareCmdOOC and
+# consumer-side commands like rent / quit)
+# ---------------------------------------------------------------------------
+
+
+@override_settings(
+    SHARDS_ROLE="shard", SHARD_ID="shard0",
+    SHARD_URLS={"shard0": "ws://localhost:4011/"},
+    ROUTER_URL="ws://localhost:4001/",
+)
+class RedirectToRouterTests(BaseEvenniaTestCase):
+    """Direct tests of ``handoff.redirect_to_router``.
+
+    The existing ShardAwareCmdOOC tests cover the command-level
+    integration; these exercise the helper directly so consumer
+    commands have explicit guarantees about the primitive's contract.
+    """
+
+    def test_with_puppet_creates_ticket_and_redirects(self):
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        session.puppet = char
+        account = _FakeAccount()
+
+        url = redirect_to_router(account, session)
+
+        self.assertTrue(url.startswith("ws://localhost:4001/?ticket="))
+        tickets = list(Ticket.objects.all())
+        self.assertEqual(len(tickets), 1)
+        self.assertEqual(tickets[0].character_id, 42)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_no_puppet_uses_last_puppet(self):
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        session = _FakeSession()
+
+        redirect_to_router(account, session)
+
+        self.assertEqual(Ticket.objects.first().character_id, 42)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_no_puppet_no_last_puppet_falls_back_to_zero(self):
+        """Broken state: no puppet, no _last_puppet → ticket with character_id=0.
+
+        The router ignores character_id on OOC tickets, so the sentinel
+        is harmless; a warning is logged for visibility.
+        """
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        session = _FakeSession()
+        account = _FakeAccount()
+
+        redirect_to_router(account, session)
+
+        self.assertEqual(Ticket.objects.first().character_id, 0)
+        self.assertIn("shard_redirect", session.oob_messages)
+
+    def test_ip_pinned_in_ticket(self):
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession(address="10.0.0.1")
+        session.puppet = char
+
+        redirect_to_router(_FakeAccount(), session)
+
+        self.assertEqual(Ticket.objects.first().client_ip, "10.0.0.1")
+
+    def test_ticket_targets_router(self):
+        """OOC tickets target the router shard id, not a shard."""
+        from evennia_shards.config import get_router_shard_id
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        session.puppet = char
+
+        redirect_to_router(_FakeAccount(), session)
+
+        self.assertEqual(Ticket.objects.first().to_shard, get_router_shard_id())
+
+    def test_does_not_mutate_last_puppet(self):
+        """Helper preserves _last_puppet — only @ic ever clears that flag."""
+        from evennia_shards.handoff import redirect_to_router
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        account.db._last_puppet = char
+        session = _FakeSession()
+        session.puppet = char
+
+        redirect_to_router(account, session)
+
+        self.assertIs(account.db._last_puppet, char)
+
+    def test_does_not_message_account(self):
+        """User-visible text is the caller's policy choice, not the helper's."""
+        from evennia_shards.handoff import redirect_to_router
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        account = _FakeAccount()
+        session = _FakeSession()
+        session.puppet = char
+
+        redirect_to_router(account, session)
+
+        # _FakeAccount records text-mode .msg calls on .account_messages;
+        # the helper should not have appended anything.
+        self.assertEqual(account.account_messages, [])
+
+    def test_returns_redirect_url(self):
+        from evennia_shards.handoff import redirect_to_router
+        from evennia_shards.models import Ticket
+
+        char = _FakeCharacter("Bob", pk=42, shard_id="shard0")
+        session = _FakeSession()
+        session.puppet = char
+
+        url = redirect_to_router(_FakeAccount(), session)
+        token = Ticket.objects.first().token
+
+        self.assertEqual(url, f"ws://localhost:4001/?ticket={token}")
 
 
 # ---------------------------------------------------------------------------

@@ -21,11 +21,10 @@ Two flavours of commands live here:
 
 from evennia.commands.command import Command as BaseCommand
 from evennia.commands.default.account import CmdIC, CmdOOC
-from evennia.utils import logger, search, utils
+from evennia.utils import search, utils
 
-from .config import ROLE_SHARD, get_role, get_router_shard_id, get_router_url
+from .config import ROLE_SHARD, get_role
 from .handoff import _redirect_to_character_shard
-from .tickets import create_ticket
 
 
 class ShardAwareCmdIC(CmdIC):
@@ -165,37 +164,13 @@ class ShardAwareCmdOOC(CmdOOC):
     """
 
     def func(self):
-        account = self.account
-        session = self.session
+        # All ticket/redirect work lives in handoff.redirect_to_router so
+        # consumer commands (rent, quit, etc) can call the same primitive
+        # without having to ship a player-visible ooc command at all.
+        from .handoff import redirect_to_router
 
-        # Resolve the best character_id for the ticket.
-        old_char = account.get_puppet(session)
-        if old_char:
-            character_id = old_char.id
-        elif account.db._last_puppet:
-            character_id = account.db._last_puppet.id
-        else:
-            # Truly broken state — no puppet and no _last_puppet.
-            # Log a warning and use 0 as a sentinel; the router
-            # won't use character_id for OOC tickets anyway.
-            character_id = 0
-            logger.log_warn(
-                f"OOC redirect with no puppet and no _last_puppet "
-                f"(Account: {account}, IP: {session.address})."
-            )
-
-        token = create_ticket(
-            account.id, character_id, get_router_shard_id(),
-            client_ip=session.address,
-        )
-        url = f"{get_router_url()}?ticket={token}"
-        session.msg(shard_redirect=[[url], {}])
+        redirect_to_router(self.account, self.session)
         self.msg("Redirecting to router...")
-
-        logger.log_sec(
-            f"OOC redirect: (Caller: {account}, Character: {character_id}, "
-            f"IP: {session.address})."
-        )
 
 
 # =============================================================================

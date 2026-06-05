@@ -6,15 +6,20 @@ row's identity (``shard_id``, location) from one shard process to
 another, evict it from the source's idmapper, and redirect any
 puppeting sessions to the destination shard.
 
-Houses two public primitives:
+Houses three public primitives:
 
 - :func:`cross_shard_move` — composes the full handoff for an
   ``ObjectDB``-derived row and its full recursive inventory. Mutates
   ``shard_id`` via ``QuerySet.update`` (bypassing ``save()``, which the
   ``shard_id``-immutability check on ``__setattr__`` would otherwise
   refuse).
-- :func:`_redirect_to_character_shard` — the per-session redirect
-  used by the ``ic`` command and the ``at_post_login`` override.
+- :func:`_redirect_to_character_shard` — the per-session redirect to
+  a specific character's owning shard. Used by the ``ic`` command and
+  the ``at_post_login`` override.
+- :func:`redirect_to_router` — the per-session redirect back to the
+  router. Used by ``ShardAwareCmdOOC`` and exposed for consumer-side
+  commands that need the same shard-to-router transition (rent, quit,
+  link-dead handlers, etc).
 """
 
 from collections import namedtuple
@@ -22,7 +27,7 @@ from collections import namedtuple
 from django.db import transaction
 from evennia.utils import logger
 
-from .config import get_shard_id, get_shard_url
+from .config import get_router_shard_id, get_router_url, get_shard_id, get_shard_url
 from .tenancy import shard_context
 from .tickets import create_ticket
 
@@ -401,5 +406,65 @@ def _redirect_to_character_shard(account, session, character) -> str:
     logger.log_sec(
         f"Shard redirect: (Caller: {account}, Target: {character}, "
         f"Shard: {shard_id}, IP: {session.address})."
+    )
+    return url
+
+
+def redirect_to_router(account, session) -> str:
+    """Create a router-bound ticket and send ``shard_redirect`` OOB.
+
+    Pure mechanism shared between ``ShardAwareCmdOOC`` and any consumer
+    command that needs the shard-to-router transition without exposing
+    ``ooc`` as a player command: ``rent``, ``quit``, link-dead handlers,
+    inn-side logout flows, etc.
+
+    Resolves the best ``character_id`` for the ticket:
+
+    1. The character currently puppeted by ``session``, if any.
+    2. The account's ``_last_puppet``, as a fallback.
+    3. ``0`` as a broken-state sentinel — a warning is logged. The
+       router does not consume ``character_id`` from OOC tickets, so
+       this sentinel never produces an incorrect IC landing.
+
+    Does NOT message the account — the caller decides whether to emit
+    user-visible text (``ShardAwareCmdOOC`` says ``"Redirecting to
+    router..."``; consumer commands may have their own flavor, e.g.
+    rent's inn-flavor text or quit's farewell, or no message at all).
+
+    Does NOT explicitly unpuppet — the redirect closes the current
+    WebSocket and Evennia's disconnect handler auto-unpuppets when the
+    connection drops.
+
+    Does NOT touch ``account.db._last_puppet`` — leaving the flag
+    intact preserves "where the player was" for the next login's
+    auto-puppet flow on the router.
+
+    Returns the redirect URL (WebSocket URL with ticket).
+    """
+    old_char = account.get_puppet(session)
+    if old_char:
+        character_id = old_char.id
+    elif account.db._last_puppet:
+        character_id = account.db._last_puppet.id
+    else:
+        # Broken state — no puppet and no _last_puppet. The router
+        # ignores character_id for OOC tickets, so 0 is harmless,
+        # but it shouldn't happen in normal flows; warn so we notice.
+        character_id = 0
+        logger.log_warn(
+            f"redirect_to_router: no puppet and no _last_puppet "
+            f"(Account: {account}, IP: {session.address})."
+        )
+
+    token = create_ticket(
+        account.id, character_id, get_router_shard_id(),
+        client_ip=session.address,
+    )
+    url = f"{get_router_url()}?ticket={token}"
+    session.msg(shard_redirect=[[url], {}])
+
+    logger.log_sec(
+        f"Router redirect: (Caller: {account}, Character: {character_id}, "
+        f"IP: {session.address})."
     )
     return url
