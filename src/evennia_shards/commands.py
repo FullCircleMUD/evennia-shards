@@ -72,6 +72,15 @@ class ShardAwareCmdIC(CmdIC):
         # subsequent connections. No cross-process write.
         self.account.db._shards_at_ooc_menu = False
 
+        # Mark this puppet as coming from an explicit @ic so the
+        # destination shard's at_post_puppet can distinguish it from
+        # a mid-game cross-shard hop (e.g. @tel). Consumers that read
+        # this flag should clear it after acting on it. Written here
+        # on the router; read by the shard after auto-puppet — visible
+        # cross-process because Attributes are DB-backed and the
+        # library refreshes the character row on shard arrival.
+        new_character.attributes.add("_shards_via_ic_command", True)
+
         _redirect_to_character_shard(self.account, self.session, new_character)
         self.msg(f"Redirecting to {shard_id}...")
 
