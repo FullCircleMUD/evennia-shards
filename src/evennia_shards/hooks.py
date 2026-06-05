@@ -232,6 +232,27 @@ def make_shard_at_post_login(original_at_post_login):
             character.flush_from_cache(force=True)
             if ObjectDB.objects.filter(pk=character.pk).exists():
                 character.refresh_from_db()
+                # Sweep stale session attachments before vanilla
+                # at_post_login calls puppet_object.
+                #
+                # ObjectDB.db_sessid is a persistent CSV string carrying
+                # the sessid that was attached on the previous shard.
+                # ObjectSessionHandler._recache() filters out sessids
+                # not in the current process's SESSION_HANDLER, but in
+                # low-traffic dev (and any case where shards independently
+                # assign overlapping session numbers) the stale id
+                # collides with the new arrival session, passes the
+                # filter, and puppet_object's takeover branch fires
+                # with misleading "Taking over from another of your
+                # sessions" text.
+                #
+                # Clearing here is correct: no session on *this* shard
+                # is genuinely puppeting the character yet —
+                # puppet_object hasn't reached its sessions.add() call.
+                if character.db_sessid:
+                    character.db_sessid = ""
+                    character.save(update_fields=["db_sessid"])
+                    character.sessions._recache()
             else:
                 self.db._last_puppet = None
         original_at_post_login(self, session=session, **kwargs)
