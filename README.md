@@ -4,7 +4,7 @@
 
 A drop-in extension to [Evennia](https://www.evennia.com/) that adds optional split deployment and horizontal sharding via configuration alone. Install it and the game runs as vanilla Evennia. Flip a config setting and the same code runs as a split deployment (auth process separate from game process). Flip another, and it runs as full multi-shard.
 
-> **Status: working MVP, not production-ready.** Phase 1 (router + shards, ticket auth, IC/OOC redirects, cross-shard character + inventory move, chargen, primitive cross-shard messaging) is functionally complete and live-smoke-verified end-to-end against three demo gamedirs. The API has not yet been exercised by a real consumer game. See [DESIGN/progress.md](DESIGN/progress.md) for the running milestone log; [DESIGN/INDEX.md](DESIGN/INDEX.md) is the design wiki.
+> **Status: working MVP, not production-ready.** Phase 1 (router + shards, ticket auth, IC/OOC redirects, cross-shard character + inventory move, chargen, primitive cross-shard messaging) is functionally complete and live-smoke-verified end-to-end against three demo gamedirs. The API has not yet been exercised by a real consumer game. See [docs/progress.md](docs/progress.md) for the running milestone log; [docs/INDEX.md](docs/INDEX.md) is the design wiki.
 
 ## What this is
 
@@ -24,7 +24,7 @@ The library does not impose its own room or character base classes — it provid
 - Not a multi-region, multi-database, or multi-datacenter design.
 - Not a solution for *"what if we had millions of players"* — that is explicitly deferred.
 
-The design is scoped to the **single-Postgres era**: from one Evennia process today through however many shards run against a single, vertically scaled Postgres. The working theory is that Evennia's per-process bottleneck is its single-threaded Twisted reactor — game logic, ticks, scripts, and player commands all share one thread — while Postgres handles concurrent connections and aggregate load comfortably. Horizontal scaling for Evennia therefore means adding *Evennia* processes, not databases; a single vertically scaled Postgres should absorb the load of many shards before its own limits bite. We haven't benchmarked at scale, and "many" is qualitative — if a real game pushes through that frontier, the architectural assumptions here will need revisiting. Scoping to single-Postgres keeps the design surface small in the meantime. See [the archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#project-identity-and-positioning) for the original positioning statement and out-of-scope list.
+The design is scoped to the **single-Postgres era**: from one Evennia process today through however many shards run against a single, vertically scaled Postgres. The working theory is that Evennia's per-process bottleneck is its single-threaded Twisted reactor — game logic, ticks, scripts, and player commands all share one thread — while Postgres handles concurrent connections and aggregate load comfortably. Horizontal scaling for Evennia therefore means adding *Evennia* processes, not databases; a single vertically scaled Postgres should absorb the load of many shards before its own limits bite. We haven't benchmarked at scale, and "many" is qualitative — if a real game pushes through that frontier, the architectural assumptions here will need revisiting. Scoping to single-Postgres keeps the design surface small in the meantime. See [the archived handover](docs/archive/evennia-shards-HANDOVER.md#project-identity-and-positioning) for the original positioning statement and out-of-scope list.
 
 ## Quick start
 
@@ -48,19 +48,19 @@ For consumer games installing the library as a dependency (rather than developin
 
 ## Documentation
 
-All technical documentation lives in [DESIGN/](DESIGN/). Start at [DESIGN/INDEX.md](DESIGN/INDEX.md) for the doc map and reading paths.
+All technical documentation lives in [docs/](docs/). Start at [docs/INDEX.md](docs/INDEX.md) for the doc map and reading paths.
 
 Notable entry points:
 
-- **[DESIGN/INDEX.md](DESIGN/INDEX.md)** — map of all design documents.
-- **[DESIGN/progress.md](DESIGN/progress.md)** — running log of milestones with links to evidence (test results, design docs, code changes).
-- **[DESIGN/documentation-structure.md](DESIGN/documentation-structure.md)** — what belongs in CLAUDE.md vs README.md vs DESIGN/, and conventions for new design docs.
-- **[DESIGN/archive/evennia-shards-HANDOVER.md](DESIGN/archive/evennia-shards-HANDOVER.md)** — the original brainstorm session that started this project. Archived as historical context; current decisions extend and refine it.
+- **[docs/INDEX.md](docs/INDEX.md)** — map of all design documents.
+- **[docs/progress.md](docs/progress.md)** — running log of milestones with links to evidence (test results, design docs, code changes).
+- **[docs/documentation-structure.md](docs/documentation-structure.md)** — what belongs in CLAUDE.md vs README.md vs docs/, and conventions for new design docs.
+- **[docs/archive/evennia-shards-HANDOVER.md](docs/archive/evennia-shards-HANDOVER.md)** — the original brainstorm session that started this project. Archived as historical context; current decisions extend and refine it.
 - **[CLAUDE.md](CLAUDE.md)** — instructions for LLM agents working in this repo.
 
 ## Project relationships
 
-This library was extracted from scaling work originally done for the [FullCircleMUD (FCM)](https://fcmud.world) project. FCM is the intended first consumer game and will adopt the library as a dependency. The library is deliberately game-agnostic; FCM-specific concerns stay in FCM. See [the origin section of the archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#origin-why-this-is-a-separate-project) for the original rationale.
+This library was extracted from scaling work originally done for the [FullCircleMUD (FCM)](https://fcmud.world) project. FCM is the intended first consumer game and will adopt the library as a dependency. The library is deliberately game-agnostic; FCM-specific concerns stay in FCM. See [the origin section of the archived handover](docs/archive/evennia-shards-HANDOVER.md#origin-why-this-is-a-separate-project) for the original rationale.
 
 ## License
 

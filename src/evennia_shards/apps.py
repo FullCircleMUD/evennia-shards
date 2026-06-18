@@ -19,7 +19,7 @@ class EvenniaShardsConfig(AppConfig):
             # process. Shard processes scope all queries on tenant-tagged
             # models to their own rows + ``"*"`` global rows; the router
             # runs unscoped so it can coordinate across shards.
-            # See evennia_shards/tenancy.py and DESIGN/shard-isolation.md.
+            # See evennia_shards/tenancy.py and docs/shard-isolation.md.
             from .tenancy import bootstrap_tenant_context, install_tenancy_on_objectdb
 
             bootstrap_tenant_context()
@@ -70,7 +70,7 @@ class EvenniaShardsConfig(AppConfig):
             #
             # Router: full replacement that intercepts auto-puppet and
             #   converts it to a ticket+redirect to the character's
-            #   owning shard. See DESIGN/library-integration-risks.md.
+            #   owning shard. See docs/library-integration-risks.md.
             #
             # Shard: thin wrapper around Evennia's original that flushes
             #   stale idmapper/Attribute-cache entries for _last_puppet
@@ -161,7 +161,7 @@ class EvenniaShardsConfig(AppConfig):
             # AFTER ``django.setup()``, so our ``ready()`` is too
             # early. Wrap ``evennia._init`` instead — when it runs,
             # the lazy exports are populated and the cmdset_character
-            # import chain works. See DESIGN/library-integration-risks.md.
+            # import chain works. See docs/library-integration-risks.md.
             import evennia
 
             if not getattr(evennia, "_evennia_shards_init_wrapped", False):

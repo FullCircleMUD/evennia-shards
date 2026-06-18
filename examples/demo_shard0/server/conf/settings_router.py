@@ -45,5 +45,5 @@ AMP_PORT = 4006
 # (Next.js, static site, separate Django, etc.) can flip this to
 # False on the router as well; evennia_shards.portal_services will
 # register the WebSocket independently. See
-# DESIGN/deployment-topology.md.
+# docs/deployment-topology.md.
 WEBSERVER_ENABLED = True

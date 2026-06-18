@@ -7,7 +7,7 @@ are preserved. The original class path is stashed by AppConfig.ready()
 before it overwrites the setting to point here.
 
 Wired in via WEBSOCKET_PROTOCOL_CLASS in AppConfig.ready().
-See DESIGN/ticket-auth-flow.md for the full flow.
+See docs/ticket-auth-flow.md for the full flow.
 """
 
 import json
@@ -42,20 +42,20 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
     Overrides ``onOpen()`` to inject ticket-based authentication between
     ``init_session()`` and ``sessionhandler.connect()``. This is the only
     way to get ``uid`` and ``logged_in`` set before the session state is
-    synced to the Server — see DESIGN/library-integration-risks.md for
+    synced to the Server — see docs/library-integration-risks.md for
     the full rationale.
     """
 
     # -- onOpen override ------------------------------------------------
     # Based on Evennia 6.0.0 WebSocketClient.onOpen().
-    # See DESIGN/library-integration-risks.md for what to diff on upgrade.
+    # See docs/library-integration-risks.md for what to diff on upgrade.
 
     def onOpen(self):
         """Called when the WebSocket connection is fully established.
 
         Reproduced from Evennia 6.0.0 WebSocketClient.onOpen() with
         ticket-based auth layered in.
-        See DESIGN/library-integration-risks.md for what to diff on upgrade.
+        See docs/library-integration-risks.md for what to diff on upgrade.
 
         Auth priority:
         1. Existing browser session (csessid) — re-attach to existing
@@ -88,12 +88,12 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         Two flags, two jobs. The Portal/Server process boundary
         means a Portal-side write to ``account.db.*`` would be
         invisible to the Server; the protocol flag is the bridge.
-        See DESIGN/ticket-auth-flow.md for the full state machine.
+        See docs/ticket-auth-flow.md for the full state machine.
         """
         token = self._extract_ticket_token()
 
         # ── Reproduced Evennia WebSocketClient.onOpen() ────────────
-        # Based on Evennia 6.0.0. See DESIGN/library-integration-risks.md.
+        # Based on Evennia 6.0.0. See docs/library-integration-risks.md.
         client_address = self._get_client_address()
 
         self.init_session("websocket", client_address, self.factory.sessionhandler)

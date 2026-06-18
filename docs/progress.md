@@ -55,7 +55,7 @@ Smoke-tested in the demo gamedirs by leaving an observer character in Limbo on s
 
 `/quiet` verified separately to suppress both announces while still emitting the caller-facing confirmation.
 
-**Files:** `src/evennia_shards/messagebus.py` (new `_handle_room_msg`), `src/evennia_shards/messaging.py` (new `send_cross_shard_room_message`), `src/evennia_shards/__init__.py` (export), `src/evennia_shards/teleport.py` (announce wiring + `/quiet` fix), `src/evennia_shards/tests.py` (+17 tests: 6 receiver-handler, 6 sender helper, 5 announce wiring; existing `/quiet` test rewritten to assert vanilla-aligned behaviour). `DESIGN/cross-shard-message-bus.md` and `DESIGN/library-integration-risks.md` updated. Suite at 280. Branch: `shard-aware-teleport`.
+**Files:** `src/evennia_shards/messagebus.py` (new `_handle_room_msg`), `src/evennia_shards/messaging.py` (new `send_cross_shard_room_message`), `src/evennia_shards/__init__.py` (export), `src/evennia_shards/teleport.py` (announce wiring + `/quiet` fix), `src/evennia_shards/tests.py` (+17 tests: 6 receiver-handler, 6 sender helper, 5 announce wiring; existing `/quiet` test rewritten to assert vanilla-aligned behaviour). `docs/cross-shard-message-bus.md` and `docs/library-integration-risks.md` updated. Suite at 280. Branch: `shard-aware-teleport`.
 
 ### 2026-05-20 — `@tel`: obj-side `teleport` lock check added to cross-shard branch
 
@@ -73,7 +73,7 @@ Smoke-tested in the demo gamedirs with a non-Admin Builder account (`tim`):
 
 The smoke test surfaced a separate Evennia subtlety worth noting for future test setup: `cmd:perm(Builder)` on `@tel` checks the **account's** permissions via the lockfunc (see [`evennia/locks/lockfuncs.py:163`](file:///c:/Users/micro/Documents/FCM/libraries/evennia-shards/venv/Lib/site-packages/evennia/locks/lockfuncs.py#L163)), whereas our in-func `caller.permissions.check("Admin")` checks the character's. Granting Builder to a character alone leaves the command invisible; the account also needs the permission (`@perm/account tim = Builder`). Two separate permission surfaces, both come into play.
 
-**Files:** `src/evennia_shards/teleport.py` (new check + trimmed skipped-behaviour comment), `src/evennia_shards/tests.py` (3 new tests: lock-blocks-non-admin, Admin-bypass, non-Admin-allowed-when-obj-grants-access; `_FakeCaller` extended with `permissions.check` / `access` surfaces). Suite at 263. `DESIGN/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
+**Files:** `src/evennia_shards/teleport.py` (new check + trimmed skipped-behaviour comment), `src/evennia_shards/tests.py` (3 new tests: lock-blocks-non-admin, Admin-bypass, non-Admin-allowed-when-obj-grants-access; `_FakeCaller` extended with `permissions.check` / `access` surfaces). Suite at 263. `docs/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
 
 ### 2026-05-20 — `@tel`: trivial vanilla-parity gaps closed
 
@@ -86,7 +86,7 @@ Four small alignments with vanilla `CmdTeleport` / `caller.search`, each indepen
 
 After these, name-resolution parity with vanilla `caller.search(global_search=True)` is complete except for fuzzy / partial name matching (the regex fallback when exact fails). Teleport-side gaps that remain are documented but not yet closed: cross-shard `/loc`, cross-shard `/intoexit`, foreign-obj move, `announce_move_from` / `announce_move_to`, obj `teleport` lock check, destination `teleport_here` lock check.
 
-**Files:** `src/evennia_shards/search.py` (specials short-circuit + alias predicate + scope-note update), `src/evennia_shards/teleport.py` (`_format_multiple` helper + multi-match dispatch + already-at short-circuit), `src/evennia_shards/tests.py` (+14 tests; 260 total). `DESIGN/shard-aware-search.md` and `DESIGN/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
+**Files:** `src/evennia_shards/search.py` (specials short-circuit + alias predicate + scope-note update), `src/evennia_shards/teleport.py` (`_format_multiple` helper + multi-match dispatch + already-at short-circuit), `src/evennia_shards/tests.py` (+14 tests; 260 total). `docs/shard-aware-search.md` and `docs/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
 
 ### 2026-05-20 — `cross_shard_move` invalidates destination's idmapper via `flush_from_cache` bus message
 
@@ -131,7 +131,7 @@ Verified live in the demo gamedirs: ball moved cross-shard to a
 previously-loaded destination room is visible in `look` and in
 `room.contents` immediately on arrival.
 
-**Files:** `src/evennia_shards/messagebus.py` (handler), `src/evennia_shards/handoff.py` (sender + docstring), `src/evennia_shards/teleport.py` (debug-message detection hook removed; no longer load-bearing), `DESIGN/cross-shard-message-bus.md` (new kind documented). Branch: `shard-aware-teleport`.
+**Files:** `src/evennia_shards/messagebus.py` (handler), `src/evennia_shards/handoff.py` (sender + docstring), `src/evennia_shards/teleport.py` (debug-message detection hook removed; no longer load-bearing), `docs/cross-shard-message-bus.md` (new kind documented). Branch: `shard-aware-teleport`.
 
 ### 2026-05-20 — `cross_shard_character_move` renamed `cross_shard_move`
 
@@ -253,7 +253,7 @@ Reason this was non-trivial: Evennia 6.0.0 registers the webclient WebSocket *in
 
 **204 tests passing** (199 prior + 5 new in `StartPluginServicesTests`): no-op when webserver enabled, no-op when WS deliberately disabled, no-op when port missing, registers WS standalone in the happy case, honours `LOCKDOWN_MODE` for interface forcing.
 
-**Files:** new `evennia_shards/portal_services.py`; `evennia_shards/apps.py` appends to `PORTAL_SERVICES_PLUGIN_MODULES`; demo `settings_router.py` / `settings_shard0.py` / `settings_shard1.py` set `WEBSERVER_ENABLED` explicitly. Doc updates in `DESIGN/deployment-topology.md` (new "HTTP webserver topology" section), `DESIGN/library-integration-risks.md` (new coupling section for the plugin), `DESIGN/shard-settings.md` (recommended `WEBSERVER_ENABLED` per role).
+**Files:** new `evennia_shards/portal_services.py`; `evennia_shards/apps.py` appends to `PORTAL_SERVICES_PLUGIN_MODULES`; demo `settings_router.py` / `settings_shard0.py` / `settings_shard1.py` set `WEBSERVER_ENABLED` explicitly. Doc updates in `docs/deployment-topology.md` (new "HTTP webserver topology" section), `docs/library-integration-risks.md` (new coupling section for the plugin), `docs/shard-settings.md` (recommended `WEBSERVER_ENABLED` per role).
 
 ### 2026-05-04 — Refresh handling completed (refresh-while-IC, refresh-while-OOC, post-restart)
 
@@ -274,7 +274,7 @@ Follow-on to the WebSocket-level redirect milestone below. The PoC ship covered 
 
 **Outcome.** Full IC ↔ OOC ↔ refresh matrix verified live: `@ic`, `@ooc`, refresh-while-IC, refresh-while-OOC, refresh-after-server-restart, both `AUTO_PUPPET_ON_LOGIN=True` and `False`. 199 tests passing.
 
-**Files:** `evennia_shards/protocols.py`, `evennia_shards/hooks.py`, `evennia_shards/commands.py`, `evennia_shards/handoff.py`, `evennia_shards/middleware.py` (early inline `window.wsurl` override injection), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (URL augmentation helper, removed obsolete late refresh-routing block), `evennia_shards/tests.py` (199 tests). Doc updates in `DESIGN/ticket-auth-flow.md`. Branch: `websocket-level-redirect-poc`.
+**Files:** `evennia_shards/protocols.py`, `evennia_shards/hooks.py`, `evennia_shards/commands.py`, `evennia_shards/handoff.py`, `evennia_shards/middleware.py` (early inline `window.wsurl` override injection), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (URL augmentation helper, removed obsolete late refresh-routing block), `evennia_shards/tests.py` (199 tests). Doc updates in `docs/ticket-auth-flow.md`. Branch: `websocket-level-redirect-poc`.
 
 ### 2026-05-04 — WebSocket-level cross-shard redirect (replaces page navigation)
 
@@ -292,7 +292,7 @@ Architectural rationale beyond the immediate UX win:
 
 196 tests passing on the PoC branch at this checkpoint (URL strings updated from `http://` to `ws://` everywhere). Live smoke verified: IC, OOC, and `cross_shard_move` all transition cleanly with page persistence; the connection-lost flash is gone; real disconnects still render the standard error message. Refresh handling completed in the follow-on milestone above.
 
-**Files:** `evennia_shards/handoff.py` (`_redirect_to_character_shard` builds WS URL), `evennia_shards/commands.py` (`ShardAwareCmdOOC` builds WS URL), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (rewritten for WS swap + emit-wrap suppression), demo gamedirs settings updated to `ws://` URLs. Docs: `DESIGN/shard-settings.md`, `DESIGN/ticket-auth-flow.md`, `DESIGN/library-integration-risks.md` updated for the new mechanism. Branch: `websocket-level-redirect-poc`.
+**Files:** `evennia_shards/handoff.py` (`_redirect_to_character_shard` builds WS URL), `evennia_shards/commands.py` (`ShardAwareCmdOOC` builds WS URL), `evennia_shards/static/evennia_shards/js/shard_redirect.js` (rewritten for WS swap + emit-wrap suppression), demo gamedirs settings updated to `ws://` URLs. Docs: `docs/shard-settings.md`, `docs/ticket-auth-flow.md`, `docs/library-integration-risks.md` updated for the new mechanism. Branch: `websocket-level-redirect-poc`.
 
 ### 2026-05-03 — Cross-shard messaging primitives: `obj_msg` and `account_msg`
 
@@ -315,7 +315,7 @@ Sessions don't survive cross-process (no `SessionDB`, `sessid` is local to one P
 
 **Live smoke verified end-to-end:** superuser on shard0 sent `obj_msg` to a character on shard1 (text appeared on B's wire within the polling tick); same primitive shape proven for `account_msg` with an OOC player at the router's character-select menu. Both bus rows correctly deleted by `process_inbox` on truthy handler return.
 
-**Files:** `evennia_shards/messagebus.py` (two new `_handle_*` methods, module-level `log` promotion), `evennia_shards/tests.py` (six new test cases). Doc: `DESIGN/cross-shard-message-bus.md` kinds list extended with semantics for both new kinds.
+**Files:** `evennia_shards/messagebus.py` (two new `_handle_*` methods, module-level `log` promotion), `evennia_shards/tests.py` (six new test cases). Doc: `docs/cross-shard-message-bus.md` kinds list extended with semantics for both new kinds.
 
 ### 2026-05-03 — Chargen wrapper: stamp `shard_id` from the start-location row
 
@@ -564,7 +564,7 @@ The ticket-based auto-login flow from [ticket-auth-flow.md](ticket-auth-flow.md)
 
 **New helpers**: `_get_client_address()` (proxy-aware IP resolution), `_validate_ticket()` (pure validation, returns `(bool, data|error)`), `_extract_ticket_token()` (URL query parsing), `_send_text()` (Evennia JSON protocol wrapper).
 
-**New files**: `DESIGN/library-integration-risks.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
+**New files**: `docs/library-integration-risks.md` (documents the `onOpen()` override and what to diff on Evennia upgrades), `settings_router.py` / `settings_shard0.py` (role-specific settings for the demo game).
 
 96 tests passing. See [ticket-auth-flow.md](ticket-auth-flow.md) for remaining work (auto-puppet, client-side redirect). Note: the two-phase `onOpen()` was later refactored into a single-phase auth cascade — see the "Client redirect spike" milestone above.
 

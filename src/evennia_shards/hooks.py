@@ -10,7 +10,7 @@ Two overrides:
 - ``shard_aware_at_post_login`` — replaces ``DefaultAccount.at_post_login``
   on routers, intercepting Evennia's auto-puppet step and converting it
   to a ticket+redirect to the character's owning shard. See
-  DESIGN/library-integration-risks.md for what to diff on Evennia upgrade.
+  docs/library-integration-risks.md for what to diff on Evennia upgrade.
 
 - ``make_shard_at_post_login`` — factory that wraps Evennia's original
   ``at_post_login`` on shards, flushing stale idmapper/Attribute-cache
@@ -71,7 +71,7 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
     - ``_last_puppet`` is ``None`` → render the OOC menu silently
       (normal first login).
 
-    See DESIGN/library-integration-risks.md for what to diff on Evennia
+    See docs/library-integration-risks.md for what to diff on Evennia
     upgrade.
     """
     # ── Reproduced Evennia DefaultAccount.at_post_login prelude ───────
@@ -196,7 +196,7 @@ def warn_if_at_post_login_overridden(account_cls, role) -> bool:
         f"it calls super().at_post_login(session=session, **kwargs). "
         f"Without the super() call, the {role} role's "
         f"{role_specific} will not run for this account class. See "
-        f"DESIGN/library-integration-risks.md."
+        f"docs/library-integration-risks.md."
     )
     return True
 

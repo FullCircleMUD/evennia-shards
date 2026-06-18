@@ -1,14 +1,14 @@
 # Design Documentation Index
 
-The `DESIGN/` folder is the project's technical wiki. This index is the entry point — every design document is listed below with a one-line description and a suggested reading order for common situations.
+The `docs/` folder is the project's technical wiki. This index is the entry point — every design document is listed below with a one-line description and a suggested reading order for common situations.
 
 If you are an LLM agent picking up work in this repository, also read [`/CLAUDE.md`](../CLAUDE.md) for agent-specific instructions before diving in.
 
 ## Conventions
 
 - **Naming.** Index-style files (this one, `CLAUDE.md`, `README.md`) use shouty UPPERCASE. Content design documents use kebab-case (`documentation-structure.md`, `phase-1-poc-plan.md`). The seed handover keeps its existing name (`evennia-shards-HANDOVER.md`) for traceability.
-- **Adding a doc.** Create the file in `DESIGN/` with a descriptive kebab-case filename, then add a one-line entry to the catalogue below in the appropriate section.
-- **Document structure.** See [documentation-structure.md](documentation-structure.md) for what kinds of content belong in `DESIGN/` (vs. `CLAUDE.md` or `README.md`).
+- **Adding a doc.** Create the file in `docs/` with a descriptive kebab-case filename, then add a one-line entry to the catalogue below in the appropriate section.
+- **Document structure.** See [documentation-structure.md](documentation-structure.md) for what kinds of content belong in `docs/` (vs. `CLAUDE.md` or `README.md`).
 
 ## Catalogue
 
@@ -16,7 +16,7 @@ If you are an LLM agent picking up work in this repository, also read [`/CLAUDE.
 
 Documents about how the documentation itself is organised.
 
-- **[documentation-structure.md](documentation-structure.md)** — How the three documentation surfaces (`CLAUDE.md`, `README.md`, `DESIGN/`) are intended to be used. When to update each. Conventions for new design docs.
+- **[documentation-structure.md](documentation-structure.md)** — How the three documentation surfaces (`CLAUDE.md`, `README.md`, `docs/`) are intended to be used. When to update each. Conventions for new design docs.
 - **[open-questions.md](open-questions.md)** — Tracker for design questions raised in conversation but not yet resolved. Items are removed as they get folded into permanent docs.
 
 ### Architecture and design substrate

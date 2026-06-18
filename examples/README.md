@@ -7,7 +7,7 @@ The mechanism for running N processes locally differs by OS — Windows runs
 all roles directly from `demo_shard0/`, Unix runs each role from its own
 symlinked view gamedir. The full rationale (PID-file behaviour on each OS,
 why view dirs exist) lives in
-[`DESIGN/deployment-topology.md` § Local development](../DESIGN/deployment-topology.md#local-development);
+[`docs/deployment-topology.md` § Local development](../docs/deployment-topology.md#local-development);
 this file just ships the practical recipes.
 
 ## Windows: run all roles from `demo_shard0/`

@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+> **Project-wide working rules and cross-repo context live in the FCM umbrella repo's `CLAUDE.md`**,
+> loaded automatically when you work from the umbrella root. If you opened this repo directly instead
+> of via the umbrella, relaunch from the umbrella root for the full context. This file holds only this
+> repo's specific instructions.
+
 Instructions for Claude (and other LLM agents) working in this repository.
 
 ## What this project is
@@ -7,20 +12,20 @@ Instructions for Claude (and other LLM agents) working in this repository.
 `evennia-shards` is a drop-in extension to [Evennia](https://www.evennia.com/) that adds optional split deployment and horizontal sharding via configuration alone. Tagline: **"Making split deployment a config option in Evennia."**
 
 For the big-picture overview, read [README.md](README.md).
-For the design wiki, read [DESIGN/INDEX.md](DESIGN/INDEX.md).
+For the design wiki, read [docs/INDEX.md](docs/INDEX.md).
 
 ## Project status
 
-**Working MVP, not production-ready.** Shard partition enforcement (django-multitenant auto-filter on `ObjectDB`), ticket-based WebSocket auth, cross-shard character + inventory move, chargen wrapper, cross-shard `@tel`, and primitive cross-shard messaging (`obj_msg` / `account_msg` / `room_msg`) are all shipped and live-smoke-verified end-to-end against three demo gamedirs. For the current state read [DESIGN/progress.md](DESIGN/progress.md). The library has not yet been exercised by a real consumer game.
+**Working MVP, not production-ready.** Shard partition enforcement (django-multitenant auto-filter on `ObjectDB`), ticket-based WebSocket auth, cross-shard character + inventory move, chargen wrapper, cross-shard `@tel`, and primitive cross-shard messaging (`obj_msg` / `account_msg` / `room_msg`) are all shipped and live-smoke-verified end-to-end against three demo gamedirs. For the current state read [docs/progress.md](docs/progress.md). The library has not yet been exercised by a real consumer game.
 
 ## Where to read first
 
 For any non-trivial task, start by reading in this order:
 
 1. [README.md](README.md) — what the project is, status, quick start.
-2. [DESIGN/INDEX.md](DESIGN/INDEX.md) — map of all design docs.
-3. [DESIGN/documentation-structure.md](DESIGN/documentation-structure.md) — what goes in CLAUDE.md vs README.md vs DESIGN/, and naming conventions.
-4. [DESIGN/archive/evennia-shards-HANDOVER.md](DESIGN/archive/evennia-shards-HANDOVER.md) — *archived* original brainstorm. Useful historical context; not authoritative.
+2. [docs/INDEX.md](docs/INDEX.md) — map of all design docs.
+3. [docs/documentation-structure.md](docs/documentation-structure.md) — what goes in CLAUDE.md vs README.md vs docs/, and naming conventions.
+4. [docs/archive/evennia-shards-HANDOVER.md](docs/archive/evennia-shards-HANDOVER.md) — *archived* original brainstorm. Useful historical context; not authoritative.
 
 ## Load-bearing architectural principles
 
@@ -34,11 +39,11 @@ These are the principles every implementation decision must respect. They are re
 6. **Web-first.** Telnet support is a deliberate post-PoC concern.
 7. **Resist runtime config registries.** Source-controlled Python constants in the consumer game are the canonical config surface for things like zone→shard maps. Reshuffles are planned events, not hot operations.
 8. **Single-Postgres bound.** The whole design is scoped to "from one Evennia process today through however many shards run against a single, vertically scaled Postgres." Beyond that is explicitly deferred.
-9. **Use the role accessors, not raw settings reads.** Code that needs `SHARDS_ROLE` or `SHARD_ID` — library code *or* consumer game code — should call `evennia_shards.get_role()` / `get_shard_id()` rather than `settings.SHARDS_ROLE`. The accessors apply the documented defaults; raw `settings.SHARDS_ROLE` raises `AttributeError` whenever the consumer hasn't declared the setting (i.e. every monolith consumer). See [DESIGN/shard-settings.md](DESIGN/shard-settings.md).
+9. **Use the role accessors, not raw settings reads.** Code that needs `SHARDS_ROLE` or `SHARD_ID` — library code *or* consumer game code — should call `evennia_shards.get_role()` / `get_shard_id()` rather than `settings.SHARDS_ROLE`. The accessors apply the documented defaults; raw `settings.SHARDS_ROLE` raises `AttributeError` whenever the consumer hasn't declared the setting (i.e. every monolith consumer). See [docs/shard-settings.md](docs/shard-settings.md).
 
 ## Out of scope
 
-See the [explicit out-of-scope list in the archived handover](DESIGN/archive/evennia-shards-HANDOVER.md#things-explicitly-out-of-scope) before proposing features. Recurring "is this in scope?" questions:
+See the [explicit out-of-scope list in the archived handover](docs/archive/evennia-shards-HANDOVER.md#things-explicitly-out-of-scope) before proposing features. Recurring "is this in scope?" questions:
 
 - Multi-Postgres / read replicas — **no.**
 - Cross-region / multi-datacenter — **no.**
@@ -49,20 +54,20 @@ See the [explicit out-of-scope list in the archived handover](DESIGN/archive/eve
 
 ## Working conventions
 
-- **Editing design docs.** Update or add design documents whenever an architectural decision is made or refined. Capture the *why*, not just the *what*. Index new docs in [DESIGN/INDEX.md](DESIGN/INDEX.md).
-- **CLAUDE.md vs README.md vs DESIGN/.** See [DESIGN/documentation-structure.md](DESIGN/documentation-structure.md) for the split. CLAUDE.md is for Claude-facing instructions; README.md is for humans landing on the repo; DESIGN/ is the technical wiki.
-- **Don't put implementation detail in this file or README.** Link out to DESIGN/ instead. Keep CLAUDE.md and README.md stable; let DESIGN/ churn.
+- **Editing design docs.** Update or add design documents whenever an architectural decision is made or refined. Capture the *why*, not just the *what*. Index new docs in [docs/INDEX.md](docs/INDEX.md).
+- **CLAUDE.md vs README.md vs docs/.** See [docs/documentation-structure.md](docs/documentation-structure.md) for the split. CLAUDE.md is for Claude-facing instructions; README.md is for humans landing on the repo; docs/ is the technical wiki.
+- **Don't put implementation detail in this file or README.** Link out to docs/ instead. Keep CLAUDE.md and README.md stable; let docs/ churn.
 - **License.** BSD 3-Clause. New source files should carry a short SPDX header (`# SPDX-License-Identifier: BSD-3-Clause`) once code starts landing.
 
 ## Documentation discipline (load-bearing)
 
-Design documents in `DESIGN/` must reflect decisions **actually discussed and agreed on with the project owner**. They are not a place to forward-design the system from first principles or extrapolate "reasonable defaults" from a starting point.
+Design documents in `docs/` must reflect decisions **actually discussed and agreed on with the project owner**. They are not a place to forward-design the system from first principles or extrapolate "reasonable defaults" from a starting point.
 
 **Rules:**
 
 1. **Only capture what was discussed and agreed.** If the conversation establishes a principle (e.g. "the library mandates a gateway helper, everything else is consumer choice"), do not extrapolate it into specifics that were not raised (e.g. a numbered adoption checklist, a decision tree, specific API shapes, naming conventions).
 2. **Flag open questions explicitly.** Where a topic has been raised but not resolved, write `[TBD — needs discussion: <what is open>]` in the doc. Future sessions then pick the topic up deliberately rather than inheriting unagreed assumptions.
-3. **Distinguish handover content from in-conversation decisions.** The [archived handover](DESIGN/archive/evennia-shards-HANDOVER.md) is a brainstorm artifact, not authoritative. Restating handover content in new docs is acceptable when it provides necessary context, but mark it as such (e.g. *"Per the original handover: ..."*) rather than presenting it as a decision freshly made or as canonical project intent.
+3. **Distinguish handover content from in-conversation decisions.** The [archived handover](docs/archive/evennia-shards-HANDOVER.md) is a brainstorm artifact, not authoritative. Restating handover content in new docs is acceptable when it provides necessary context, but mark it as such (e.g. *"Per the original handover: ..."*) rather than presenting it as a decision freshly made or as canonical project intent.
 4. **Smaller is better.** A doc that captures three discussed points faithfully is more useful than one that captures three discussed points plus seven invented ones. Resist the urge to fill out sections "for completeness."
 
 If a session catches itself writing content that goes beyond what was discussed, stop and either remove the extrapolation or convert it to a `[TBD]` marker. Documentation that puts unagreed decisions in the project's mouth is worse than documentation that has gaps.
@@ -76,7 +81,7 @@ evennia-shards/
 ├── LICENSE                    # BSD 3-Clause
 ├── pyproject.toml
 ├── runtests.py                # standalone test runner (no consumer gamedir needed)
-├── DESIGN/                    # design wiki (humans + LLMs)
+├── docs/                    # design wiki (humans + LLMs)
 ├── src/
 │   └── evennia_shards/        # library code (src layout)
 │       └── tests.py           # unit tests (run via runtests.py)
@@ -92,4 +97,4 @@ evennia-shards/
 - Python 3.10+ (pinned via `pyproject.toml`).
 - Evennia is a runtime dependency (`pip install evennia`).
 - Postgres required only for multi-shard mode; SQLite is fine for monolith and single-shard split.
-- No Redis dependency. The cross-shard message bus uses a Postgres-polled `messages` table via Twisted `LoopingCall` — see [DESIGN/cross-shard-message-bus.md](DESIGN/cross-shard-message-bus.md). Earlier drafts considered `channels_redis` but it was not adopted.
+- No Redis dependency. The cross-shard message bus uses a Postgres-polled `messages` table via Twisted `LoopingCall` — see [docs/cross-shard-message-bus.md](docs/cross-shard-message-bus.md). Earlier drafts considered `channels_redis` but it was not adopted.

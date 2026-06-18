@@ -4,7 +4,7 @@
 Low-level CRUD over the `Message` table. Higher-level pieces — the
 polling cycle, dispatch, undeliverable_reply lifecycle, and consumer-
 overrideable handler hook — build on these. See
-DESIGN/cross-shard-message-bus.md for the full design.
+docs/cross-shard-message-bus.md for the full design.
 """
 
 import logging

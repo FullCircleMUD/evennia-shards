@@ -6,7 +6,7 @@ Three CRUD operations on the Ticket table:
 - get_ticket: shard looks up a ticket by token on incoming connection
 - delete_ticket: shard deletes the ticket after successful auth
 
-See DESIGN/ticket-auth-flow.md for the full flow.
+See docs/ticket-auth-flow.md for the full flow.
 """
 
 import uuid

@@ -14,7 +14,7 @@
  * scrollback, plugins, all persist across the cross-process transition.
  *
  * This is a deliberate departure from the earlier full-page-navigation
- * approach. See DESIGN/library-integration-risks.md and the PoC branch
+ * approach. See docs/library-integration-risks.md and the PoC branch
  * for context.
  */
 $(document).ready(function () {

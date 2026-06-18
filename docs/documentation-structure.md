@@ -22,12 +22,12 @@ This document explains what belongs where, when to update each, and the conventi
 
 **What does NOT belong here.**
 
-- Detailed architectural diagrams or component-level explanations. Link to `DESIGN/` instead.
+- Detailed architectural diagrams or component-level explanations. Link to `docs/` instead.
 - Implementation specifics, internal API documentation, code-level conventions.
 - Working notes, decision logs, refinements to the design.
 - LLM agent instructions (those go in `CLAUDE.md`).
 
-**Update cadence.** Stable. Edit the README when something user-facing changes: project status, top-level positioning, install steps, supported deployment shapes. Do not edit it for internal architectural refinements — those go in `DESIGN/`.
+**Update cadence.** Stable. Edit the README when something user-facing changes: project status, top-level positioning, install steps, supported deployment shapes. Do not edit it for internal architectural refinements — those go in `docs/`.
 
 ### 2. `/CLAUDE.md` — for LLM agents working in the repo
 
@@ -40,16 +40,16 @@ This document explains what belongs where, when to update each, and the conventi
 - The load-bearing architectural principles that constrain implementation choices.
 - The "out of scope" list at a glance, so the agent does not propose features that have been deliberately excluded.
 - Project-specific conventions that diverge from generic best practices.
-- Pointers — not duplicated content — to the deeper documentation in `DESIGN/`.
+- Pointers — not duplicated content — to the deeper documentation in `docs/`.
 
 **Tone and depth.** Direct, prescriptive, context-dense. Written for an audience that will read every word and act on it. Bullet points and short imperative sentences over long prose.
 
 **What does NOT belong here.**
 
 - General advice that applies to any Python project.
-- Reproduction of content already in `DESIGN/` — link instead.
+- Reproduction of content already in `docs/` — link instead.
 - User-facing marketing-style framing (that lives in the README).
-- Implementation detail. CLAUDE.md should remain stable; let `DESIGN/` churn instead.
+- Implementation detail. CLAUDE.md should remain stable; let `docs/` churn instead.
 
 **Update cadence.** Stable, but more reactive than the README. Update CLAUDE.md when:
 
@@ -59,7 +59,7 @@ This document explains what belongs where, when to update each, and the conventi
 
 Do not let CLAUDE.md grow into a wiki — its value comes from being short enough to be loaded and respected at the start of every session.
 
-### 3. `DESIGN/` — the technical wiki
+### 3. `docs/` — the technical wiki
 
 **Audience.** Anyone working on or thinking about the project's architecture and implementation. Equally useful to humans (the project owner, future contributors) and LLM agents.
 
@@ -95,10 +95,10 @@ When you have new information to write down, ask:
 |---|---|
 | Will a non-developer visitor want to see this? | `README.md` |
 | Is it an instruction or constraint specific to LLM agents? | `CLAUDE.md` |
-| Is it architectural detail, a decision rationale, or an implementation plan? | `DESIGN/` (and indexed in `INDEX.md`) |
+| Is it architectural detail, a decision rationale, or an implementation plan? | `docs/` (and indexed in `INDEX.md`) |
 | Is it useful for *current task only* and not future readers? | Don't write it down — keep it in the conversation. |
 
-If a piece of content seems to belong in two places, prefer `DESIGN/` and link to it from the others. The README and CLAUDE.md should stay short; `DESIGN/` is where length is acceptable.
+If a piece of content seems to belong in two places, prefer `docs/` and link to it from the others. The README and CLAUDE.md should stay short; `docs/` is where length is acceptable.
 
 ## Conventions for new design documents
 
@@ -112,6 +112,6 @@ If a piece of content seems to belong in two places, prefer `DESIGN/` and link t
 
 ## Why three surfaces and not one
 
-A single `README` would either be too long for new visitors or too shallow for working contributors. A single `CLAUDE.md` would either pull in agent-irrelevant marketing content or omit the implementation depth that contributors need. A `DESIGN/` folder without a top-level entry point would be invisible to drive-by visitors and unhelpful to LLM agents that must decide what to read.
+A single `README` would either be too long for new visitors or too shallow for working contributors. A single `CLAUDE.md` would either pull in agent-irrelevant marketing content or omit the implementation depth that contributors need. A `docs/` folder without a top-level entry point would be invisible to drive-by visitors and unhelpful to LLM agents that must decide what to read.
 
 Three surfaces, each focused on one audience, linking to each other where helpful. The cost is some discipline around what goes where; the benefit is each surface stays useful to its audience for the long haul.

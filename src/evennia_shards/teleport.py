@@ -75,7 +75,7 @@ class ShardAwareCmdTeleport(CmdTeleport):
            refuse with a "not yet implemented" message. Subsequent
            commits implement these branches one at a time.
 
-    Per-branch implementation strategy lives in DESIGN/ once the
+    Per-branch implementation strategy lives in docs/ once the
     branches are filled in; the scaffold here just proves the dispatch
     structure is sound.
     """

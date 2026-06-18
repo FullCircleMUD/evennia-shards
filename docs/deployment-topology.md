@@ -115,7 +115,7 @@ The library's repository contains three demo gamedirs under `examples/` (`demo_r
 Discussed and agreed:
 
 - The demos' purpose is to drive library development (run them to test library changes end-to-end).
-- They are **not shipped** as part of the pip package — `[tool.setuptools.packages.find]` includes only `evennia_shards*`, excluding `examples/`, `tests/`, and `DESIGN/`.
+- They are **not shipped** as part of the pip package — `[tool.setuptools.packages.find]` includes only `evennia_shards*`, excluding `examples/`, `tests/`, and `docs/`.
 - They are **not a starting template** that consumers should clone. Real consumer games live in their own separate repositories.
 - Real consumer games depend on the library via `pip install evennia-shards` (once published) or `pip install git+https://github.com/.../evennia-shards.git`. They do not derive from or copy the demos.
 
