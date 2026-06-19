@@ -4,7 +4,7 @@ What this library provides and what it deliberately leaves to the consumer. The 
 
 ## Scope bound
 
-The library is bound to the **single-Postgres era** — from one Evennia process today through however many shards run against a single, vertically scaled Postgres. Per the [archived handover](../archive/evennia-shards-HANDOVER.md#project-identity-and-positioning), anything beyond that bound is explicitly out of scope.
+The library is bound to the **single-Postgres era** — from one Evennia process today through however many shards run against a single, vertically scaled Postgres. Per the [archived handover](archive/evennia-shards-HANDOVER.md#project-identity-and-positioning), anything beyond that bound is explicitly out of scope.
 
 ## Library primitives (working set)
 

@@ -96,7 +96,7 @@ The library assumes the consumer game has **exactly one HTTP webserver** in the 
 
 ### A note on Evennia's coupling
 
-Achieving "WebSocket-only" mode required some unpicking on the library's part. Evennia 6.0.0 (and earlier) registers the webclient WebSocket service **inside** the HTTP webserver setup — specifically nested in the loop that builds the reverse-proxy in [`PortalServerFactory.register_webserver`](../../venv/Lib/site-packages/evennia/server/portal/service.py#L177). Setting `WEBSERVER_ENABLED = False` cleanly disables the HTTP stack but takes the WebSocket down with it.
+Achieving "WebSocket-only" mode required some unpicking on the library's part. Evennia 6.0.0 (and earlier) registers the webclient WebSocket service **inside** the HTTP webserver setup — specifically nested in the loop that builds the reverse-proxy in `PortalServerFactory.register_webserver` (`evennia/server/portal/service.py`). Setting `WEBSERVER_ENABLED = False` cleanly disables the HTTP stack but takes the WebSocket down with it.
 
 The WebSocket has no architectural reason to be coupled to the HTTP webserver — it's a separate Twisted `TCPServer` on a separate port, listening for an entirely different protocol, sharing no state with the HTTP reverse-proxy, the AJAX webclient, or the Django views. The bundling appears to be incidental to the way `register_webserver` was originally laid out, not a deliberate design choice. (Compare the telnet and SSH protocols, which Evennia registers as top-level services on the Portal factory directly — exactly the level the WebSocket should be at.)
 

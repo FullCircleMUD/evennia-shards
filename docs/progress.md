@@ -71,7 +71,7 @@ Smoke-tested in the demo gamedirs with a non-Admin Builder account (`tim`):
 | tim (Builder, no Admin), `teleport:false()` on ball | cross-shard | refused with lock message |
 | tim (Builder, no Admin), `teleport:false()` on ball | local | refused with **same** lock message (vanilla parity) |
 
-The smoke test surfaced a separate Evennia subtlety worth noting for future test setup: `cmd:perm(Builder)` on `@tel` checks the **account's** permissions via the lockfunc (see [`evennia/locks/lockfuncs.py:163`](file:///c:/Users/micro/Documents/FCM/libraries/evennia-shards/venv/Lib/site-packages/evennia/locks/lockfuncs.py#L163)), whereas our in-func `caller.permissions.check("Admin")` checks the character's. Granting Builder to a character alone leaves the command invisible; the account also needs the permission (`@perm/account tim = Builder`). Two separate permission surfaces, both come into play.
+The smoke test surfaced a separate Evennia subtlety worth noting for future test setup: `cmd:perm(Builder)` on `@tel` checks the **account's** permissions via the lockfunc (see `evennia/locks/lockfuncs.py:163`), whereas our in-func `caller.permissions.check("Admin")` checks the character's. Granting Builder to a character alone leaves the command invisible; the account also needs the permission (`@perm/account tim = Builder`). Two separate permission surfaces, both come into play.
 
 **Files:** `src/evennia_shards/teleport.py` (new check + trimmed skipped-behaviour comment), `src/evennia_shards/tests.py` (3 new tests: lock-blocks-non-admin, Admin-bypass, non-Admin-allowed-when-obj-grants-access; `_FakeCaller` extended with `permissions.check` / `access` surfaces). Suite at 263. `docs/library-integration-risks.md` § `CmdTeleport` updated. Branch: `shard-aware-teleport`.
 
@@ -202,7 +202,7 @@ launcher. All three came up cleanly and listened on their per-role ports.
 
 **Why it works.** Evennia's launcher gates the `--pidfile` argument
 passed to `twistd` on `os.name != "nt"`
-([`evennia_launcher.py:529-532`](../../venv/Lib/site-packages/evennia/server/evennia_launcher.py#L529)).
+(`evennia/server/evennia_launcher.py:529-532`).
 On Windows that branch is skipped: `twistd` is never told to write
 `<gamedir>/server/server.pid` or `<gamedir>/server/portal.pid`, so two
 `evennia start` invocations from the same folder don't fight over those
@@ -404,9 +404,9 @@ Three findings worth recording for future work:
 
 The shard isolation mechanism was reorganised into a dedicated module and gained the long-anticipated bypass primitive — together they're the foundation Phase 2's `cross_shard_move` will be built on.
 
-**Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into [`evennia_shards/isolation.py`](../src/evennia_shards/isolation.py). `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
+**Refactor.** The four chokepoints (`pre_save`, `pre_delete`, `from_db`, `QuerySet.update`) were extracted from `apps.py` into `evennia_shards/isolation.py`. `apps.py` now calls a single `install_chokepoints()` entry point. Pure relocation, no behavioural change — the existing chokepoint test suite (~30 cases) passed without modification.
 
-**Bypass primitive.** [`shard_writes_allowed_for(*objs)`](../src/evennia_shards/isolation.py) — a context manager that lifts the chokepoints for specific objects within a `with` block. Tracks identity two ways:
+**Bypass primitive.** `shard_writes_allowed_for(*objs)` — a context manager that lifts the chokepoints for specific objects within a `with` block. Tracks identity two ways:
 
 - `id(instance)` — checked by `pre_save` and `pre_delete` (instance-receiving chokepoints). Works for unsaved rows.
 - `(concrete_model, pk)` — checked by `from_db` and `QuerySet.update` (which receive class + pk, not the instance). Normalised via `_meta.concrete_model` so a bypass entered with an Evennia typeclass instance (a Django proxy of `ObjectDB`) matches `from_db` calls where `cls` is `ObjectDB` itself.
