@@ -54,7 +54,6 @@ Notable entry points:
 
 - **[docs/INDEX.md](docs/INDEX.md)** — map of all design documents.
 - **[docs/progress.md](docs/progress.md)** — running log of milestones with links to evidence (test results, design docs, code changes).
-- **[docs/documentation-structure.md](docs/documentation-structure.md)** — what belongs in CLAUDE.md vs README.md vs docs/, and conventions for new design docs.
 - **[docs/archive/evennia-shards-HANDOVER.md](docs/archive/evennia-shards-HANDOVER.md)** — the original brainstorm session that started this project. Archived as historical context; current decisions extend and refine it.
 - **[CLAUDE.md](CLAUDE.md)** — instructions for LLM agents working in this repo.
 

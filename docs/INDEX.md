@@ -6,9 +6,8 @@ If you are an LLM agent picking up work in this repository, also read [`/CLAUDE.
 
 ## Conventions
 
-- **Naming.** Index-style files (this one, `CLAUDE.md`, `README.md`) use shouty UPPERCASE. Content design documents use kebab-case (`documentation-structure.md`, `phase-1-poc-plan.md`). The seed handover keeps its existing name (`evennia-shards-HANDOVER.md`) for traceability.
+- **Naming.** Index-style files (this one, `CLAUDE.md`, `README.md`) use shouty UPPERCASE. Content design documents use kebab-case (`tenancy.md`, `phase-1-poc-plan.md`). The seed handover keeps its existing name (`evennia-shards-HANDOVER.md`) for traceability.
 - **Adding a doc.** Create the file in `docs/` with a descriptive kebab-case filename, then add a one-line entry to the catalogue below in the appropriate section.
-- **Document structure.** See [documentation-structure.md](documentation-structure.md) for what kinds of content belong in `docs/` (vs. `CLAUDE.md` or `README.md`).
 
 ## Catalogue
 
@@ -16,7 +15,6 @@ If you are an LLM agent picking up work in this repository, also read [`/CLAUDE.
 
 Documents about how the documentation itself is organised.
 
-- **[documentation-structure.md](documentation-structure.md)** — How the three documentation surfaces (`CLAUDE.md`, `README.md`, `docs/`) are intended to be used. When to update each. Conventions for new design docs.
 - **[open-questions.md](open-questions.md)** — Tracker for design questions raised in conversation but not yet resolved. Items are removed as they get folded into permanent docs.
 
 ### Architecture and design substrate
@@ -69,8 +67,7 @@ Different audiences should walk through the docs in different orders. Pick the p
 ### "I am new to the project — orient me."
 
 1. [`/README.md`](../README.md) — what the project is and isn't.
-2. [documentation-structure.md](documentation-structure.md) — how the docs are organised.
-3. [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — historical brainstorm; useful for the architectural sketch as first imagined. *Not authoritative.* Current decisions extend and refine it.
+2. [archive/evennia-shards-HANDOVER.md](archive/evennia-shards-HANDOVER.md) — historical brainstorm; useful for the architectural sketch as first imagined. *Not authoritative.* Current decisions extend and refine it.
 
 ### "I am an LLM agent picking up an implementation task."
 
