@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 """Django AppConfig for evennia-shards.
 
 Only loaded when the consumer adds `evennia_shards` to `INSTALLED_APPS`,

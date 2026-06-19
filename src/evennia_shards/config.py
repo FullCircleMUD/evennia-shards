@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 """Read shards-related configuration from Django settings.
 
 Always use these accessors rather than reading `settings.SHARDS_ROLE` /

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
 """evennia-shards: optional split deployment and sharding for Evennia."""
 
 from .config import (
