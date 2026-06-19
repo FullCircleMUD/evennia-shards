@@ -1,7 +1,5 @@
 # Ticket-Based Authentication Flow
 
-## Overview
-
 When a player goes IC on the router, the router creates a single-use ticket and redirects the client to the target shard. The shard validates the ticket on connection, authenticates the session, puppets the character, and deletes the ticket.
 
 ## Flow
