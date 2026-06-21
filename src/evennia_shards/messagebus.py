@@ -180,12 +180,12 @@ class MessageHandler:
         send and receive" is noise. Consumers wanting different
         semantics can override.
 
-        Misroute safety: if the row exists but is owned by another
-        shard, ``ObjectDB.objects.get`` raises ``ShardIsolationError``
-        via the ``from_db`` chokepoint — caught by ``process_inbox``
-        and treated as defer, eventually triggering
-        ``undeliverable_reply`` to the sender. Loud failure on
-        misroute, by construction.
+        Misroute semantics: if the row is owned by another shard, the
+        django-multitenant tenant filter excludes it, so
+        ``ObjectDB.objects.get`` raises ``DoesNotExist`` — the same
+        path as target-gone: logged and consumed (dropped), not
+        deferred. The send side targets the owning shard, so a
+        misrouted obj_msg should not arise in normal operation.
         """
         from evennia.objects.models import ObjectDB
 
@@ -211,10 +211,10 @@ class MessageHandler:
         ``AccountDB``. ``Account.msg`` handles fanout to all of the
         account's sessions on this shard.
 
-        Target-gone and misroute semantics match ``_handle_obj_msg``.
-        AccountDB has no shard-isolation chokepoint (accounts are
-        router-owned and global), so misroute manifests as a
-        ``DoesNotExist`` rather than a chokepoint raise.
+        Target-gone and misroute semantics match ``_handle_obj_msg``:
+        a missing or non-local row raises ``DoesNotExist`` and is
+        logged and consumed. Accounts are router-owned and global, so
+        they are not tenant-scoped.
         """
         from evennia.accounts.models import AccountDB
 
@@ -300,12 +300,12 @@ class MessageHandler:
         Target-gone semantics: room missing → log warning, return
         ``True`` (consumed). Matches ``_handle_obj_msg``.
 
-        Misroute safety: ``ObjectDB.objects.get(pk=room_pk)`` trips
-        the ``from_db`` chokepoint if the room is on another shard —
-        caught by ``process_inbox`` and treated as defer, eventually
-        triggering ``undeliverable_reply``. Loud failure on misroute
-        of the primary target. The optional pks are caught locally so
-        a stale hint can't time-bomb the whole message.
+        Misroute semantics: if the room is owned by another shard, the
+        django-multitenant tenant filter excludes it, so
+        ``ObjectDB.objects.get(pk=room_pk)`` raises ``DoesNotExist`` —
+        the same path as target-gone: logged and consumed (dropped),
+        not deferred. The optional pks are caught locally so a stale
+        hint can't time-bomb the whole message.
 
         Primary current consumer: the ``ShardAwareCmdTeleport``
         cross-shard branch publishes ``room_msg`` for arrival

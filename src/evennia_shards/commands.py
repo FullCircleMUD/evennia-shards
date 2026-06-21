@@ -156,11 +156,11 @@ class ShardAwareCmdOOC(CmdOOC):
     - **Monolith**: never injected (original ``CmdOOC`` stays).
 
     No explicit ``unpuppet_object()`` call is needed here. The redirect
-    triggers a full page navigation (``window.location.href``), which
-    closes the WebSocket connection. Evennia's disconnect handler
-    (``sessionhandler.disconnect()`` → ``account.unpuppet_object()``)
-    automatically releases the character on the shard when the
-    connection drops.
+    sends a ``shard_redirect`` OOB message; the webclient JS closes the
+    current WebSocket and opens a new one to the router (no page reload).
+    Evennia's disconnect handler (``sessionhandler.disconnect()`` →
+    ``account.unpuppet_object()``) automatically releases the character
+    on the shard when that WebSocket drops.
     """
 
     def func(self):

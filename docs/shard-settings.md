@@ -43,8 +43,8 @@ The accessors live in [`evennia_shards/config.py`](../src/evennia_shards/config.
 ## Why this shape
 
 - **Monolith consumers configure nothing.** No required declarations, no library-provided settings module to inherit from. The default behaviour (do nothing) is genuinely the default — declaring it would be redundant.
-- **Non-monolith consumers add at most two lines.** Just `SHARDS_ROLE` (and `SHARD_ID` for shard role) in their existing `settings.py`. No import changes, no app registrations.
-- **The library is not a Django app.** It exposes Python functions, not models/admin/signals/URLs. Adding it to `INSTALLED_APPS` is unnecessary today. If a future feature needs Django-level integration, that's the trigger to revisit — not now.
+- **Non-monolith consumers register the app and set the role.** `SHARDS_ROLE` (and `SHARD_ID` for the shard role) in their existing `settings.py`, plus `INSTALLED_APPS += ["evennia_shards"]` — registering the app is what loads the library's models and runs its `AppConfig.ready()`.
+- **The library is a Django app.** It ships models (`Message`, `Ticket`) with migrations and an `AppConfig` whose `ready()` installs the library's runtime integration in non-monolith roles — tenant isolation, the WebSocket protocol override and redirect middleware, the Portal-services plugin, and the shard-aware account/command patches. `ready()` is gated on the role, so in monolith it no-ops and registration is unnecessary.
 - **`getattr` defaults centralise the contract.** Library code always reads through the accessors, so the fallback value is defined in exactly one place. Adding a new setting later means adding one accessor; consumers automatically get the new default without changes.
 
 ## Reading the settings
