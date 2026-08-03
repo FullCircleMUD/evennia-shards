@@ -493,6 +493,71 @@ class AutoStampAndFilterTests(BaseEvenniaTestCase):
         )
         self.assertEqual(sorted(rows), [(k, "shard0") for k in keys])
 
+    def test_bulk_update_scopes_to_current_shard(self):
+        # bulk_update has no patch of its own — unlike bulk_create,
+        # which needs one because Django skips pre_save on bulk insert.
+        # It inherits the boundary two ways: the call routes through the
+        # patched manager's get_queryset, and the UPDATE ... WHERE pk IN
+        # (...) it compiles to picks up multitenant's wrap_update_batch
+        # decorator. Neither is bulk_update-specific, so this pins the
+        # inherited behaviour: a foreign row named in the same batch is
+        # a silent no-op, matching save() and qs.update().
+        local = ObjectDB.objects.create(
+            db_key="bulk_upd_local", db_typeclass_path=TYPECLASS,
+        )
+        foreign = ObjectDB.objects.create(
+            db_key="bulk_upd_foreign", db_typeclass_path=TYPECLASS,
+        )
+        _forge_db_shard(foreign.pk, "shard1")
+
+        from evennia.utils.idmapper.models import flush_cache
+
+        flush_cache()
+
+        local.db_key = "bulk_upd_local_changed"
+        foreign.db_key = "bulk_upd_foreign_changed"
+        ObjectDB.objects.bulk_update([local, foreign], ["db_key"])
+
+        # Read past the auto-filter so both rows are visible.
+        with shard_context(None):
+            stored = dict(
+                ObjectDB.objects.filter(pk__in=[local.pk, foreign.pk])
+                .values_list("pk", "db_key")
+            )
+        self.assertEqual(stored[local.pk], "bulk_upd_local_changed")
+        self.assertEqual(stored[foreign.pk], "bulk_upd_foreign")
+
+    def test_bulk_update_can_reassign_shard_id(self):
+        # Pinned as known, accepted behaviour. save() refuses tenant
+        # column mutation — __setattr__ flags it and save() raises (see
+        # test_immutability_check_still_protects_against_save_path).
+        # bulk_update never consults that flag, so naming shard_id in
+        # its field list reassigns tenancy the same way
+        # cross_shard_move's qs.update deliberately does. Same escape
+        # hatch, different door; recorded here so a future caller finds
+        # it in the suite rather than in production.
+        #
+        # If this ever fails because the write was refused, the library
+        # got stricter rather than looser — flip the assertion and note
+        # the new behaviour in docs/tenancy.md.
+        from django.db.utils import NotSupportedError
+
+        obj = ObjectDB.objects.create(
+            db_key="bulk_upd_tenant", db_typeclass_path=TYPECLASS,
+        )
+        obj.shard_id = "shard1"  # flags _try_update_tenant
+
+        with self.assertRaises(NotSupportedError):
+            obj.save()  # the flag is honoured on the save path...
+
+        ObjectDB.objects.bulk_update([obj], ["shard_id"])  # ...not here
+
+        with shard_context(None):
+            stored = ObjectDB.objects.filter(pk=obj.pk).values_list(
+                "shard_id", flat=True,
+            )[0]
+        self.assertEqual(stored, "shard1")
+
     def test_bulk_delete_scopes_to_current_shard(self):
         # ``QuerySet.delete()`` and the underlying Collector route
         # through the wrap_delete + related_objects decorators that

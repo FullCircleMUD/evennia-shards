@@ -129,6 +129,8 @@ The patch wraps rather than replaces multitenant's `TenantManagerMixin.get_query
 
 `bulk_create` is patched explicitly because Django bypasses `pre_save` for bulk inserts; we have to stamp each unsaved instance ourselves before delegating to the original.
 
+`bulk_update` deliberately has **no** equivalent patch. It needs none: the call routes through the patched `get_queryset` above, and the `UPDATE ... WHERE pk IN (...)` it compiles to also picks up the `wrap_update_batch` decorator from §2.4. Both layers are generic rather than `bulk_update`-specific, so the behaviour is inherited rather than implemented — which is why it is pinned by test rather than by code. See `AutoStampAndFilterTests.test_bulk_update_scopes_to_current_shard` (foreign rows in a batch are a silent no-op) and `test_bulk_update_can_reassign_shard_id` (the tenant-column escape, below).
+
 ## What's active after install
 
 From the moment `ready()` returns:
@@ -141,7 +143,9 @@ From the moment `ready()` returns:
 | `obj.delete()` | DELETE WHERE same filter |
 | `qs.update(**fields)` / `qs.delete()` | Bulk operations with tenant filter, including cascade collection |
 | `ObjectDB.objects.bulk_create([...])` | Each instance auto-stamped before insert |
+| `ObjectDB.objects.bulk_update([...], fields)` | Tenant filter inherited, no dedicated patch — current-shard and global rows update; foreign rows named in the same batch are a silent no-op |
 | `obj.shard_id = "other"` then `obj.save()` | Raises `NotSupportedError` — tenant column is immutable |
+| `ObjectDB.objects.bulk_update([obj], ["shard_id"])` | **Reassigns the tenant column.** The immutability check lives on `__setattr__` + `save()`, which this path never touches — the same deliberate escape `cross_shard_move` takes via `qs.update`, reached by a different door |
 | `with shard_context("shard1"):` | All of the above behaves as `shard1` (or unscoped if `None`) inside the block |
 
 All of Evennia core and any consumer game code inherits this transparently. No call-site changes required.
