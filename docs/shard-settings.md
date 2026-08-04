@@ -67,7 +67,23 @@ The primary caller is library code (it reads the role to decide what to register
 
 ## Row-level `shard_id` and the global sentinel
 
-The library also adds a `shard_id` column to `ObjectDB` (and likely other partitioned models in future) that tags each row with its owning shard. Most rows hold a specific shard identifier (e.g. `"shard0"`); the sentinel value `"*"` denotes a row owned by *all* shards — used for system-wide entities like global scripts that must run on every shard process. Global rows are instantiated independently on each shard, so any mutable per-instance state does not coordinate across shards without explicit cross-shard messaging.
+The library adds a `shard_id` column to `ObjectDB`, tagging each row with its owning shard. Most rows hold a specific shard identifier (e.g. `"shard0"`); the sentinel value `"*"` denotes a row visible from *every* shard. A `"*"` row is instantiated independently in each shard process, so mutable per-instance state on it does not coordinate across shards without explicit cross-shard messaging.
+
+Tenancy is installed on `ObjectDB` and nothing else — see [tenancy.md](tenancy.md). No other model carries a `shard_id` column, including `ScriptDB`; see below for what that means for global scripts.
+
+## Global scripts run one instance per process
+
+`ScriptDB` is not tenant-scoped and carries no `shard_id` column, so a persistent global script is a **single row visible to every process**. What is per-process is the *running instance*: a script's `ndb` is in-memory, so each Server process attaches its own Twisted `LoopingCall` to that shared row and ticks independently of the others.
+
+The consequence for consumers: in an N-shard deployment a global script's tick fires **N times per interval**, once in each process. Whether that is correct depends entirely on what the script does.
+
+**Safe per-process** — scripts that hold no persistent state (counters on `ndb`, never `db`) and act only on process-local data. The canonical shape is walking `SESSION_HANDLER` and mutating the puppets connected to *this* process: `SessionHandler` is a plain in-memory `dict` per Server process and `get_puppet()` is an attribute read, so a process structurally cannot see another shard's sessions. Such a script needs no shard scoping, because it issues no query to scope.
+
+**Not safe per-process** — scripts that query the world, aggregate, or produce side-effects that must happen once. Under the auto-filter each process silently sees only its own shard's rows, so the script does a partial job *and* emits its side-effect once per process. Note the failure mode is quiet: before django-multitenant an unscoped query raised, now it just returns a subset. "Starts with no errors" is not evidence such a script is correct.
+
+The library provides **no** "run exactly once across the cluster" mechanism. A consumer needing a singleton must gate it themselves — by role, by nominating one shard, or by their own election.
+
+> Established by reading the boot path (`run_init_hooks` calls `at_server_start()` before `evennia.GLOBAL_SCRIPTS.start()`, so `ndb._task` is empty when a consumer's boot hook runs) and the script sources. Live confirmation on a running multi-shard deployment is still outstanding.
 
 ## URL settings and redirect routing
 
