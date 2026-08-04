@@ -12,6 +12,25 @@ How the library's configuration items are declared, read, and defaulted.
 | `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
 | `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to **WebSocket** URLs (e.g. `"ws://shard0.example.com/"`). Used by the router for IC redirect: same connection-level swap as `ROUTER_URL`, in the other direction. Shard IDs are flexible — name them to match your game world. |
 
+### One Evennia setting you must also change
+
+```python
+TIME_IGNORE_DOWNTIMES = True
+```
+
+Not a library setting, but leaving it at Evennia's default of `False` is **unsafe in any
+multi-process deployment**. That default derives game time from an uptime accumulator held
+in a per-process module global and written back to one shared row every 60 seconds — safe
+for the single Server process Evennia assumes, and a last-write-wins race between N
+processes that never re-read it. Game time can end up moving backwards.
+
+The wall-clock branch derives from the OS clock and a database constant written once, so
+every process agrees with no coordination. The trade is that game time advances while the
+server is down.
+
+Full reasoning, what it costs, how to verify it, and the single-writer design to build if
+you genuinely need downtime excluded: **[game-time.md](game-time.md)**.
+
 ## How they flow
 
 The library does **not** ship a settings module. It does not write to Django's settings registry, mutate `INSTALLED_APPS`, or modify the consumer's `settings.py`. The flow is one-directional:
