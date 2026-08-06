@@ -240,6 +240,12 @@ portal.pid
 web/static/
 web/static_collected/
 
-# Evennia test side-effects (collectstatic + suite-run artefacts)
-server/
+# Evennia test side-effects (collectstatic + suite-run artefacts).
+# Anchored to the repo root: unanchored, this matched every `server/`
+# directory at any depth, including the demo gamedirs' — which meant
+# examples/*/server/logs/ could never be tracked. Evennia refuses to
+# start when that directory is missing, so a fresh clone failed until
+# the operator recreated it by hand. The gamedirs' own .gitignore files
+# already exclude the contents (*.log, *.pid, *.db3, secret_settings.py).
+/server/
 ops/evennia-suite-runs/
