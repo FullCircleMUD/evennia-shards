@@ -13,6 +13,13 @@ requires-python = ">=3.10"
 dependencies = [
     "evennia",
     "django-multitenant",
+    # macOS only. Apple's /usr/lib/libsqlite3.dylib runs sqlite3_initialize()
+    # through libdispatch, which cannot survive the fork twistd uses to
+    # daemonize — so `evennia start` hangs silently on the child's first
+    # SQLite call. sqlean ships a statically-linked SQLite, so Apple's library
+    # is never loaded. The marker means pip skips it everywhere else.
+    # See docs/deployment-topology.md § macOS.
+    "sqlean.py; sys_platform == 'darwin'",
 ]
 
 [tool.setuptools.packages.find]
