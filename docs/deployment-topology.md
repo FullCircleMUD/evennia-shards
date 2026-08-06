@@ -50,6 +50,57 @@ The workaround is **view gamedirs**: a thin directory per role that symlinks bac
 
 The demo ships the recipe and the symlink commands in [`examples/README.md`](../examples/README.md). Library-shipped view-creation tooling was considered and explicitly *not* shipped — the demo's recipe is small, the Unix case is the only one that needs it, and inventing a cross-OS helper turns out to be more surface than the problem warrants (see [progress.md](progress.md) for the decision).
 
+### macOS: a non-Apple SQLite build is required
+
+On macOS, SQLite must come from a bundled build rather than the system library. Without it, `evennia start` **hangs forever with no error** — the launcher prints `Server starting  ...` and never returns.
+
+The cause is a three-way interaction:
+
+1. macOS links Python's `sqlite3` module against `/usr/lib/libsqlite3.dylib`. Apple's build drives `sqlite3_initialize()` through **libdispatch**.
+2. **libdispatch does not survive `fork()`.** A forked child inherits dispatch queues with no worker threads to service them; Apple's own guidance is that only async-signal-safe calls are legal between `fork()` and `exec()`.
+3. `twistd` daemonizes with a **double fork** and never `exec()`s.
+
+So once any SQLite connection has been opened, every subsequent SQLite call in the daemonized child blocks on a dispatch queue that can never run. And a connection is always open by then: `evennia._init()` imports `evennia/utils/gametime.py`, which runs a `ServerConfig` query at module scope.
+
+The failure gives you nothing to work with. There is no exception, no timeout, and no traceback — `sqlite3.connect(":memory:")` blocks indefinitely even though it touches no file and takes no locks. `server.log` stops after `reactor class:`, because the daemon's stdout and stderr are redirected to `/dev/null` before it dies. The `twistd` parent waits on a startup pipe the child never writes to, leaving a `<defunct>` child and a launcher that appears wedged.
+
+This is why the problem is invisible until it isn't:
+
+| | forks? | affected |
+|---|---|---|
+| Windows | no — `_twistd_unix` doesn't load | no |
+| `--nodaemon` (any OS) | no | no |
+| Linux | yes, but no libdispatch | no |
+| Production (Postgres) | — no SQLite in the process | no |
+| **macOS, `evennia start`** | **yes** | **yes** |
+
+Nothing in this library or in a consumer's code is implicated. It is reachable by any forking Evennia start on macOS.
+
+**The fix** is to swap in a statically-linked SQLite so Apple's library is never loaded. The demo does this at the top of `settings_common_shard_config.py`, gated on `sys.platform == "darwin"` and guarded by `try/except ImportError`, so Linux and production keep the stdlib module and the block is inert:
+
+```python
+if sys.platform == "darwin":
+    try:
+        import sqlean, sqlean.dbapi2
+        ...                                    # see the settings file
+        sys.modules["sqlite3"] = sqlean
+        sys.modules["sqlite3.dbapi2"] = sqlean.dbapi2
+    except ImportError:
+        pass
+```
+
+Two constraints. The swap **must run before anything imports `sqlite3`** — once the stdlib module is cached, Django's backend gets Apple's build regardless. And `sqlean`'s DBAPI predates `Connection.getlimit()`, which Django 6 calls when sizing `bulk_create` batches; since its `Connection` is an immutable C type, the method is added via a subclass passed as `connect(factory=...)`.
+
+Install with `pip install sqlean.py`, or as a platform-scoped requirement:
+
+```
+sqlean.py; sys_platform == "darwin"
+```
+
+Bear in mind the bundled SQLite is a different version from Apple's. The on-disk format is stable, so existing databases open unchanged, but it is worth one test-suite run after adopting it.
+
+*One thing remains unexplained: plain Evennia (no `evennia_shards`) opens the same pre-fork connection and yet starts normally on macOS. The mechanism above is confirmed by direct experiment — an identical double-fork test hangs on Apple's SQLite and passes on the bundled one — but why vanilla escapes it is not established. Treat vanilla's survival as unexplained rather than as evidence of immunity.*
+
 ### Shared properties (both OSes)
 
 Regardless of OS, all processes:

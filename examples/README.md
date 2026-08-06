@@ -72,6 +72,17 @@ to resolve symlinks back to the real conf directory.
 
 ## Quick start
 
+### macOS prerequisite
+
+```bash
+pip install sqlean.py
+```
+
+Without it `evennia start` hangs at `Server starting  ...` and never returns. Apple's system SQLite runs `sqlite3_initialize()` through libdispatch, which cannot survive the fork `twistd` uses to daemonize, so the daemon blocks on its first SQLite call — silently, with no error in any log. `settings_common_shard_config.py` swaps in the bundled build, gated on `sys.platform == "darwin"`. Full explanation in
+[`docs/deployment-topology.md` § macOS](../docs/deployment-topology.md#macos-a-non-apple-sqlite-build-is-required).
+
+Not needed on Windows or Linux. `evennia start --nodaemon` also sidesteps it, since it never forks.
+
 ### Boot order (both OSes)
 
 Boot `shard0` first. Evennia's initial-setup runs on the first
