@@ -11,6 +11,7 @@ See docs/ticket-auth-flow.md for the full flow.
 """
 
 import json
+import uuid
 from urllib.parse import parse_qs, urlparse
 
 from django.conf import settings
@@ -195,6 +196,50 @@ class ShardWebSocketClient(_BASE_WS_CLASS):
         self.transport.setTcpKeepAlive(1)
         # Actually do the connection.
         self.sessionhandler.connect(self)
+
+        # Stamp a stable per-connection token so disconnect() can reliably
+        # detect *this* connection is the one being closed, regardless of
+        # nonce drift (see disconnect() below).
+        self._shards_ws_token = str(uuid.uuid4())
+        if csession:
+            csession["shards_ws_session_token"] = self._shards_ws_token
+            csession.save()
+
+    def disconnect(self, reason=None):
+        """Clear the Django auth session on a clean disconnect.
+
+        Evennia's default disconnect() only clears webclient_authenticated_uid,
+        guarded by a nonce that SharedLoginMiddleware increments on every HTTP
+        request — by the time disconnect() fires the nonce has almost always
+        drifted, so the guard silently fails and the uid is never cleared.
+
+        Even when it is cleared, SharedLoginMiddleware's shared-login sync
+        (make_shared_login()) re-authenticates the webclient from the Django
+        auth session (_auth_user_id) on the very next HTTP request — e.g. a
+        hard browser refresh — regardless of webclient_authenticated_uid.
+        Default disconnect() never touches those keys.
+
+        Fix: use the stable token stamped in onOpen() instead of the drifting
+        nonce, and on a match clear both the webclient keys and the Django
+        auth session keys so SharedLoginMiddleware cannot reinstate the
+        session on reconnect. Delegates to super().disconnect() so whatever
+        the consumer's own class does still runs, and socket teardown
+        happens exactly once.
+        """
+        csession = self.get_client_session()
+        if csession:
+            stored_token = csession.get("shards_ws_session_token")
+            our_token = getattr(self, "_shards_ws_token", None)
+            if stored_token and stored_token == our_token:
+                csession["webclient_authenticated_uid"] = None
+                csession["webclient_authenticated_nonce"] = 0
+                csession["website_authenticated_uid"] = None
+                csession["shards_ws_session_token"] = None
+                csession.pop("_auth_user_id", None)
+                csession.pop("_auth_user_backend", None)
+                csession.pop("_auth_user_hash", None)
+                csession.save()
+        super().disconnect(reason)
 
     # -- Helpers --------------------------------------------------------
 
