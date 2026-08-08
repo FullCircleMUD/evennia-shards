@@ -12,7 +12,7 @@ Each coupling section follows the same template:
 - **Risk on Evennia upgrade** — what to diff in the new Evennia version.
 - **Risk in consumer override** — what consumer-side customisation would collide, and the recommended pattern.
 
-This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `DefaultAccount.at_post_login`, `Account.create_character`, `CmdIC` / `CmdOOC` (hard overrides — library territory), `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`, webclient HTML injection (middleware regex match against the rendered template), `PORTAL_SERVICES_PLUGIN_MODULES` injection (Portal-side WebSocket registration when `WEBSERVER_ENABLED = False`). Other library couplings (`ObjectDB.from_db`, `pre_save`/`pre_delete` signals, `QuerySet.update`, `WEBSOCKET_PROTOCOL_CLASS` rewiring) will be backfilled as we revisit them.
+This doc is filled in lazily — a coupling is added when it first lands or is next touched. Currently covered: `WebSocketClient.onOpen`, `WebSocketClient.disconnect`, `DefaultAccount.at_post_login`, `Account.create_character`, `CmdIC` / `CmdOOC` (hard overrides — library territory), `evennia._init()` wrap + `CharacterCmdSet.at_cmdset_creation`, webclient HTML injection (middleware regex match against the rendered template), `PORTAL_SERVICES_PLUGIN_MODULES` injection (Portal-side WebSocket registration when `WEBSERVER_ENABLED = False`). Other library couplings (`ObjectDB.from_db`, `pre_save`/`pre_delete` signals, `QuerySet.update`, `WEBSOCKET_PROTOCOL_CLASS` rewiring) will be backfilled as we revisit them.
 
 ## WebSocketClient.onOpen() override
 
@@ -44,6 +44,35 @@ How to check: diff the upstream `onOpen()` against the snapshot in our override.
 A consumer that sets a custom `WEBSOCKET_PROTOCOL_CLASS` is **safe by construction**: `AppConfig.ready()` stashes the consumer's class as `_SHARDS_ORIGINAL_WS_PROTOCOL` and `ShardWebSocketClient` subclasses *that* dynamically. Consumer customisations are preserved underneath the library's onOpen logic.
 
 The hazard is a consumer overriding `onOpen()` on their custom class without calling `super().onOpen()` — that bypasses our ticket-auth injection entirely. Recommended pattern: any consumer override of `onOpen()` must call `super().onOpen()` (or accept that ticket-auth will not run on their connections).
+
+## ShardWebSocketClient.disconnect() override
+
+**What we patch / extend:** `evennia_shards/protocols.py` → `ShardWebSocketClient.disconnect()`. Prior to this override, `ShardWebSocketClient` had no `disconnect()` of its own — the method resolved via MRO to whatever the consumer's configured `WEBSOCKET_PROTOCOL_CLASS` provided, or Evennia's own `WebSocketClient.disconnect()` if none. Based on Evennia 6.0.0/6.1.0.
+
+**Why:**
+
+Evennia's default `disconnect()` clears `webclient_authenticated_uid`, guarded by a nonce (`webclient_authenticated_nonce`) captured at `onOpen()` time. `SharedLoginMiddleware.make_shared_login()` increments that nonce on *every* HTTP request against the Django session — not just websocket-related ones — so by the time a real disconnect fires, the nonce has almost always drifted past what was captured at connect time, and the guard silently fails to clear anything.
+
+Even when the nonce guard does pass, `SharedLoginMiddleware` re-authenticates the webclient from the Django auth session (`_auth_user_id`, set by the middleware's own `login()` call the first time a webclient-only session gets promoted) on the very next HTTP request — e.g. a hard browser refresh — regardless of `webclient_authenticated_uid`. Default `disconnect()` never touches those Django auth keys at all.
+
+Net effect without this override: quitting the game and then hard-refreshing the browser silently re-authenticates the player instead of showing a login screen — confirmed as a live bug in a router/shard deployment. Root cause traced to `ShardWebSocketClient.onOpen()`'s full reproduction of the base connect sequence (see the `onOpen()` section above) never giving a consumer's own `onOpen()`-time logic — including a consumer's own token-based disconnect guard — the chance to run, since it never calls `super().onOpen()`.
+
+The fix stamps a stable per-connection token in `onOpen()` (immune to nonce drift — set once at connect time, checked once at disconnect time, no dependency on HTTP request volume in between) and adds a `disconnect()` override that checks it and, on a match, clears both the webclient keys (`webclient_authenticated_uid`, `webclient_authenticated_nonce`, `website_authenticated_uid`) and the Django auth session keys (`_auth_user_id`, `_auth_user_backend`, `_auth_user_hash`) before delegating to `super().disconnect(reason)`.
+
+Unlike `onOpen()`, this override is a genuine *extension*, not a reproduction: `disconnect()` carries no method-level seam constraint forcing a full rewrite (no equivalent of `onOpen()`'s "no seam between `init_session()` and `sessionhandler.connect()`" problem), so the override does its own cleanup and then delegates the rest — including the actual socket teardown — to `super().disconnect(reason)`.
+
+**Risk on Evennia upgrade:**
+
+- Changes to the Django session keys `SharedLoginMiddleware`/`make_shared_login()` reads or sets (`webclient_authenticated_uid`, `webclient_authenticated_nonce`, `website_authenticated_uid`, `_auth_user_id`, `_auth_user_backend`, `_auth_user_hash`). A renamed or added key involved in the shared-login handshake would mean this override's cleanup misses it, and the auto-relogin bug could partially resurface.
+- Changes to `WebSocketClient.disconnect()`'s own signature. Our override calls `super().disconnect(reason)`, so a positional-arg change upstream would need updating the call site.
+
+How to check: diff `SharedLoginMiddleware.make_shared_login()` and `WebSocketClient.disconnect()` against the session-key list this override clears.
+
+**Risk in consumer override:**
+
+A consumer that sets a custom `WEBSOCKET_PROTOCOL_CLASS` is safe by construction — same dynamic-subclassing mechanism as `onOpen()` above. A consumer's own `disconnect()` (if any) still runs, since `super().disconnect(reason)` is always called; the library's token-based cleanup happens first, then whatever the consumer's class does happens after.
+
+This override does not, by itself, restore a consumer's own `onOpen()`-time setup (e.g. a wallet-integration token stamp of its own). `ShardWebSocketClient.onOpen()` still never calls `super().onOpen()` — see that section's "Risk in consumer override" — so any consumer-side `onOpen()`-time logic remains silently dropped regardless of this `disconnect()` fix. A consumer relying on both connect-time and disconnect-time customisation should verify their `onOpen()`-time logic actually runs; today it does not, without further changes. `[TBD — needs discussion: whether the library should offer a documented onOpen()-time extension hook, given onOpen() cannot compose via super()]`.
 
 ## DefaultAccount.at_post_login() override
 

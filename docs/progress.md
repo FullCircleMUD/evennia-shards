@@ -8,6 +8,16 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 ## Milestones
 
+### 2026-08-08 — Fixed: hard refresh after quit silently re-authenticated the player
+
+`ShardWebSocketClient.onOpen()` is a full reproduction of Evennia's base connect sequence (ticket-auth has to run before `sessionhandler.connect()`, and there's no method-level seam to extend instead — see [library-integration-risks.md](library-integration-risks.md#websocketclientonopen-override)). Because it never calls `super().onOpen()`, any consumer's own `onOpen()`-time logic — including a pre-existing FCM-side fix that stamped a stable token for reliable logout — silently never ran under shard/router mode. Confirmed as a live bug: quitting the game, then hard-refreshing the browser, re-authenticated the player instead of showing a login screen.
+
+Root cause traced to two compounding Evennia behaviours, both undocumented until now: `SharedLoginMiddleware.make_shared_login()` increments `webclient_authenticated_nonce` on every HTTP request against the Django session, so the nonce `disconnect()` guards against almost always drifts before a real disconnect fires; and even when the nonce does clear `webclient_authenticated_uid`, the middleware silently re-derives it from the Django auth session (`_auth_user_id`) on the very next request, regardless.
+
+Fix is self-contained in the library, no FCM-specific naming or dependency: `ShardWebSocketClient.onOpen()` now stamps its own stable per-connection token after `sessionhandler.connect()`; a new `ShardWebSocketClient.disconnect()` — previously absent, MRO fell through to whatever the consumer provided — checks that token and clears both the webclient session keys and the Django auth session keys before delegating to `super().disconnect(reason)`. Unlike `onOpen()`, `disconnect()` had no seam constraint forcing a reproduction, so this is a genuine extension: consumer-specific `disconnect()` behaviour (and socket teardown) still runs via `super()`. Full coupling writeup: [library-integration-risks.md](library-integration-risks.md#shardwebsocketclientdisconnect-override).
+
+Confirmed end-to-end via live playtest against FCM's router/shard0 deployment: quit → hard refresh now lands on the login screen instead of auto-puppeting back in.
+
 ### 2026-05-21 — Evennia's own test suite run against the library in three modes
 
 Ran Evennia's full test suite (1649 tests) under `monolith`, `shard`, and `router` settings to find any interactions the library's own 290 tests don't surface. Three settings files under [`tests/`](../tests/) (`evennia_suite_monolith.py`, `evennia_suite_shard.py`, `evennia_suite_router.py`) plus log capture under `ops/evennia-suite-runs/`. Full writeup at [test-history/test_results_4_2026-05-21_evennia_suite.md](test-history/test_results_4_2026-05-21_evennia_suite.md).
