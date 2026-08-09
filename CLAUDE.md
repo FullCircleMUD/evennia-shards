@@ -16,7 +16,9 @@ For the design wiki, read [docs/INDEX.md](docs/INDEX.md).
 
 ## Project status
 
-**Working MVP, not production-ready.** Shard partition enforcement (django-multitenant auto-filter on `ObjectDB`), ticket-based WebSocket auth, cross-shard character + inventory move, chargen wrapper, cross-shard `@tel`, and primitive cross-shard messaging (`obj_msg` / `account_msg` / `room_msg`) are all shipped and live-smoke-verified end-to-end against three demo gamedirs. For the current state read [docs/progress.md](docs/progress.md). The library has not yet been exercised by a real consumer game.
+**Working MVP, not production-ready.** Shard partition enforcement (django-multitenant auto-filter on `ObjectDB`), ticket-based WebSocket auth, cross-shard character + inventory move, chargen wrapper, cross-shard `@tel`, primitive cross-shard messaging (`obj_msg` / `account_msg` / `room_msg`), and confinement of shard-owned persistent scripts to their owning process are all shipped and live-smoke-verified end-to-end. For the current state read [docs/progress.md](docs/progress.md).
+
+The library is now being exercised by a real consumer game — FullCircleMUD, running router + two shards, with `evennia-mob-spawner` and `evennia-world-builder` co-installed. That integration is what surfaced the script-confinement gap; see [shard-owned-scripts.md](docs/shard-owned-scripts.md) and [interoperability.md](docs/interoperability.md).
 
 ## Where to read first
 

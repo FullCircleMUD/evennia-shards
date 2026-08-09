@@ -32,6 +32,7 @@ from .tenancy import (
     set_current_shard,
     shard_context,
 )
+from .script_confinement import OWNING_SHARD_ATTR, get_owning_shard
 from .tickets import create_ticket, delete_ticket, get_ticket
 
 __version__ = "0.0.1"
@@ -71,5 +72,10 @@ __all__ = [
     "clear_shard_context",
     "shard_context",
     "preserve_tenant_context",
+    # Shard-owned scripts: consumers declare ownership by setting the
+    # OWNING_SHARD_ATTR Attribute; the library confines the script to that
+    # process. See script_confinement.py.
+    "OWNING_SHARD_ATTR",
+    "get_owning_shard",
     "__version__",
 ]

@@ -6,6 +6,20 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 > **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
 
+## 2026-08-09 — shard-owned scripts: confinement to the owning process
+
+`ScriptDB` is not tenant-scoped, so a persistent script is one row visible to every process and each attaches its own `LoopingCall`. For a script whose work belongs to one shard that is decided by a boot race: at shutdown the process holding the task writes `db._paused_time` to the shared row, and at boot the first process to reach it attaches the ticker and clears the marker. Because processes boot independently, a router that starts before the shards wins that race every time — a systematic loss, not an intermittent one. Live evidence from the first consumer: 41 of 216 spawned mobs carrying `shard_id=NULL`, created by the router ticking a shard's spawner.
+
+A consumer now declares ownership as data — an `owning_shard` Attribute — and the library confines the ticks. No base class, no mixin, no runtime API; scripts that declare nothing are untouched, which is what keeps global scripts and non-sharded installs working unchanged.
+
+`install_script_confinement()` runs from `ready()` beside the ObjectDB tenancy install and guards two methods on `ScriptBase` (not `ScriptDB` — the model carries no task machinery). Both are needed: the boot walk calls `_unpause_task` directly, while `_start_task` calls it internally and then starts the loop itself if that didn't, so guarding either alone is bypassable.
+
+The load-bearing detail is that the guard returns *before* reading or clearing `_paused_time`. A foreign process consumes nothing, so the marker survives for the owner to claim whenever it boots — boot order stops mattering rather than merely being corrected after the fact.
+
+Verified on a live two-process deployment with instrumented guards across repeated restarts in varying orders: the router refused every owned script without consuming a marker, the owning shard reclaimed all of them booting 15s later, and a second shard refused the first's scripts while reclaiming its own. `_start_task` was never reached in 55 logged decisions — it is guarded as the general "make it run" entry point, covered by a direct unit test rather than faked server state.
+
+**315 tests green** (was 308). Docs: [shard-owned-scripts.md](shard-owned-scripts.md); [shard-settings.md](shard-settings.md) revised, since it stated the library provided no such mechanism.
+
 ## Milestones
 
 ### 2026-08-08 — Fixed: hard refresh after quit silently re-authenticated the player

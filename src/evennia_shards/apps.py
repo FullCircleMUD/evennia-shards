@@ -26,6 +26,16 @@ class EvenniaShardsConfig(AppConfig):
             bootstrap_tenant_context()
             install_tenancy_on_objectdb()
 
+            # Confine shard-owned persistent scripts to the process that
+            # owns them. ScriptDB is not tenant-scoped, so a script row is
+            # visible to every process and each attaches its own
+            # LoopingCall; a script declaring an ``owning_shard`` Attribute
+            # ticks only there. Scripts without the Attribute are
+            # untouched. See evennia_shards/script_confinement.py.
+            from .script_confinement import install_script_confinement
+
+            install_script_confinement()
+
             from django.conf import settings
 
             # Override the WebSocket protocol class so the library can

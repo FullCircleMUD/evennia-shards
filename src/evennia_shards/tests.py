@@ -12,6 +12,11 @@ from django_multitenant.utils import (
 from evennia.objects.models import ObjectDB
 from evennia.utils.test_resources import BaseEvenniaTestCase
 
+from evennia_shards.script_confinement import (
+    OWNING_SHARD_ATTR,
+    install_script_confinement,
+    is_foreign_script,
+)
 from evennia_shards.tenancy import (
     GLOBAL_SHARD_ID,
     Shard,
@@ -5695,3 +5700,110 @@ class StartPluginServicesTests(BaseEvenniaTestCase):
         self.assertEqual(len(registered), 1)
         ws_service, _ = registered[0]
         self.assertIn("127.0.0.1", ws_service.name)
+
+
+class ScriptConfinementTest(BaseEvenniaTestCase):
+    """Ownership guards on ``ScriptBase._start_task`` / ``_unpause_task``.
+
+    Exercises the guard predicate and the wrapper wiring without booting a
+    real script ticker — the guards are pure functions of the script's
+    ``owning_shard`` Attribute and this process's ``SHARD_ID``.
+    """
+
+    def _script(self, owner=None):
+        """A stand-in script exposing only what the guards read."""
+        class _FakeAttributes:
+            def __init__(self, owner):
+                self._owner = owner
+
+            def get(self, key, default=None):
+                if key == OWNING_SHARD_ATTR and self._owner is not None:
+                    return self._owner
+                return default
+
+        class _FakeScript:
+            key = "shard0/millholm/town.yaml"
+
+            def __init__(self, owner):
+                self.attributes = _FakeAttributes(owner)
+
+        return _FakeScript(owner)
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_unstamped_script_is_never_confined(self):
+        # Global scripts and every non-shard-specific script must be
+        # untouched — that is what makes the mechanism opt-in by data.
+        blocked, owner, current = is_foreign_script(self._script(owner=None))
+        self.assertFalse(blocked)
+        self.assertIsNone(owner)
+        self.assertEqual(current, "shard0")
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_own_script_is_allowed(self):
+        blocked, owner, _ = is_foreign_script(self._script(owner="shard0"))
+        self.assertFalse(blocked)
+        self.assertEqual(owner, "shard0")
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_foreign_script_is_blocked(self):
+        blocked, owner, current = is_foreign_script(self._script(owner="shard1"))
+        self.assertTrue(blocked)
+        self.assertEqual((owner, current), ("shard1", "shard0"))
+
+    @override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+    def test_router_is_blocked_from_every_owned_script(self):
+        # The case that produced unstamped mobs: the unscoped router
+        # attaching a LoopingCall to a shard's spawner.
+        for owner in ("shard0", "shard1"):
+            blocked, _, _ = is_foreign_script(self._script(owner=owner))
+            self.assertTrue(blocked)
+
+    def test_install_is_idempotent_and_wraps_both_methods(self):
+        from evennia.scripts.scripts import ScriptBase
+
+        install_script_confinement()
+        first_start = ScriptBase._start_task
+        first_unpause = ScriptBase._unpause_task
+
+        # Both seams must be wrapped: the boot walk calls _unpause_task
+        # directly, and _start_task starts the loop itself if the unpause
+        # didn't — so guarding either one alone is bypassable.
+        self.assertTrue(getattr(ScriptBase, "_evennia_shards_confinement_installed", False))
+
+        install_script_confinement()
+        self.assertIs(ScriptBase._start_task, first_start)
+        self.assertIs(ScriptBase._unpause_task, first_unpause)
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_start_task_guard_blocks_a_foreign_script(self):
+        """The second seam, exercised directly.
+
+        No current mob-spawner command reaches ``_start_task`` for an owned
+        script on a foreign process, so this cannot be driven through the
+        game — the guard exists because ``_start_task`` is the general
+        "make it run" entry point, and a future command, or a consumer
+        calling ``start()``, would otherwise bypass confinement silently.
+
+        The stand-in carries none of the fields the real ``_start_task``
+        reads, so if the guard ever stops blocking, this raises rather than
+        silently passing.
+        """
+        from evennia.scripts.scripts import ScriptBase
+
+        install_script_confinement()
+
+        self.assertIsNone(ScriptBase._start_task(self._script(owner="shard1")))
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_unpause_task_guard_blocks_a_foreign_script(self):
+        """The seam the boot walk actually uses.
+
+        Must return before reading or clearing ``_paused_time`` — the marker
+        has to survive for the owning process, which is what makes boot
+        order irrelevant.
+        """
+        from evennia.scripts.scripts import ScriptBase
+
+        install_script_confinement()
+
+        self.assertIsNone(ScriptBase._unpause_task(self._script(owner="shard1")))

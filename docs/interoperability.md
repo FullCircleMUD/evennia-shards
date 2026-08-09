@@ -23,10 +23,18 @@ an identity fallback — is in that function's docstring.
 
 **`ScriptDB` is not tenant-scoped.** Only `ObjectDB` carries a `shard_id` column, so a persistent
 script is a single row visible to every process, and each process attaches its own `LoopingCall` to it.
-A script therefore ticks once per process, and a library that creates persistent scripts owning
-per-shard work must confine them itself — this library provides no run-exactly-once mechanism. Note
-that `Script.stop()` is not a confinement tool: it writes `db_is_active=False` to the shared row and so
-stops the script cluster-wide. See [shard-settings.md](shard-settings.md#global-scripts-run-one-instance-per-process).
+A script therefore ticks once per process.
+
+A library whose script's work belongs to one shard declares that by stamping an `owning_shard`
+Attribute, and this library confines the script's ticks to that process — see
+[shard-owned-scripts.md](shard-owned-scripts.md). Ownership is declared as data: no base class to
+inherit, no runtime API to call, and scripts that declare nothing are untouched. Stamp it wherever the
+script is created, provided creation is itself confined to the owning shard.
+
+Note that `Script.stop()` is not a confinement tool: it writes `db_is_active=False` to the shared row
+and so stops the script cluster-wide. Nor is `pause()` — it reads the local `ndb._task` and, finding
+none, writes nothing at all, so from a foreign process it silently does nothing. See
+[shard-settings.md](shard-settings.md#global-scripts-run-one-instance-per-process).
 
 **The router runs unscoped.** It sees and can write every shard's rows, and inserts from it carry no
 shard stamp. Operations that place content into a shard's world belong on that shard, not the router.
@@ -37,9 +45,12 @@ shard stamp. Operations that place content into a shard's world belong on that s
 fallback; this library imports nothing of mob-spawner's.
 
 All three constraints above apply: it dispatches its deploy pipeline off-thread, it creates one
-persistent `MobSpawnerScript` per rule-set file, and its tick calls `create_object`. The pairing also
-imposes a naming rule on mob-spawner's YAML — the first declared level must be `shard`. That rule is
-mob-spawner's, since it constrains mob-spawner's data model; it is documented in
+persistent `MobSpawnerScript` per rule-set file, and its tick calls `create_object`.
+
+It is the first consumer of the shard-owned script mechanism: its Deployer stamps `owning_shard` at
+deploy time, so each rule-set script ticks only on the shard it belongs to. The pairing also imposes a
+naming rule on mob-spawner's YAML — the first declared level must be `shard`. Both rules are
+mob-spawner's, since they constrain mob-spawner's data model and lifecycle; they are documented in
 [its `interoperability.md`](../../evennia-mob-spawner/docs/interoperability.md) and not restated here.
 
 ## evennia-shards
