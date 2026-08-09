@@ -32,7 +32,9 @@ install, and idempotent via a marker attribute in the same style.
 
 import functools
 
-from .config import get_shard_id
+from evennia.utils import logger
+
+from .config import get_role, get_shard_id
 
 
 OWNING_SHARD_ATTR = "owning_shard"
@@ -43,33 +45,92 @@ layer owns, and conflating the two invites confusion about which mechanism is
 in play.
 """
 
+OWNING_ROLES_ATTR = "owning_roles"
+"""Attribute name a consumer sets to declare which *roles* may run a script.
 
-def get_owning_shard(script):
-    """Return the shard that owns `script`, or ``None`` if it declares none.
+A list, because the common case is more than one — work that belongs on every
+shard but not the router, say. Use this when the script has no single owner;
+use :data:`OWNING_SHARD_ATTR` when exactly one shard owns it.
 
-    A script with no ``owning_shard`` Attribute is not shard-specific and is
-    never confined.
+The two are mutually exclusive. A script declaring both is a contradiction —
+"only shard0" and "any shard" cannot both be true — so the guards treat it as
+misconfigured and refuse to run it anywhere, loudly. Failing closed is the
+safe direction: a script that does not run is visible in the consumer's own
+status tooling, whereas one running in the wrong place is the failure this
+module exists to prevent.
+"""
+
+
+def _read_attr(script, name):
+    """Read one Attribute, treating any failure as "declares nothing".
+
+    An Attribute read can fail on a half-initialised row — during creation,
+    before the pk exists. That must not break script creation, so it degrades
+    to the unconfined answer.
     """
     try:
-        return script.attributes.get(OWNING_SHARD_ATTR, default=None)
+        return script.attributes.get(name, default=None)
     except Exception:
-        # An Attribute read can fail on a half-initialised row (during
-        # creation, before the pk exists). Treat that as "declares nothing"
-        # rather than letting the guard break script creation.
         return None
 
 
-def is_foreign_script(script) -> tuple:
-    """Return ``(blocked, owner, current)`` for `script` on this process.
+def get_owning_shard(script):
+    """Return the shard that owns `script`, or ``None`` if it declares none."""
+    return _read_attr(script, OWNING_SHARD_ATTR)
 
-    ``blocked`` is True only when the script declares an owning shard and it
-    is not the shard this process is running as.
+
+def get_owning_roles(script):
+    """Return the roles allowed to run `script`, or ``None`` if unrestricted.
+
+    Normalised to a list so a consumer may declare a single role as a bare
+    string without it being read character by character.
+    """
+    roles = _read_attr(script, OWNING_ROLES_ATTR)
+    if roles is None:
+        return None
+    if isinstance(roles, str):
+        return [roles]
+    return list(roles)
+
+
+def is_foreign_script(script) -> tuple:
+    """Return ``(blocked, declared, current)`` for `script` on this process.
+
+    A script may declare its home in one of two ways, never both:
+
+    - ``owning_shard`` — exactly one shard owns it. Compared against this
+      process's ``SHARD_ID``.
+    - ``owning_roles`` — a list of roles that may run it. Compared against
+      this process's role. Use for work belonging to every shard but not the
+      router, which no single owner can express.
+
+    Declaring neither leaves the script unconfined, which is what keeps
+    scripts that genuinely run everywhere working untouched.
     """
     owner = get_owning_shard(script)
-    current = get_shard_id()
-    if owner is None:
-        return False, None, current
-    return owner != current, owner, current
+    roles = get_owning_roles(script)
+
+    if owner is not None and roles:
+        # Contradictory declaration: "only shard0" and "any shard" cannot
+        # both hold. Fail closed rather than silently honouring one — see
+        # OWNING_ROLES_ATTR.
+        logger.log_err(
+            f"evennia-shards: script {getattr(script, 'key', '?')!r} declares "
+            f"both {OWNING_SHARD_ATTR}={owner!r} and {OWNING_ROLES_ATTR}="
+            f"{roles!r}. They are mutually exclusive; refusing to run it "
+            f"anywhere until one is removed."
+        )
+        return True, (owner, roles), None
+
+    if owner is not None:
+        current = get_shard_id()
+        return owner != current, owner, current
+
+    if roles:
+        current = get_role()
+        return current not in roles, roles, current
+
+    return False, None, None
 
 
 def install_script_confinement() -> None:
@@ -89,17 +150,20 @@ def install_script_confinement() -> None:
 
     @functools.wraps(original_start)
     def _guarded_start_task(self, *args, **kwargs):
-        blocked, _owner, _current = is_foreign_script(self)
+        blocked, _declared, _current = is_foreign_script(self)
         if blocked:
             return
         return original_start(self, *args, **kwargs)
 
     @functools.wraps(original_unpause)
     def _guarded_unpause_task(self, *args, **kwargs):
-        blocked, _owner, _current = is_foreign_script(self)
+        blocked, _declared, _current = is_foreign_script(self)
         if blocked:
             # Return before reading or clearing _paused_time — the marker
-            # must survive for the owning process.
+            # must survive for the owning process. This is also what stops
+            # the first process to boot sweeping up every marked row
+            # regardless of role: Evennia's boot walk calls this method
+            # directly, and it is role-blind.
             return
         return original_unpause(self, *args, **kwargs)
 

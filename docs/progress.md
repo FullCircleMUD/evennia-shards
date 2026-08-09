@@ -6,6 +6,16 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 > **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
 
+## 2026-08-09 — confinement extended to roles; boot-walk sweep closed
+
+`owning_shard` names one shard, which cannot express work belonging to every shard but not the router — the shape of most of a consumer's global scripts. `owning_roles` takes a list of roles and is checked the same way, through the same two guards, so there is no third seam. The two are mutually exclusive: "only shard0" and "any shard" cannot both hold, so a script declaring both is refused everywhere and logged at `ERROR` naming both values. Failing closed is deliberate — a script that does not run is visible in the consumer's own status tooling, one running in the wrong place is the failure this exists to prevent.
+
+What this closes is bigger than the single-shard case. Evennia's boot walk iterates every active row and knows nothing about roles, so **the first process to boot attaches every marked script in the cluster**. A consumer's own role table cannot prevent it, because such a table gates what each process *creates*, not what the walk *attaches* — role gating is only half-enforced at boot without confinement.
+
+Confirmed live on FCM's eleven role-declared global scripts, three processes, both boot orders. Before: router-first left the router ticking six scripts declared shard-only, unscoped, on every boot. After: router-first and shard-first both leave every script exactly where its declaration says, including the reallocation service that must not run twice.
+
+**321 tests green** (was 315). Docs: [script-confinement.md](script-confinement.md), renamed from `shard-owned-scripts.md` since the mechanism is no longer shard-only.
+
 ## 2026-08-09 — shard-owned scripts: confinement to the owning process
 
 `ScriptDB` is not tenant-scoped, so a persistent script is one row visible to every process and each attaches its own `LoopingCall`. For a script whose work belongs to one shard that is decided by a boot race: at shutdown the process holding the task writes `db._paused_time` to the shared row, and at boot the first process to reach it attaches the ticker and clears the marker. Because processes boot independently, a router that starts before the shards wins that race every time — a systematic loss, not an intermittent one. Live evidence from the first consumer: 41 of 216 spawned mobs carrying `shard_id=NULL`, created by the router ticking a shard's spawner.
@@ -18,7 +28,7 @@ The load-bearing detail is that the guard returns *before* reading or clearing `
 
 Verified on a live two-process deployment with instrumented guards across repeated restarts in varying orders: the router refused every owned script without consuming a marker, the owning shard reclaimed all of them booting 15s later, and a second shard refused the first's scripts while reclaiming its own. `_start_task` was never reached in 55 logged decisions — it is guarded as the general "make it run" entry point, covered by a direct unit test rather than faked server state.
 
-**315 tests green** (was 308). Docs: [shard-owned-scripts.md](shard-owned-scripts.md); [shard-settings.md](shard-settings.md) revised, since it stated the library provided no such mechanism.
+**315 tests green** (was 308). Docs: [script-confinement.md](script-confinement.md); [shard-settings.md](shard-settings.md) revised, since it stated the library provided no such mechanism.
 
 ## Milestones
 

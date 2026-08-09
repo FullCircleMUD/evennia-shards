@@ -32,7 +32,12 @@ from .tenancy import (
     set_current_shard,
     shard_context,
 )
-from .script_confinement import OWNING_SHARD_ATTR, get_owning_shard
+from .script_confinement import (
+    OWNING_ROLES_ATTR,
+    OWNING_SHARD_ATTR,
+    get_owning_roles,
+    get_owning_shard,
+)
 from .tickets import create_ticket, delete_ticket, get_ticket
 
 __version__ = "0.0.1"
@@ -76,6 +81,8 @@ __all__ = [
     # OWNING_SHARD_ATTR Attribute; the library confines the script to that
     # process. See script_confinement.py.
     "OWNING_SHARD_ATTR",
+    "OWNING_ROLES_ATTR",
     "get_owning_shard",
+    "get_owning_roles",
     "__version__",
 ]

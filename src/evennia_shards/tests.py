@@ -13,6 +13,7 @@ from evennia.objects.models import ObjectDB
 from evennia.utils.test_resources import BaseEvenniaTestCase
 
 from evennia_shards.script_confinement import (
+    OWNING_ROLES_ATTR,
     OWNING_SHARD_ATTR,
     install_script_confinement,
     is_foreign_script,
@@ -5710,33 +5711,36 @@ class ScriptConfinementTest(BaseEvenniaTestCase):
     ``owning_shard`` Attribute and this process's ``SHARD_ID``.
     """
 
-    def _script(self, owner=None):
+    def _script(self, owner=None, roles=None):
         """A stand-in script exposing only what the guards read."""
         class _FakeAttributes:
-            def __init__(self, owner):
-                self._owner = owner
+            def __init__(self, owner, roles):
+                self._values = {
+                    OWNING_SHARD_ATTR: owner,
+                    OWNING_ROLES_ATTR: roles,
+                }
 
             def get(self, key, default=None):
-                if key == OWNING_SHARD_ATTR and self._owner is not None:
-                    return self._owner
-                return default
+                value = self._values.get(key)
+                return default if value is None else value
 
         class _FakeScript:
             key = "shard0/millholm/town.yaml"
 
-            def __init__(self, owner):
-                self.attributes = _FakeAttributes(owner)
+            def __init__(self, owner, roles):
+                self.attributes = _FakeAttributes(owner, roles)
 
-        return _FakeScript(owner)
+        return _FakeScript(owner, roles)
 
     @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
     def test_unstamped_script_is_never_confined(self):
         # Global scripts and every non-shard-specific script must be
         # untouched — that is what makes the mechanism opt-in by data.
-        blocked, owner, current = is_foreign_script(self._script(owner=None))
+        blocked, declared, current = is_foreign_script(self._script())
         self.assertFalse(blocked)
-        self.assertIsNone(owner)
-        self.assertEqual(current, "shard0")
+        self.assertIsNone(declared)
+        # No identity is resolved when there is nothing to compare against.
+        self.assertIsNone(current)
 
     @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
     def test_own_script_is_allowed(self):
@@ -5757,6 +5761,65 @@ class ScriptConfinementTest(BaseEvenniaTestCase):
         for owner in ("shard0", "shard1"):
             blocked, _, _ = is_foreign_script(self._script(owner=owner))
             self.assertTrue(blocked)
+
+    # --- owning_roles: for work with no single owning shard -----------
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_declared_role_is_allowed(self):
+        # The case owning_shard cannot express: runs on every shard, but
+        # not the router.
+        blocked, declared, current = is_foreign_script(
+            self._script(roles=["shard", "monolith"])
+        )
+        self.assertFalse(blocked)
+        self.assertEqual(declared, ["shard", "monolith"])
+        self.assertEqual(current, "shard")
+
+    @override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+    def test_undeclared_role_is_blocked(self):
+        # The live failure this closes: the router sweeping up shard-only
+        # scripts via the role-blind boot walk.
+        blocked, _declared, current = is_foreign_script(
+            self._script(roles=["shard", "monolith"])
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(current, "router")
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard1")
+    def test_roles_apply_to_every_shard_not_one(self):
+        # Unlike owning_shard, a role declaration does not discriminate
+        # between shards.
+        for shard_id in ("shard0", "shard1"):
+            with override_settings(SHARD_ID=shard_id):
+                blocked, _d, _c = is_foreign_script(self._script(roles=["shard"]))
+                self.assertFalse(blocked)
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_a_bare_string_role_is_not_read_character_by_character(self):
+        blocked, declared, _c = is_foreign_script(self._script(roles="shard"))
+        self.assertFalse(blocked)
+        self.assertEqual(declared, ["shard"])
+
+    # --- the two declarations are mutually exclusive ------------------
+
+    @override_settings(SHARDS_ROLE="shard", SHARD_ID="shard0")
+    def test_declaring_both_fails_closed(self):
+        # "only shard0" and "any shard" cannot both hold. Blocked even
+        # where each declaration on its own would have allowed it, so the
+        # contradiction cannot hide behind a process that happens to
+        # satisfy one of them.
+        blocked, declared, _c = is_foreign_script(
+            self._script(owner="shard0", roles=["shard"])
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(declared, ("shard0", ["shard"]))
+
+    @override_settings(SHARDS_ROLE="router", SHARD_ID="router")
+    def test_declaring_both_is_blocked_everywhere(self):
+        blocked, _declared, _c = is_foreign_script(
+            self._script(owner="shard0", roles=["router"])
+        )
+        self.assertTrue(blocked)
 
     def test_install_is_idempotent_and_wraps_both_methods(self):
         from evennia.scripts.scripts import ScriptBase

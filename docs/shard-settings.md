@@ -100,11 +100,13 @@ The consequence for consumers: in an N-shard deployment a global script's tick f
 
 **Not safe per-process** — scripts that query the world, aggregate, or produce side-effects that must happen once. Under the auto-filter each process silently sees only its own shard's rows, so the script does a partial job *and* emits its side-effect once per process. Note the failure mode is quiet: before django-multitenant an unscoped query raised, now it just returns a subset. "Starts with no errors" is not evidence such a script is correct.
 
-**Owned by one shard** — a script whose work belongs to a single shard can declare that, and the library confines its ticks to the owning process. Declaring ownership is a single Attribute; there is no base class to inherit and no runtime API to call. See [shard-owned-scripts.md](shard-owned-scripts.md).
+**Confined to where it belongs** — a script that should not run on every process can declare where it does belong, and the library keeps it there. One shard via `owning_shard`, or a set of roles via `owning_roles` when no single shard owns it. A single Attribute either way; no base class to inherit and no runtime API to call. See [script-confinement.md](script-confinement.md).
 
-That mechanism answers *which process may run this script*. It is **not** a "run exactly once across the cluster" mechanism, and the library provides none: a consumer needing a singleton that belongs to no particular shard must still gate it themselves — by role, by nominating one shard, or by their own election.
+Declaring roles is what a consumer's own role table cannot achieve alone. Such a table gates what each process *creates*; Evennia's boot walk attaches a `LoopingCall` to any active row still carrying a pause marker and knows nothing about roles, so the first process to boot picks up every marked script in the cluster. Role gating is therefore only half-enforced at boot without confinement — honoured for what a process claims, silently exceeded for what it sweeps up.
 
-> The per-process behaviour above was established by reading the boot path (`run_init_hooks` calls `at_server_start()` before `evennia.GLOBAL_SCRIPTS.start()`, so `ndb._task` is empty when a consumer's boot hook runs) and the script sources. Confinement is confirmed on a live two-process deployment across repeated restarts in varying boot orders — see [shard-owned-scripts.md](shard-owned-scripts.md#verified-behaviour).
+That mechanism answers *where may this script run*. It is **not** a "run exactly once across the cluster" mechanism, and the library provides none: a consumer needing a singleton that belongs to no particular shard or role must still gate it themselves — by nominating one, or by their own election.
+
+> The per-process behaviour above was established by reading the boot path (`run_init_hooks` calls `at_server_start()` before `evennia.GLOBAL_SCRIPTS.start()`, so `ndb._task` is empty when a consumer's boot hook runs) and the script sources. Confinement is confirmed on a live three-process deployment across repeated restarts in varying boot orders — see [script-confinement.md](script-confinement.md#verified-behaviour).
 
 ## URL settings and redirect routing
 
