@@ -40,7 +40,7 @@ from .script_confinement import (
 )
 from .tickets import create_ticket, delete_ticket, get_ticket
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "ROLE_MONOLITH",

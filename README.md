@@ -4,7 +4,7 @@
 
 A drop-in extension to [Evennia](https://www.evennia.com/) that adds optional split deployment and horizontal sharding via configuration alone. Install it and the game runs as vanilla Evennia. Flip a config setting and the same code runs as a split deployment (auth process separate from game process). Flip another, and it runs as full multi-shard.
 
-> **Status: working MVP, not production-ready.** Phase 1 (router + shards, ticket auth, IC/OOC redirects, cross-shard character + inventory move, chargen, primitive cross-shard messaging) is functionally complete and live-smoke-verified end-to-end against three demo gamedirs. The API has not yet been exercised by a real consumer game. See [docs/progress.md](docs/progress.md) for the running milestone log; [docs/INDEX.md](docs/INDEX.md) is the design wiki.
+> **Status: working MVP, not production-ready.** Phase 1 (router + shards, ticket auth, IC/OOC redirects, cross-shard character + inventory move, chargen, primitive cross-shard messaging) is functionally complete and live-smoke-verified end-to-end. Persistent scripts are confined to the shard or roles they are declared for. 321 tests green. The library is in use by its first consumer game — FullCircleMUD, running router plus shards with `evennia-world-builder` and `evennia-mob-spawner` co-installed. See [docs/progress.md](docs/progress.md) for the running milestone log; [docs/INDEX.md](docs/INDEX.md) is the design wiki.
 
 ## What this is
 
@@ -26,25 +26,28 @@ The library does not impose its own room or character base classes — it provid
 
 The design is scoped to the **single-Postgres era**: from one Evennia process today through however many shards run against a single, vertically scaled Postgres. The working theory is that Evennia's per-process bottleneck is its single-threaded Twisted reactor — game logic, ticks, scripts, and player commands all share one thread — while Postgres handles concurrent connections and aggregate load comfortably. Horizontal scaling for Evennia therefore means adding *Evennia* processes, not databases; a single vertically scaled Postgres should absorb the load of many shards before its own limits bite. We haven't benchmarked at scale, and "many" is qualitative — if a real game pushes through that frontier, the architectural assumptions here will need revisiting. Scoping to single-Postgres keeps the design surface small in the meantime. See [the archived handover](docs/archive/evennia-shards-HANDOVER.md#project-identity-and-positioning) for the original positioning statement and out-of-scope list.
 
+## Install
+
+```
+pip install evennia-shards
+```
+
+Editable install for development against a checkout:
+
+```
+git clone https://github.com/FullCircleMUD/evennia-shards.git
+cd evennia-shards
+python -m venv venv
+# Activate the venv (platform-specific)
+pip install -e .
+python runtests.py
+```
+
 ## Quick start
 
 The repo ships three demo gamedirs under [`examples/`](examples/) — `demo_router`, `demo_shard0`, `demo_shard1` — that exercise the library end-to-end on a single machine.
 
-```bash
-# Create a virtualenv and install Evennia
-python -m venv venv
-source venv/Scripts/activate    # on Windows; use venv/bin/activate elsewhere
-pip install evennia
-
-# Clone and install evennia-shards in editable mode
-git clone https://github.com/timbaird/evennia-shards.git
-cd evennia-shards
-pip install -e .
-```
-
 Each demo gamedir runs as its own Evennia process with its own `settings.py` declaring its `SHARDS_ROLE` and `SHARD_ID`. See [`examples/README.md`](examples/README.md) for the run-three-processes recipe.
-
-For consumer games installing the library as a dependency (rather than developing it), `pip install evennia-shards` will be the install path once the package is published.
 
 ## Documentation
 
@@ -59,7 +62,7 @@ Notable entry points:
 
 ## Project relationships
 
-This library was extracted from scaling work originally done for the [FullCircleMUD (FCM)](https://fcmud.world) project. FCM is the intended first consumer game and will adopt the library as a dependency. The library is deliberately game-agnostic; FCM-specific concerns stay in FCM. See [the origin section of the archived handover](docs/archive/evennia-shards-HANDOVER.md#origin-why-this-is-a-separate-project) for the original rationale.
+This library was extracted from scaling work originally done for the [FullCircleMUD (FCM)](https://fcmud.world) project. FCM is its first consumer game and depends on the library today. The library is deliberately game-agnostic; FCM-specific concerns stay in FCM. See [the origin section of the archived handover](docs/archive/evennia-shards-HANDOVER.md#origin-why-this-is-a-separate-project) for the original rationale.
 
 ## License
 
@@ -67,4 +70,4 @@ BSD 3-Clause — see [LICENSE](LICENSE). Same family as Evennia's license.
 
 ## Contributing
 
-Not yet open to outside contributions. Once the library has been exercised by at least one consumer game (FCM) and the API has had a chance to settle through real use, contribution guidelines will be added.
+Not yet open to outside contributions. The library is in use by its first consumer game; once the API has settled through that use, contribution guidelines will be added.
