@@ -10,6 +10,20 @@ readme = "README.md"
 license = {text = "BSD-3-Clause"}
 authors = [{name = "Tim Baird"}]
 requires-python = ">=3.10"
+keywords = ["evennia", "mud", "sharding", "scaling", "multi-tenant"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment :: Multi-User Dungeons (MUD)",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "evennia",
     "django-multitenant",
@@ -21,6 +35,17 @@ dependencies = [
     # See docs/deployment-topology.md § macOS.
     "sqlean.py; sys_platform == 'darwin'",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "twine",
+]
+
+[project.urls]
+Homepage = "https://github.com/FullCircleMUD/evennia-shards"
+Repository = "https://github.com/FullCircleMUD/evennia-shards"
+Issues = "https://github.com/FullCircleMUD/evennia-shards/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
