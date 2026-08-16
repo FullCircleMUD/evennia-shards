@@ -6,6 +6,18 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 > **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
 
+## 2026-08-15 — 0.1.1: fix the missing webclient static asset
+
+The published `0.1.0` wheel was missing `static/evennia_shards/js/shard_redirect.js` — confirmed by
+downloading and inspecting the actual PyPI artifact. `setuptools`' `packages.find` only discovers
+directories containing an `__init__.py`, so `static/` was never a candidate; the middleware still
+injected a `<script>` tag referencing the file, which would 404 in any browser using a real
+`pip install` of the package. Silent everywhere except the built artifact: editable installs and the
+test suite both resolve straight to the source tree, where the file is present regardless. Fixed via
+`[tool.setuptools.package-data] evennia_shards = ["static/**/*"]`; verified this time by installing
+the actual built wheel into a fresh venv and confirming the file lands on disk, not just checking the
+wheel's file listing. Published as https://pypi.org/project/evennia-shards/0.1.1/. Tagged `v0.1.1`.
+
 ## 2026-08-15 — Published to PyPI as `evennia-shards` 0.1.0
 
 First public release: https://pypi.org/project/evennia-shards/0.1.0/. Prep added `pyproject.toml` packaging metadata (classifiers, keywords, project URLs, a `dev` optional-dependencies group) and converted every `README.md` link to an absolute GitHub URL — PyPI renders the README standalone, with no repo file tree behind it, so relative links that work fine on GitHub would 404 there. A bare `import evennia_shards` outside a configured Evennia gamedir was found to fail with Django's generic "settings are not configured" error, since the `__init__.py` import chain touches `evennia.utils.logger` at load time; real usage is unaffected (Django always configures settings before importing any `INSTALLED_APPS` entry — confirmed by all 321 tests passing before and after), but the error is now caught and re-raised with a message pointing at the README's install instructions instead of Django's generic one. Built with `python -m build`, verified via `twine check` and a clean-room `pip install` into a fresh venv before upload. Tagged `v0.1.0`.
