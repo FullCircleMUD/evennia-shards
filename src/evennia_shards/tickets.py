@@ -21,13 +21,22 @@ def create_ticket(account_id, character_id, to_shard, client_ip=None):
     If ``client_ip`` is provided, the receiving shard will reject
     connections from a different IP (token-theft protection).
 
+    ``SHARDS_TICKET_BIND_IP = False`` discards the address here rather
+    than at the callsites, so callers keep passing the session address
+    and the setting governs from one place. See
+    ``config.DEFAULT_TICKET_BIND_IP`` for when to turn it off.
+
     Usage::
 
         token = create_ticket(account.id, character.id, "shard0",
                               client_ip=session.address)
         # then redirect client to ws://shard:port/websocket?ticket=<token>
     """
+    from .config import get_ticket_bind_ip
     from .models import Ticket
+
+    if not get_ticket_bind_ip():
+        client_ip = None
 
     token = uuid.uuid4().hex
     Ticket.objects.create(

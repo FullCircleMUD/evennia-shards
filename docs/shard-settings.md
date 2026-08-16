@@ -11,6 +11,30 @@ How the library's configuration items are declared, read, and defaulted.
 | `ROUTER_URL` | `str \| None` | `None` | **WebSocket** URL for the router (e.g. `"ws://router.example.com/"`, `"wss://..."`). Used by shards for OOC redirect: the player's webclient closes its current WebSocket and opens a new one to this URL with `?ticket=TOKEN` appended. |
 | `ROUTER_SHARD_ID` | `str` | `"router"` | The router's shard ID. Library mandate — not consumer-configurable. The router's `SHARD_ID` must be `"router"`. |
 | `SHARD_URLS` | `dict \| None` | `None` | Maps shard IDs to **WebSocket** URLs (e.g. `"ws://shard0.example.com/"`). Used by the router for IC redirect: same connection-level swap as `ROUTER_URL`, in the other direction. Shard IDs are flexible — name them to match your game world. |
+| `SHARDS_TICKET_BIND_IP` | `bool` | `True` | Whether a ticket records the address it was issued to, so the receiving shard refuses a connection from anywhere else. Set `False` when the shard cannot observe the player's real address — see below. |
+
+### Turning ticket IP binding off
+
+Set `SHARDS_TICKET_BIND_IP = False` when the address a shard observes is not the player's.
+
+The check is defence in depth: tickets are already single-use and short-lived, so binding
+only adds protection against replay from a second address. What it costs, when the address
+is wrong, is every redirect — the shard compares the proxy's address against the one the
+router recorded, they never match, and the player is bounced back with
+`Ticket rejected: IP mismatch`.
+
+The library resolves the real address from `x-forwarded-for`, but only when the immediate
+peer appears in Evennia's `UPSTREAM_IPS`. That setting is an exact-match list, so it cannot
+express a proxy whose address varies within a range — which is the normal case on a hosted
+platform, where the peer is drawn from a private range like `100.64.0.0/10`.
+
+So: keep it on behind a proxy you can enumerate, or none at all. Turn it off where you
+cannot name every address the connection might arrive from.
+
+The setting is read in `create_ticket`, not at the callsites, so callers keep passing
+`session.address` and nothing else needs to know. With no address stored, the shard's
+comparison is skipped — it is guarded by `if data["client_ip"]`, so a null address is what
+makes the ticket acceptable from any origin.
 
 ### One Evennia setting you must also change
 

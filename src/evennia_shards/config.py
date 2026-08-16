@@ -18,6 +18,20 @@ ROLE_SHARD = "shard"
 DEFAULT_ROLE = ROLE_MONOLITH
 DEFAULT_MESSAGE_TIMEOUT = 10
 
+# Whether a ticket records the address it was issued to, so the receiving
+# shard can refuse a connection arriving from anywhere else. Defence in
+# depth: tickets are already single-use and short-lived, so this only adds
+# protection against replay from a second address.
+#
+# Turn it off wherever the connecting address the shard observes is not the
+# player's. Behind a proxy that does not preserve the client IP — most PaaS
+# platforms — every shard sees the proxy's own address, which never matches
+# the one the router recorded, and every redirect is refused. The library
+# resolves the real address from `x-forwarded-for` only when the immediate
+# peer appears in Evennia's `UPSTREAM_IPS`, which is an exact-match list and
+# so cannot express a proxy whose address varies within a range.
+DEFAULT_TICKET_BIND_IP = True
+
 # Library mandate: the router's SHARD_ID equals its role string. There is
 # exactly one router, so the singular role and singular shard_id collapse
 # to the same constant. Consumer router settings should derive SHARD_ID
@@ -92,6 +106,23 @@ def get_router_shard_id() -> str:
     ``get_ticket()`` to match against its own ``get_shard_id()``.
     """
     return ROUTER_SHARD_ID
+
+
+def get_ticket_bind_ip() -> bool:
+    """Return `SHARDS_TICKET_BIND_IP`, defaulting to `True`.
+
+    When true, `create_ticket` records the issuing address and the
+    receiving shard refuses a connection from any other. When false, no
+    address is stored and the shard accepts the ticket from wherever it
+    arrives — see `DEFAULT_TICKET_BIND_IP` for when that is the correct
+    setting rather than a weakening.
+
+    Consumers set this in their own Django settings; the library never
+    writes it.
+    """
+    from django.conf import settings
+
+    return getattr(settings, "SHARDS_TICKET_BIND_IP", DEFAULT_TICKET_BIND_IP)
 
 
 def get_message_timeout(kind: str) -> int:

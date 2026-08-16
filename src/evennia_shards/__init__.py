@@ -21,6 +21,7 @@ try:
         get_router_url,
         get_shard_id,
         get_shard_url,
+        get_ticket_bind_ip,
     )
     from .errors import MessageBusError, TicketError
     from .handoff import MoveResult, cross_shard_move
@@ -60,7 +61,7 @@ except ImproperlyConfigured as e:
         "setup instructions."
     ) from e
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "ROLE_MONOLITH",
@@ -72,6 +73,7 @@ __all__ = [
     "get_router_shard_id",
     "get_router_url",
     "get_message_timeout",
+    "get_ticket_bind_ip",
     "send_message",
     "poll_messages",
     "delete_message",

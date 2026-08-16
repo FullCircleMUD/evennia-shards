@@ -3957,6 +3957,47 @@ class CreateTicketTests(BaseEvenniaTestCase):
         ticket = Ticket.objects.get(token=token)
         self.assertIsNone(ticket.client_ip)
 
+    def test_bind_ip_defaults_on(self):
+        """Absent the setting, an address passed in is recorded."""
+        from evennia_shards import get_ticket_bind_ip
+
+        self.assertTrue(get_ticket_bind_ip())
+
+    @override_settings(SHARDS_TICKET_BIND_IP=False)
+    def test_client_ip_discarded_when_binding_disabled(self):
+        """The setting wins over what the caller passes.
+
+        Callers keep handing over session.address; create_ticket drops it,
+        so no callsite has to know the setting exists.
+        """
+        from evennia_shards import create_ticket
+        from evennia_shards.models import Ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="192.168.1.42",
+        )
+        ticket = Ticket.objects.get(token=token)
+        self.assertIsNone(ticket.client_ip)
+
+    @override_settings(SHARDS_TICKET_BIND_IP=False)
+    def test_ticket_data_carries_no_ip_when_binding_disabled(self):
+        """get_ticket reports no address, so the shard's check is skipped.
+
+        protocols.py guards the comparison with `if data["client_ip"]`,
+        so a null address is what makes a connection from any origin
+        acceptable — no second flag to keep in step.
+        """
+        from evennia_shards import create_ticket, get_ticket
+
+        token = create_ticket(
+            account_id=1, character_id=2, to_shard="shard0",
+            client_ip="192.168.1.42",
+        )
+        found, data = get_ticket(token, shard_id="shard0")
+        self.assertTrue(found)
+        self.assertIsNone(data["client_ip"])
+
 
 @override_settings(SHARD_ID="shard0", SHARDS_ROLE="shard")
 class GetTicketTests(BaseEvenniaTestCase):
