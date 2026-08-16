@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evennia-shards"
-version = "0.1.0"
+version = "0.1.1"
 description = "Optional split deployment and horizontal sharding for Evennia, via configuration."
 readme = "README.md"
 license = {text = "BSD-3-Clause"}
@@ -50,3 +50,16 @@ Issues = "https://github.com/FullCircleMUD/evennia-shards/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["evennia_shards*"]
+
+# packages.find discovers directories containing __init__.py, so static/ is
+# never a candidate and the webclient JS ships in no wheel without this.
+# The failure is silent all the way to runtime: the build succeeds, pip
+# installs, the app imports, the middleware injects the <script> tag — and
+# the browser 404s on it, so cross-shard redirects never fire.
+#
+# Editable installs resolve the package to the source tree, where the file
+# is present, so no local setup or test run can catch it. Verify against the
+# built artifact instead:
+#     python -m build && python -c "import zipfile;print(*zipfile.ZipFile('dist/evennia_shards-<v>-py3-none-any.whl').namelist(),sep='\n')"
+[tool.setuptools.package-data]
+evennia_shards = ["static/**/*"]
