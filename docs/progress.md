@@ -6,6 +6,18 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 > **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
 
+## 2026-08-15 — 0.1.2: `SHARDS_TICKET_BIND_IP` for proxies that don't preserve client IP
+
+Ticket-based cross-shard auth binds each ticket to the IP it was issued to, refusing a connection
+from any other address. Behind a proxy that doesn't preserve the client IP (most PaaS platforms,
+surfaced by FCM's own live deployment), every shard sees the proxy's own address instead of the
+player's, which never matches what the router recorded — every redirect was refused. Evennia's
+`UPSTREAM_IPS` is an exact-match list and can't express a proxy whose address varies within a range,
+so the library's `x-forwarded-for` resolution doesn't help there either. `SHARDS_TICKET_BIND_IP`
+(default `True`, preserving prior behavior) lets a consumer turn the check off; read in
+`create_ticket` itself, so callers keep passing `session.address` unconditionally. Published as
+https://pypi.org/project/evennia-shards/0.1.2/. Tagged `v0.1.2`.
+
 ## 2026-08-15 — 0.1.1: fix the missing webclient static asset
 
 The published `0.1.0` wheel was missing `static/evennia_shards/js/shard_redirect.js` — confirmed by
