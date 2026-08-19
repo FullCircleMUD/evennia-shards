@@ -82,6 +82,8 @@ ObjectDB.save = _tenant_aware_save
 
 We also deliberately **drop multitenant's temporary tenant-switch** during save. Upstream calls `set_current_tenant(self.tenant_value)` around the inner save to scope the UPDATE WHERE clause to the row's own tenant. That logic doesn't compose with our two-element list shape — it collapses the IN-filter to a single shard and loses the `"*"` arm. The `_do_update` wrapper below already applies the full filter, which correctly handles current-shard rows, globals, and silently no-ops on foreign rows. The switch is both unnecessary and harmful in our setup.
 
+The same wrapper carries the **unstamped-INSERT guard**. When no tenant is set the stamp above is skipped, and the row would insert with `shard_id=NULL` — owned by no shard, matched by no shard's auto-filter, not a valid IC destination. The wrapper refuses instead, raising `UnstampedInsertError`. See [the guard](#the-unstamped-insert-guard) below.
+
 **`_do_update()`** — adds the tenant filter to the per-row UPDATE WHERE clause. Signature-tolerant via `*args, **kwargs`:
 
 ```python
@@ -139,16 +141,81 @@ From the moment `ready()` returns:
 |---|---|
 | `ObjectDB.objects.filter(...)` / `.all()` / `.get()` | Auto-filter: `WHERE shard_id IN (current, '*')` |
 | `ObjectDB.objects.create(...)` | Row stamped with current shard automatically |
+| `ObjectDB.objects.create(...)` with **no tenant set** | Raises `UnstampedInsertError` — a `shard_id=NULL` row is owned by no shard. Opt in via `allow_unstamped_insert()` only when the row is stamped immediately after |
 | `obj.save()` | UPDATE WHERE pk=X AND shard_id IN (current, '*') — current-shard and global rows update; foreign rows silent no-op |
 | `obj.delete()` | DELETE WHERE same filter |
 | `qs.update(**fields)` / `qs.delete()` | Bulk operations with tenant filter, including cascade collection |
-| `ObjectDB.objects.bulk_create([...])` | Each instance auto-stamped before insert |
+| `ObjectDB.objects.bulk_create([...])` | Each instance auto-stamped before insert; with no tenant set, raises `UnstampedInsertError` |
 | `ObjectDB.objects.bulk_update([...], fields)` | Tenant filter inherited, no dedicated patch — current-shard and global rows update; foreign rows named in the same batch are a silent no-op |
 | `obj.shard_id = "other"` then `obj.save()` | Raises `NotSupportedError` — tenant column is immutable |
 | `ObjectDB.objects.bulk_update([obj], ["shard_id"])` | **Reassigns the tenant column.** The immutability check lives on `__setattr__` + `save()`, which this path never touches — the same deliberate escape `cross_shard_move` takes via `qs.update`, reached by a different door |
 | `with shard_context("shard1"):` | All of the above behaves as `shard1` (or unscoped if `None`) inside the block |
 
 All of Evennia core and any consumer game code inherits this transparently. No call-site changes required.
+
+## The unstamped-INSERT guard
+
+A row with `shard_id=NULL` belongs to no shard. No shard's auto-filter matches it, it is not a valid IC destination, and nothing in normal operation will ever find it again. It is not a lesser version of a stamped row — it is lost.
+
+The auto-stamp only runs when a tenant is set. With no tenant set, an INSERT would simply skip the stamp and write `NULL` — no error, no log. The guard closes that: **both INSERT paths refuse rather than write an unowned row.**
+
+| Path | Behaviour with no tenant set |
+|---|---|
+| `obj.save()` on a new instance | Raises `UnstampedInsertError` |
+| `ObjectDB.objects.bulk_create([...])` | Raises `UnstampedInsertError` naming the count and first offending key |
+| `obj.save()` on an existing NULL row | **Allowed** — see below |
+
+Every refusal is logged at `ERROR` to `shards.log` *before* the raise. That is deliberate: a raise is not a record. Any caller with a broad `except` swallows the exception and the blocked object simply never appears, with nothing anywhere saying why. See [logging.md](logging.md).
+
+### INSERT only, never UPDATE
+
+The guard checks Django's `self._state.adding`. UPDATEs of an already-NULL row pass through untouched.
+
+This is load-bearing, not tidiness. It is exactly how the sanctioned bypass repairs itself: insert unstamped, then `save(update_fields=["shard_id"])` to write the real shard. A guard that fired on UPDATEs would block the repair and make the bypass useless. It also keeps any pre-existing NULL rows backfillable.
+
+### Not active in monolith
+
+`install_tenancy_on_objectdb()` only runs when `SHARDS_ROLE != "monolith"`, so the wrapper — and therefore the guard — is never attached in monolith mode. No monolith consumer can trip it.
+
+### The router refuses too
+
+The router runs unscoped by design, so *every* `ObjectDB` INSERT from it reaches the guard. That is intended: content belongs on a shard, not the router (see [interoperability.md](interoperability.md)). Router-side code that legitimately inserts must opt in explicitly.
+
+One consequence to plan for: on a **fresh database booted router-first**, Evennia's `initial_setup` creates Limbo and the superuser character, and those inserts now fail rather than landing `shard_id=NULL`. Boot `shard0` first — which [deployment-topology.md](deployment-topology.md) already directs for the same underlying reason.
+
+## `allow_unstamped_insert()` — the one way through
+
+Some inserts genuinely must land unstamped and are repaired immediately afterwards. They opt in:
+
+```python
+from evennia_shards import allow_unstamped_insert
+
+with allow_unstamped_insert():
+    obj = create_object(...)      # lands shard_id=NULL, permitted
+obj.shard_id = "shard0"           # repair, under the guard as normal
+obj.save(update_fields=["shard_id"])
+```
+
+**Keep the block as tight as the insert.** One call, not a function body. Everything inside loses the protection, so the narrower the block, the smaller the hole. The repair save deliberately sits *outside* it.
+
+The flag is **thread-local**, matching multitenant's own tenant storage. A block opened on the reactor thread does not open the guard for concurrent thread-pool work. Nesting is safe — the previous value is restored on exit, so an inner block cannot close a hole an outer one opened.
+
+`unstamped_insert_allowed()` reports the current state, for code that needs to branch on it.
+
+### Reach for it second, not first
+
+A guard hit means no tenant was set. There are two reasons for that, and they need opposite fixes:
+
+1. **The insert is meant to be unstamped** and is stamped a moment later — router-side chargen, an account-scoped global. Use `allow_unstamped_insert()`.
+2. **The tenant was lost**, most often because the work was dispatched into another thread. Use [`preserve_tenant_context`](#cross-thread-tenant-propagation) instead. Adding a bypass here would suppress the symptom and reintroduce the exact silent-NULL behaviour the guard exists to stop.
+
+If the failing insert is inside async or off-thread work, assume case 2 until proven otherwise.
+
+### Current use sites
+
+- **Router-side chargen**, `chargen.py`. Vanilla `Account.create_character` inserts the character row while the router is unscoped; the wrapper then stamps it from its start location. The library's only internal use.
+
+Consumers add their own as they find them. FCM's account-bank creation in `at_post_login` is one such site.
 
 ### `refresh_from_db()` needs a visibility guard
 

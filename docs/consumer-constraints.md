@@ -17,6 +17,20 @@ Several consequences flow from this first principle:
 - Any feature that mutates state on an object the current process does not own is incompatible with the architecture; mutations must be routed to (or scheduled by) the owning process.
 - Any interaction requiring multiple characters to be in the same room (combat, in-room trade) is shard-local by construction: a room exists on one shard, so any character in it must be on that shard. Cross-shard combat is therefore impossible.
 
+### Every object insert must carry a shard, or declare that it deliberately does not
+
+A row with `shard_id=NULL` belongs to no shard — invisible to every shard's auto-filter, never a valid IC destination. The library refuses those INSERTs rather than write one, on both `save()` and `bulk_create()`, raising `UnstampedInsertError`.
+
+What this asks of the consumer:
+
+- **Object-creating code must run with a shard context set.** In normal shard-role operation it already does; the process scope is set once at startup.
+- **Work dispatched off-thread must carry the context.** The tenant is thread-local, so `deferToThread` / `run_async` / thread-pool work loses it and every insert inside fails. Wrap with `preserve_tenant_context`.
+- **Router-side code that legitimately inserts unstamped must opt in** with `allow_unstamped_insert()`, wrapped tightly around the insert alone, and must stamp the row immediately afterwards.
+
+A guard hit is a real finding, not noise to be silenced. Reaching for the bypass when the true cause is a lost tenant context reintroduces exactly the silent-NULL behaviour the guard exists to stop. See [tenancy.md](tenancy.md#the-unstamped-insert-guard).
+
+Not active in monolith role, where the tenancy layer is never installed.
+
 ### Cross-shard movement requires a safe character state
 
 Cross-shard movement should only happen when the character is in a "safe" state — not in combat, not casting, no in-flight delayed callbacks that assume the character stays on this shard. The library's `cross_shard_move` primitive does not enforce this itself (per principle 3: "in combat" is a game concept); the consumer is responsible for calling the primitive only when their game's safe-state predicate holds. Consumer-side typeclass code (a `CrossShardExit`, a teleport command, an admin tool) is the right place for that check.
