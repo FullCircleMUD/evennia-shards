@@ -25,7 +25,8 @@ Houses three public primitives:
 from collections import namedtuple
 
 from django.db import transaction
-from evennia.utils import logger
+
+from .log import shard_log
 
 from .config import get_router_shard_id, get_router_url, get_shard_id, get_shard_url
 from .tenancy import shard_context
@@ -295,21 +296,45 @@ def cross_shard_move(obj, target_shard, target_location_pk):
         try:
             obj.tags.remove("puppeted", category="account")
         except Exception as exc:
-            logger.log_warn(
+            shard_log(
                 f"cross_shard_move: puppeted tag removal failed for "
-                f"obj pk={obj.pk}: {exc}"
+                f"obj pk={obj.pk}: {exc}",
+                level="WARN",
             )
     except Exception:
         # Defensive eviction — idmapper pops aren't rolled back by
         # transaction.atomic, so purge stale entries on failure.
+        #
+        # A failed eviction here is not fatal to the move (which is
+        # already failing and about to re-raise), but it leaves a stale
+        # idmapper entry behind — the seed of a phantom object that
+        # outlives the row it mirrors. Log rather than swallow, so a
+        # later "why is this object still cached" has a starting point.
+        # Both handlers stay broad and non-raising: nothing here may
+        # mask the original exception on its way out.
+        shard_log(
+            f"cross_shard_move: move failed for obj pk={obj.pk}; "
+            f"evicting defensively before re-raising",
+            level="ERROR",
+            trace=True,
+        )
         try:
             obj.flush_from_cache(force=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            shard_log(
+                f"cross_shard_move: defensive flush_from_cache failed for "
+                f"obj pk={obj.pk}: {exc} — stale idmapper entry may remain",
+                level="WARN",
+            )
         try:
             _evict_pks_from_idmapper(content_pks)
-        except Exception:
-            pass
+        except Exception as exc:
+            shard_log(
+                f"cross_shard_move: defensive idmapper eviction failed for "
+                f"{len(content_pks)} content pks: {exc} — stale entries may "
+                f"remain",
+                level="WARN",
+            )
         raise
 
     # 7. Per-session redirect. Per-session failures are captured but
@@ -322,9 +347,10 @@ def cross_shard_move(obj, target_shard, target_location_pk):
             _redirect_to_character_shard(account, session, obj)
             redirected += 1
         except Exception as exc:
-            logger.log_warn(
+            shard_log(
                 f"cross_shard_move: redirect failed for session "
-                f"{session!r} on obj pk={obj.pk}: {exc}"
+                f"{session!r} on obj pk={obj.pk}: {exc}",
+                level="WARN",
             )
             failures.append((session, exc))
 
@@ -346,10 +372,11 @@ def cross_shard_move(obj, target_shard, target_location_pk):
                 to_shard=target_shard,
             )
         except Exception as exc:
-            logger.log_warn(
+            shard_log(
                 f"cross_shard_move: post-move flush_from_cache send "
                 f"failed for room pk={target_location_pk} on shard "
-                f"{target_shard!r}: {exc}"
+                f"{target_shard!r}: {exc}",
+                level="WARN",
             )
 
     return MoveResult(
@@ -403,9 +430,10 @@ def _redirect_to_character_shard(account, session, character) -> str:
     url = f"{get_shard_url(shard_id)}?ticket={token}"
     session.msg(shard_redirect=[[url], {}])
 
-    logger.log_sec(
+    shard_log(
         f"Shard redirect: (Caller: {account}, Target: {character}, "
-        f"Shard: {shard_id}, IP: {session.address})."
+        f"Shard: {shard_id}, IP: {session.address}).",
+        security=True,
     )
     return url
 
@@ -451,9 +479,10 @@ def redirect_to_router(account, session) -> str:
         # ignores character_id for OOC tickets, so 0 is harmless,
         # but it shouldn't happen in normal flows; warn so we notice.
         character_id = 0
-        logger.log_warn(
+        shard_log(
             f"redirect_to_router: no puppet and no _last_puppet "
-            f"(Account: {account}, IP: {session.address})."
+            f"(Account: {account}, IP: {session.address}).",
+            level="WARN",
         )
 
     token = create_ticket(
@@ -463,8 +492,9 @@ def redirect_to_router(account, session) -> str:
     url = f"{get_router_url()}?ticket={token}"
     session.msg(shard_redirect=[[url], {}])
 
-    logger.log_sec(
+    shard_log(
         f"Router redirect: (Caller: {account}, Character: {character_id}, "
-        f"IP: {session.address})."
+        f"IP: {session.address}).",
+        security=True,
     )
     return url

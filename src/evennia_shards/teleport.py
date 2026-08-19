@@ -20,6 +20,7 @@ stay free of the bomb-triggering ``building`` import.
 from evennia.commands.cmdhandler import InterruptCommand
 from evennia.commands.default.building import CmdTeleport
 
+from .log import shard_log
 from .search import shard_aware_global_search
 
 
@@ -301,6 +302,17 @@ class ShardAwareCmdTeleport(CmdTeleport):
                 self.obj_to_teleport, self.dest_shard, self.dest_pk
             )
         except Exception as exc:
+            # The caller gets the message, but that is ephemeral — it
+            # scrolls off and leaves no record of a half-completed
+            # cross-shard move. Log with the traceback so the failure
+            # is still readable afterwards.
+            shard_log(
+                f"cross-shard teleport failed: obj pk="
+                f"{getattr(self.obj_to_teleport, 'pk', None)!r} to shard "
+                f"{self.dest_shard!r} dest pk={self.dest_pk!r}: {exc}",
+                level="ERROR",
+                trace=True,
+            )
             self.caller.msg(
                 f"|rCross-shard teleport failed:|n {exc}"
             )

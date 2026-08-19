@@ -32,6 +32,7 @@ from django_multitenant.utils import (
 )
 
 from .errors import UnstampedInsertError
+from .log import shard_log
 
 
 GLOBAL_SHARD_ID = "*"
@@ -323,6 +324,19 @@ def install_tenancy_on_objectdb() -> None:
             # branch; that is intended. Content belongs on a shard, and
             # the one sanctioned router-side insert opts in explicitly
             # via allow_unstamped_insert().
+            # Log before raising. A raise is not a record: any caller
+            # with a broad `except` swallows it and the blocked insert
+            # becomes invisible — the object simply never appears and
+            # nothing anywhere says why. mob-spawner's tick is exactly
+            # such a caller. The log line is what makes the guard
+            # diagnosable rather than merely safe.
+            shard_log(
+                f"refusing NULL-shard INSERT: {type(self).__name__} "
+                f"key={getattr(self, 'db_key', None)!r} "
+                f"typeclass={getattr(self, 'db_typeclass_path', None)!r} "
+                f"— no shard context set in this thread",
+                level="ERROR",
+            )
             raise UnstampedInsertError(
                 f"refusing to INSERT {type(self).__name__} "
                 f"key={getattr(self, 'db_key', None)!r} "
@@ -467,6 +481,14 @@ def install_tenancy_on_objectdb() -> None:
                     obj for obj in objs if obj.tenant_value is None
                 ]
                 if unstamped:
+                    shard_log(
+                        f"refusing NULL-shard bulk_create: "
+                        f"{len(unstamped)} of {len(objs)} "
+                        f"{manager_cls.__name__} rows, first key="
+                        f"{getattr(unstamped[0], 'db_key', None)!r} "
+                        f"— no shard context set in this thread",
+                        level="ERROR",
+                    )
                     raise UnstampedInsertError(
                         f"refusing to bulk_create {len(unstamped)} of "
                         f"{len(objs)} {manager_cls.__name__} rows with "
@@ -483,6 +505,17 @@ def install_tenancy_on_objectdb() -> None:
         manager_cls._evennia_shards_tenant_patched = True
 
     ObjectDB._evennia_shards_tenancy_installed = True
+
+    # One line per process at startup. During a play-test this is how an
+    # operator confirms the tenancy layer — and so the NULL-shard guard —
+    # is actually armed in this process, rather than inferring it from
+    # the absence of errors.
+    from .config import get_role, get_shard_id
+
+    shard_log(
+        f"tenancy installed on ObjectDB: role={get_role()!r} "
+        f"shard_id={get_shard_id()!r}; NULL-shard INSERT guard armed"
+    )
 
 
 def bootstrap_tenant_context() -> None:

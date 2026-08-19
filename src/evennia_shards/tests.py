@@ -34,6 +34,34 @@ from evennia_shards.tenancy import (
 TYPECLASS = "evennia.objects.objects.DefaultObject"
 
 
+def _capture_shard_log(module_name: str):
+    """Patch ``shard_log`` in one module and record what it was called with.
+
+    Library modules bind the helper at import time
+    (``from .log import shard_log``), so the patch has to target the
+    importing module's namespace, not ``evennia_shards.log``.
+
+    Returns a ``mock.patch`` object; use it as a context manager and read
+    ``.call_args_list`` off the yielded mock::
+
+        with _capture_shard_log("evennia_shards.hooks") as logged:
+            ...
+        self.assertEqual(logged.call_count, 0)
+    """
+    from unittest import mock
+
+    return mock.patch(f"{module_name}.shard_log")
+
+
+def _logged_levels(logged) -> list:
+    """Return the ``level`` of each recorded ``shard_log`` call.
+
+    Defaults to ``"INFO"`` for calls that passed no level, matching the
+    helper's own default.
+    """
+    return [call.kwargs.get("level", "INFO") for call in logged.call_args_list]
+
+
 def _forge_db_shard(pk: int, shard_id: str | None) -> None:
     """Force a row's ``shard_id`` via raw SQL — bypasses the multitenant
     auto-filter and the tenant-column immutability check.
@@ -641,6 +669,33 @@ class UnstampedInsertGuardTests(BaseEvenniaTestCase):
                 db_typeclass_path=TYPECLASS,
             )
         self.assertIn("named_probe", str(ctx.exception))
+
+    def test_refusal_is_logged_before_it_raises(self):
+        # A raise is not a record. mob-spawner's tick catches every
+        # exception per rule, so without this log line a blocked spawn
+        # is invisible: the mob never appears and nothing says why.
+        clear_shard_context()
+        with _capture_shard_log("evennia_shards.tenancy") as logged:
+            with self.assertRaises(UnstampedInsertError):
+                ObjectDB.objects.create(
+                    db_key="logged_probe",
+                    db_typeclass_path=TYPECLASS,
+                )
+
+        self.assertIn("ERROR", _logged_levels(logged))
+        self.assertIn("logged_probe", logged.call_args[0][0])
+
+    def test_bulk_create_refusal_is_logged_before_it_raises(self):
+        clear_shard_context()
+        objs = [
+            ObjectDB(db_key="bulk_logged", db_typeclass_path=TYPECLASS)
+        ]
+        with _capture_shard_log("evennia_shards.tenancy") as logged:
+            with self.assertRaises(UnstampedInsertError):
+                ObjectDB.objects.bulk_create(objs)
+
+        self.assertIn("ERROR", _logged_levels(logged))
+        self.assertIn("bulk_logged", logged.call_args[0][0])
 
     def test_refused_insert_writes_no_row(self):
         # The guard fires before the INSERT, not after — a refused
@@ -1714,8 +1769,14 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
         account = _FakeAccount(pk=7)
         session = _FakeSession()
 
-        with self.assertNoLogs("evennia", level="WARNING"):
+        # Watches the library's own log helper, not Python's "evennia"
+        # logger namespace — nothing in the library routes there any
+        # more, so an assertNoLogs on it would pass without testing
+        # anything.
+        with _capture_shard_log("evennia_shards.hooks") as logged:
             shard_aware_at_post_login(account, session=session)
+
+        self.assertNotIn("WARN", _logged_levels(logged))
 
         self.assertEqual(session.oob_messages.get("logged_in"), {})
         self.assertEqual(Ticket.objects.count(), 0)
@@ -1736,7 +1797,13 @@ class AtPostLoginRouterTests(BaseEvenniaTestCase):
                 account.db._last_puppet = char
                 session = _FakeSession()
 
-                shard_aware_at_post_login(account, session=session)
+                with _capture_shard_log("evennia_shards.hooks") as logged:
+                    shard_aware_at_post_login(account, session=session)
+
+                # The docstring promises a warning; assert it, so the
+                # silent-fall-through test above is a real contrast and
+                # not just two paths that both log nothing.
+                self.assertIn("WARN", _logged_levels(logged))
 
                 self.assertEqual(Ticket.objects.count(), 0)
                 self.assertNotIn("shard_redirect", session.oob_messages)
@@ -6112,3 +6179,129 @@ class ScriptConfinementTest(BaseEvenniaTestCase):
         install_script_confinement()
 
         self.assertIsNone(ScriptBase._unpause_task(self._script(owner="shard1")))
+
+
+class ShardLogTests(unittest.TestCase):
+    """The logging shim: one helper, one file, fixed line format.
+
+    Every durable record the library emits goes through ``shard_log``,
+    so the shim's own behaviour — level coercion, the traceback option,
+    the security dual-write — is worth pinning directly rather than
+    inferring it from call sites.
+    """
+
+    def _patched(self):
+        """Patch Evennia's logger as ``shard_log`` resolves it.
+
+        The helper imports ``evennia.utils.logger`` lazily inside the
+        call, so patching the module attributes is enough — there is no
+        import-time binding to work around.
+        """
+        from unittest import mock
+
+        return mock.patch.multiple(
+            "evennia.utils.logger",
+            log_file=mock.DEFAULT,
+            log_sec=mock.DEFAULT,
+        )
+
+    def test_writes_to_shards_log(self):
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("hello")
+
+        _, kwargs = patches["log_file"].call_args
+        self.assertEqual(kwargs["filename"], "shards.log")
+
+    def test_line_format_is_timestamp_level_message(self):
+        import re
+
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("the message", level="WARN")
+
+        line = patches["log_file"].call_args[0][0]
+        self.assertRegex(
+            line,
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00 \[WARN\] "
+            r"the message$",
+        )
+
+    def test_unknown_level_degrades_to_info(self):
+        # A log call must never raise into its caller, so an unknown
+        # level is coerced rather than rejected.
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("hello", level="CRITICAL")
+
+        self.assertIn("[INFO]", patches["log_file"].call_args[0][0])
+
+    def test_trace_appends_the_active_traceback(self):
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                shard_log("it broke", level="ERROR", trace=True)
+
+        line = patches["log_file"].call_args[0][0]
+        self.assertIn("it broke", line)
+        self.assertIn("ValueError: boom", line)
+        self.assertIn("Traceback", line)
+
+    def test_trace_outside_an_except_block_adds_nothing(self):
+        # format_exc() returns the literal "NoneType: None" when no
+        # exception is live. That must not reach the log as noise.
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("no exception here", trace=True)
+
+        line = patches["log_file"].call_args[0][0]
+        self.assertNotIn("NoneType", line)
+        self.assertTrue(line.endswith("no exception here"))
+
+    def test_security_writes_to_both_surfaces(self):
+        # Account/IP-bearing audit records belong in the library's log
+        # AND in Evennia's security log, which is the surface a security
+        # review actually reads. Dual-write, not move.
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("Shard redirect: (Caller: Bob)", security=True)
+
+        self.assertEqual(patches["log_file"].call_count, 1)
+        self.assertEqual(patches["log_sec"].call_count, 1)
+        self.assertIn("Bob", patches["log_sec"].call_args[0][0])
+
+    def test_ordinary_call_does_not_touch_the_security_log(self):
+        from evennia_shards.log import shard_log
+
+        with self._patched() as patches:
+            shard_log("routine", level="WARN")
+
+        self.assertEqual(patches["log_file"].call_count, 1)
+        self.assertEqual(patches["log_sec"].call_count, 0)
+
+    def test_silent_no_op_outside_an_evennia_engine(self):
+        # Tests and any future CLI import the library without Evennia
+        # bootstrapped. The helper swallows the ImportError rather than
+        # falling back to stderr or a file in CWD.
+        import builtins
+        from unittest import mock
+
+        from evennia_shards.log import shard_log
+
+        real_import = builtins.__import__
+
+        def _no_evennia_logger(name, *args, **kwargs):
+            if name == "evennia.utils":
+                raise ImportError("no engine")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", _no_evennia_logger):
+            shard_log("should vanish")  # must not raise

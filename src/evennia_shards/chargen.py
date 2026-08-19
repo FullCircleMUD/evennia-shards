@@ -20,7 +20,7 @@ The wrapper deliberately does not interfere with vanilla's body or
 kwargs — any consumer or upstream churn in chargen is invisible here.
 """
 
-from evennia.utils import logger
+from .log import shard_log
 
 
 def make_shard_aware_create_character(original_create_character):
@@ -65,11 +65,12 @@ def make_shard_aware_create_character(original_create_character):
 
         location_id = character.db_location_id
         if location_id is None:
-            logger.log_warn(
+            shard_log(
                 f"shard_aware_create_character: new character "
                 f"pk={character.pk!r} has no db_location; leaving shard_id "
                 f"as auto-stamped (chargen succeeded but the character "
-                f"will not be IC-able until shard_id is corrected)"
+                f"will not be IC-able until shard_id is corrected)",
+                level="WARN",
             )
             return character, errs
 
@@ -84,11 +85,12 @@ def make_shard_aware_create_character(original_create_character):
             or location_shard == "*"
             or location_shard == ROUTER_SHARD_ID
         ):
-            logger.log_warn(
+            shard_log(
                 f"shard_aware_create_character: start location "
                 f"pk={location_id!r} has unusable shard_id="
                 f"{location_shard!r} (expected a real shard id); "
-                f"leaving character pk={character.pk!r} as auto-stamped"
+                f"leaving character pk={character.pk!r} as auto-stamped",
+                level="WARN",
             )
             return character, errs
 

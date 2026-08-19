@@ -18,7 +18,7 @@ Two overrides:
   live DB state after a cross-shard move.
 """
 
-from evennia.utils import logger
+from .log import shard_log
 
 from .handoff import _redirect_to_character_shard
 from .config import get_shard_url
@@ -136,11 +136,12 @@ def shard_aware_at_post_login(self, session=None, **kwargs):
         return
 
     if last_puppet is not None:
-        logger.log_warn(
+        shard_log(
             f"at_post_login on router: account {self} has _last_puppet="
             f"{last_puppet} but its shard_id="
             f"{getattr(last_puppet, 'shard_id', None)!r} is unusable — "
-            "falling back to OOC menu"
+            "falling back to OOC menu",
+            level="WARN",
         )
 
     # OOC menu (reproduced from Evennia at_post_login else-branch).
@@ -188,7 +189,7 @@ def warn_if_at_post_login_overridden(account_cls, role) -> bool:
         if role == "router"
         else "idmapper / Attribute cache-bust before auto-puppet"
     )
-    logger.log_warn(
+    shard_log(
         f"evennia-shards: {overriding_cls.__module__}."
         f"{overriding_cls.__qualname__}.at_post_login is overridden. "
         f"The library patches DefaultAccount.at_post_login; this "
@@ -196,7 +197,8 @@ def warn_if_at_post_login_overridden(account_cls, role) -> bool:
         f"it calls super().at_post_login(session=session, **kwargs). "
         f"Without the super() call, the {role} role's "
         f"{role_specific} will not run for this account class. See "
-        f"docs/library-integration-risks.md."
+        f"docs/library-integration-risks.md.",
+        level="WARN",
     )
     return True
 

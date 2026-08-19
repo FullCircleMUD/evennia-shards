@@ -32,7 +32,7 @@ install, and idempotent via a marker attribute in the same style.
 
 import functools
 
-from evennia.utils import logger
+from .log import shard_log
 
 from .config import get_role, get_shard_id
 
@@ -114,11 +114,12 @@ def is_foreign_script(script) -> tuple:
         # Contradictory declaration: "only shard0" and "any shard" cannot
         # both hold. Fail closed rather than silently honouring one — see
         # OWNING_ROLES_ATTR.
-        logger.log_err(
+        shard_log(
             f"evennia-shards: script {getattr(script, 'key', '?')!r} declares "
             f"both {OWNING_SHARD_ATTR}={owner!r} and {OWNING_ROLES_ATTR}="
             f"{roles!r}. They are mutually exclusive; refusing to run it "
-            f"anywhere until one is removed."
+            f"anywhere until one is removed.",
+            level="ERROR",
         )
         return True, (owner, roles), None
 

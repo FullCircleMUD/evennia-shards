@@ -7,9 +7,7 @@ overrideable handler hook — build on these. See
 docs/cross-shard-message-bus.md for the full design.
 """
 
-import logging
-
-log = logging.getLogger(__name__)
+from .log import shard_log
 
 
 def send_message(
@@ -194,10 +192,10 @@ class MessageHandler:
         try:
             obj = ObjectDB.objects.get(pk=pk)
         except ObjectDB.DoesNotExist:
-            log.warning(
-                "obj_msg: target ObjectDB pk=%r not found; dropping "
-                "(message pk=%s from %r)",
-                pk, message.pk, message.from_shard,
+            shard_log(
+                f"obj_msg: target ObjectDB pk={pk!r} not found; dropping "
+                f"(message pk={message.pk} from {message.from_shard!r})",
+                level="WARN",
             )
             return True
         obj.msg(**kwargs)
@@ -223,10 +221,10 @@ class MessageHandler:
         try:
             account = AccountDB.objects.get(pk=pk)
         except AccountDB.DoesNotExist:
-            log.warning(
-                "account_msg: target AccountDB pk=%r not found; dropping "
-                "(message pk=%s from %r)",
-                pk, message.pk, message.from_shard,
+            shard_log(
+                f"account_msg: target AccountDB pk={pk!r} not found; dropping "
+                f"(message pk={message.pk} from {message.from_shard!r})",
+                level="WARN",
             )
             return True
         account.msg(**kwargs)
@@ -322,10 +320,10 @@ class MessageHandler:
         try:
             room = ObjectDB.objects.get(pk=pk)
         except ObjectDB.DoesNotExist:
-            log.warning(
-                "room_msg: target ObjectDB pk=%r not found; dropping "
-                "(message pk=%s from %r)",
-                pk, message.pk, message.from_shard,
+            shard_log(
+                f"room_msg: target ObjectDB pk={pk!r} not found; dropping "
+                f"(message pk={message.pk} from {message.from_shard!r})",
+                level="WARN",
             )
             return True
 
@@ -384,10 +382,11 @@ def process_inbox(handler: MessageHandler | None = None) -> int:
         try:
             handled = bool(handler.handle(msg))
         except Exception:
-            log.exception(
-                "MessageHandler raised on pk=%s kind=%r; treating as defer",
-                msg.pk,
-                msg.kind,
+            shard_log(
+                f"MessageHandler raised on pk={msg.pk} kind={msg.kind!r}; "
+                f"treating as defer",
+                level="ERROR",
+                trace=True,
             )
             handled = False
 
@@ -416,12 +415,11 @@ def process_inbox(handler: MessageHandler | None = None) -> int:
                 from_shard=current,
             )
         else:
-            log.warning(
-                "Message pk=%s kind=%r timed out with no valid from_shard "
-                "(%r); dropping without reply",
-                msg.pk,
-                msg.kind,
-                msg.from_shard,
+            shard_log(
+                f"Message pk={msg.pk} kind={msg.kind!r} timed out with no "
+                f"valid from_shard ({msg.from_shard!r}); dropping without "
+                f"reply",
+                level="WARN",
             )
         delete_message(msg)
     return processed

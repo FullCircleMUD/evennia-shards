@@ -21,9 +21,7 @@ it raises a separate routing question (no ``shard_id`` column on
 ``AccountDB``) that is being tackled as a follow-up.
 """
 
-import logging
-
-log = logging.getLogger(__name__)
+from .log import shard_log
 
 
 def send_cross_shard_message(target_pk, kwargs, target_typeclass=None):
@@ -94,22 +92,22 @@ def send_cross_shard_message(target_pk, kwargs, target_typeclass=None):
             .values_list("db_typeclass_path", "shard_id")[:1]
         )
     if not rows:
-        log.warning(
-            "send_cross_shard_message: target ObjectDB pk=%r does not "
-            "exist; rejecting",
-            target_pk,
+        shard_log(
+            f"send_cross_shard_message: target ObjectDB pk={target_pk!r} "
+            f"does not exist; rejecting",
+            level="WARN",
         )
         return False
 
     typeclass_path, target_shard = rows[0]
     target_cls = class_from_module(typeclass_path)
     if not issubclass(target_cls, target_typeclass):
-        log.warning(
-            "send_cross_shard_message: target ObjectDB pk=%r has typeclass "
-            "%s which is not a subclass of %s; rejecting",
-            target_pk,
-            typeclass_path,
-            f"{target_typeclass.__module__}.{target_typeclass.__name__}",
+        shard_log(
+            f"send_cross_shard_message: target ObjectDB pk={target_pk!r} has "
+            f"typeclass {typeclass_path} which is not a subclass of "
+            f"{target_typeclass.__module__}.{target_typeclass.__name__}; "
+            f"rejecting",
+            level="WARN",
         )
         return False
 
@@ -188,10 +186,10 @@ def send_cross_shard_room_message(
             .values_list("shard_id", flat=True)[:1]
         )
     if not rows:
-        log.warning(
-            "send_cross_shard_room_message: target room pk=%r does "
-            "not exist; rejecting",
-            room_pk,
+        shard_log(
+            f"send_cross_shard_room_message: target room pk={room_pk!r} does "
+            f"not exist; rejecting",
+            level="WARN",
         )
         return False
     target_shard = rows[0]
