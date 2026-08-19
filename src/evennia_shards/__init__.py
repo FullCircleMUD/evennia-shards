@@ -23,7 +23,7 @@ try:
         get_shard_url,
         get_ticket_bind_ip,
     )
-    from .errors import MessageBusError, TicketError
+    from .errors import MessageBusError, TicketError, UnstampedInsertError
     from .handoff import MoveResult, cross_shard_move
     from .messagebus import (
         MessageHandler,
@@ -38,10 +38,12 @@ try:
     from .tenancy import (
         GLOBAL_SHARD_ID,
         Shard,
+        allow_unstamped_insert,
         clear_shard_context,
         preserve_tenant_context,
         set_current_shard,
         shard_context,
+        unstamped_insert_allowed,
     )
     from .script_confinement import (
         OWNING_ROLES_ATTR,
@@ -91,6 +93,7 @@ __all__ = [
     "MoveResult",
     "MessageBusError",
     "TicketError",
+    "UnstampedInsertError",
     # Multitenant tenancy primitives (replaced shard_writes_allowed_for
     # / ShardIsolationError from the chokepoint era).
     "GLOBAL_SHARD_ID",
@@ -99,6 +102,10 @@ __all__ = [
     "clear_shard_context",
     "shard_context",
     "preserve_tenant_context",
+    # Unstamped-INSERT guard: NULL-shard rows are refused, and this is
+    # the one sanctioned way through. See tenancy.allow_unstamped_insert.
+    "allow_unstamped_insert",
+    "unstamped_insert_allowed",
     # Shard-owned scripts: consumers declare ownership by setting the
     # OWNING_SHARD_ATTR Attribute; the library confines the script to that
     # process. See script_confinement.py.

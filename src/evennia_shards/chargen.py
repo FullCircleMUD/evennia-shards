@@ -50,9 +50,16 @@ def make_shard_aware_create_character(original_create_character):
     from evennia.objects.models import ObjectDB
 
     from .config import ROUTER_SHARD_ID
+    from .tenancy import allow_unstamped_insert
 
     def shard_aware_create_character(self, *args, **kwargs):
-        character, errs = original_create_character(self, *args, **kwargs)
+        # The insert below is the one sanctioned unstamped INSERT in the
+        # library: vanilla inserts the character row while the router is
+        # unscoped, and the rest of this wrapper repairs the stamp from
+        # the start location. The block covers only that call — the
+        # stamping save that follows runs under the guard as normal.
+        with allow_unstamped_insert():
+            character, errs = original_create_character(self, *args, **kwargs)
         if not character:
             return character, errs
 

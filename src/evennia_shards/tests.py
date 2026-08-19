@@ -18,14 +18,17 @@ from evennia_shards.script_confinement import (
     install_script_confinement,
     is_foreign_script,
 )
+from evennia_shards.errors import UnstampedInsertError
 from evennia_shards.tenancy import (
     GLOBAL_SHARD_ID,
     Shard,
+    allow_unstamped_insert,
     bootstrap_tenant_context,
     clear_shard_context,
     install_tenancy_on_objectdb,
     set_current_shard,
     shard_context,
+    unstamped_insert_allowed,
 )
 
 TYPECLASS = "evennia.objects.objects.DefaultObject"
@@ -595,6 +598,198 @@ class AutoStampAndFilterTests(BaseEvenniaTestCase):
                 .values_list("pk", flat=True)
             )
         self.assertEqual(survivors, {foreign.pk})
+
+
+class UnstampedInsertGuardTests(BaseEvenniaTestCase):
+    """The guard that refuses ``shard_id=NULL`` INSERTs, and the single
+    sanctioned way through it.
+
+    A NULL-shard row is owned by no shard: no shard's auto-filter matches
+    it and it is not a valid IC destination. Historically such a row was
+    created silently whenever an INSERT ran with no tenant set — the
+    auto-stamp was simply skipped. These tests pin the refusal, the
+    opt-in, and the boundaries the opt-in must not cross (UPDATEs,
+    other threads, code after the block).
+    """
+
+    def tearDown(self):
+        # Every test here mutates process-wide tenant state. The suite
+        # otherwise runs with shard0 set by apps.ready(); restore it so
+        # test order stays irrelevant.
+        set_current_shard("shard0")
+        super().tearDown()
+
+    # -- the refusal ---------------------------------------------------
+
+    def test_insert_with_no_tenant_raises(self):
+        # The core case: unscoped INSERT used to land shard_id=NULL
+        # silently. It must now be refused outright.
+        clear_shard_context()
+        with self.assertRaises(UnstampedInsertError):
+            ObjectDB.objects.create(
+                db_key="unscoped_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+
+    def test_refusal_message_names_the_row(self):
+        # The message has to be actionable from a log line alone —
+        # whoever reads it needs to know which object was refused.
+        clear_shard_context()
+        with self.assertRaises(UnstampedInsertError) as ctx:
+            ObjectDB.objects.create(
+                db_key="named_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        self.assertIn("named_probe", str(ctx.exception))
+
+    def test_refused_insert_writes_no_row(self):
+        # The guard fires before the INSERT, not after — a refused
+        # create must leave nothing behind.
+        clear_shard_context()
+        with self.assertRaises(UnstampedInsertError):
+            ObjectDB.objects.create(
+                db_key="no_row_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        self.assertEqual(
+            ObjectDB.objects.filter(db_key="no_row_probe").count(),
+            0,
+        )
+
+    def test_stamped_insert_unaffected(self):
+        # Guard must be invisible on the normal path: a tenant is set,
+        # the auto-stamp runs, no exception.
+        set_current_shard("shard0")
+        obj = ObjectDB.objects.create(
+            db_key="stamped_probe",
+            db_typeclass_path=TYPECLASS,
+        )
+        self.assertEqual(obj.shard_id, "shard0")
+
+    # -- the opt-in ----------------------------------------------------
+
+    def test_allow_unstamped_insert_permits_the_insert(self):
+        # The sanctioned hole: chargen's insert lands NULL on purpose
+        # and is repaired immediately after.
+        clear_shard_context()
+        with allow_unstamped_insert():
+            obj = ObjectDB.objects.create(
+                db_key="allowed_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        self.assertIsNone(obj.shard_id)
+
+    def test_guard_closes_again_after_the_block(self):
+        # The hole must not leak past the with-block, or one chargen
+        # call would disarm the guard for everything following it.
+        clear_shard_context()
+        with allow_unstamped_insert():
+            ObjectDB.objects.create(
+                db_key="inside_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        with self.assertRaises(UnstampedInsertError):
+            ObjectDB.objects.create(
+                db_key="after_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+
+    def test_nesting_restores_previous_state(self):
+        # An inner block must not close a hole the outer one opened.
+        clear_shard_context()
+        with allow_unstamped_insert():
+            with allow_unstamped_insert():
+                pass
+            self.assertTrue(unstamped_insert_allowed())
+        self.assertFalse(unstamped_insert_allowed())
+
+    def test_flag_does_not_leak_into_another_thread(self):
+        # Thread-local, matching multitenant's own tenant storage. A
+        # flag set on the reactor thread must not open the guard for
+        # concurrent thread-pool work.
+        import threading
+
+        seen = []
+
+        def _worker():
+            seen.append(unstamped_insert_allowed())
+
+        with allow_unstamped_insert():
+            thread = threading.Thread(target=_worker)
+            thread.start()
+            thread.join()
+
+        self.assertEqual(seen, [False])
+
+    # -- the boundary the opt-in must not cross ------------------------
+
+    def test_update_on_a_null_row_is_allowed(self):
+        # This is chargen's repair line: the row was just inserted
+        # unstamped, and `save(update_fields=["shard_id"])` writes the
+        # real shard. If the guard fired on UPDATEs too, the fix-up
+        # would be refused and chargen could never complete.
+        clear_shard_context()
+        with allow_unstamped_insert():
+            obj = ObjectDB.objects.create(
+                db_key="repair_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        self.assertIsNone(obj.shard_id)
+
+        obj.shard_id = "shard0"
+        obj.save(update_fields=["shard_id"])
+
+        with shard_context(None):
+            stored = (
+                ObjectDB.objects.filter(pk=obj.pk)
+                .values_list("shard_id", flat=True)[0]
+            )
+        self.assertEqual(stored, "shard0")
+
+    def test_unrelated_update_on_a_null_row_is_allowed(self):
+        # Broader than the chargen line: any UPDATE of an existing
+        # NULL row passes. Pre-existing NULL rows stay editable so they
+        # can be backfilled; the guard is about creating new ones.
+        clear_shard_context()
+        with allow_unstamped_insert():
+            obj = ObjectDB.objects.create(
+                db_key="legacy_probe",
+                db_typeclass_path=TYPECLASS,
+            )
+        obj.db_key = "legacy_probe_renamed"
+        obj.save()  # must not raise
+
+        with shard_context(None):
+            stored = (
+                ObjectDB.objects.filter(pk=obj.pk)
+                .values_list("db_key", flat=True)[0]
+            )
+        self.assertEqual(stored, "legacy_probe_renamed")
+
+    # -- the second INSERT path ----------------------------------------
+
+    def test_bulk_create_with_no_tenant_raises(self):
+        # bulk_create bypasses save(), so it carries its own copy of the
+        # stamping logic — and had the same silent-NULL hole.
+        clear_shard_context()
+        objs = [
+            ObjectDB(db_key=f"bulk_unscoped_{i}", db_typeclass_path=TYPECLASS)
+            for i in range(3)
+        ]
+        with self.assertRaises(UnstampedInsertError):
+            ObjectDB.objects.bulk_create(objs)
+
+    def test_bulk_create_permitted_inside_the_block(self):
+        # Same opt-in honoured on both INSERT paths.
+        clear_shard_context()
+        objs = [
+            ObjectDB(db_key=f"bulk_allowed_{i}", db_typeclass_path=TYPECLASS)
+            for i in range(3)
+        ]
+        with allow_unstamped_insert():
+            ObjectDB.objects.bulk_create(objs)
+        for obj in objs:
+            self.assertIsNone(obj.shard_id)
 
 
 class ShardContextReadTests(BaseEvenniaTestCase):
@@ -1880,10 +2075,17 @@ class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
             set_current_tenant(self._previous_tenant)
 
     def _make_room(self, shard_id):
-        """Create an ObjectDB row to act as the start location."""
-        room = ObjectDB.objects.create(
-            db_key="start_room", db_typeclass_path=TYPECLASS,
-        )
+        """Create an ObjectDB row to act as the start location.
+
+        The fixture stands in for a room that production creates on a
+        shard, but these tests run unscoped to mimic the router — so the
+        insert needs the same opt-in the guard demands anywhere else.
+        The real ``shard_id`` is then forged directly.
+        """
+        with allow_unstamped_insert():
+            room = ObjectDB.objects.create(
+                db_key="start_room", db_typeclass_path=TYPECLASS,
+            )
         _forge_db_shard(room.pk, shard_id)
         return room
 
@@ -1892,12 +2094,16 @@ class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
 
         Under multitenant on the router (unscoped), the auto-stamp on
         insert is skipped, so the new row lands with ``shard_id=NULL``.
+        That is exactly what the wrapper is built to repair, so the
+        fixture opts in the same way the wrapper does around its own
+        call to vanilla ``create_character``.
         """
-        char = ObjectDB.objects.create(
-            db_key="newchar",
-            db_typeclass_path=TYPECLASS,
-            db_location=location,
-        )
+        with allow_unstamped_insert():
+            char = ObjectDB.objects.create(
+                db_key="newchar",
+                db_typeclass_path=TYPECLASS,
+                db_location=location,
+            )
         return char
 
     def _stub_original(self, character, errs=None):
@@ -1965,10 +2171,7 @@ class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
         """
         from evennia_shards.chargen import make_shard_aware_create_character
 
-        room = ObjectDB.objects.create(
-            db_key="start_room", db_typeclass_path=TYPECLASS,
-        )
-        _forge_db_shard(room.pk, None)
+        room = self._make_room(shard_id=None)
         char = self._make_character(location=room)
 
         original, _ = self._stub_original(char)
@@ -2010,9 +2213,7 @@ class ShardAwareCreateCharacterTests(BaseEvenniaTestCase):
         """Character created without db_location → no overwrite."""
         from evennia_shards.chargen import make_shard_aware_create_character
 
-        char = ObjectDB.objects.create(
-            db_key="newchar", db_typeclass_path=TYPECLASS,
-        )
+        char = self._make_character(location=None)
         self.assertIsNone(char.db_location_id)
 
         original, _ = self._stub_original(char)

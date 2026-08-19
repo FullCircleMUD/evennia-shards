@@ -22,6 +22,7 @@ not read settings or models at import time.
 """
 
 import functools
+import threading
 from contextlib import contextmanager
 
 from django_multitenant.utils import (
@@ -29,6 +30,8 @@ from django_multitenant.utils import (
     set_current_tenant,
     unset_current_tenant,
 )
+
+from .errors import UnstampedInsertError
 
 
 GLOBAL_SHARD_ID = "*"
@@ -101,6 +104,61 @@ def clear_shard_context() -> None:
     the library-vocabulary alias.
     """
     unset_current_tenant()
+
+
+_unstamped_insert_state = threading.local()
+"""Thread-local flag opening the unstamped-insert guard.
+
+Thread-local rather than a module global to match multitenant's own
+storage: the tenant context is thread-local, so the exemption must be
+too. A flag set on the reactor thread must not open the guard for work
+running concurrently in a thread-pool worker.
+"""
+
+
+def unstamped_insert_allowed() -> bool:
+    """Return whether the current thread may INSERT rows with no shard stamp.
+
+    False everywhere except inside an :func:`allow_unstamped_insert`
+    block. Read by the guard in ``_tenant_aware_save``.
+    """
+    return getattr(_unstamped_insert_state, "allowed", False)
+
+
+@contextmanager
+def allow_unstamped_insert():
+    """Permit ``shard_id=NULL`` INSERTs for the duration of the block.
+
+    The guard in ``_tenant_aware_save`` refuses any INSERT that would
+    land unstamped, because such a row belongs to no shard. A small
+    number of operations legitimately insert unstamped and repair the
+    stamp immediately afterwards; they wrap the insert in this block.
+
+    Keep the block as tight as the insert itself — one call, not a whole
+    function body. Everything inside it loses the protection, so the
+    narrower the block, the smaller the hole.
+
+    The sole use site today is router-side chargen: vanilla
+    ``Account.create_character`` inserts the character row while the
+    router is unscoped, and ``make_shard_aware_create_character`` then
+    stamps it from its start location. See
+    [chargen.py](chargen.py).
+
+    Example::
+
+        with allow_unstamped_insert():
+            character, errs = original_create_character(self, *a, **kw)
+        # guard is active again here; stamp the row now
+
+    Nesting is safe: the previous value is restored on exit, so an inner
+    block does not close a hole an outer block opened.
+    """
+    previous = getattr(_unstamped_insert_state, "allowed", False)
+    _unstamped_insert_state.allowed = True
+    try:
+        yield
+    finally:
+        _unstamped_insert_state.allowed = previous
 
 
 def _install_global_query_decorators() -> None:
@@ -244,6 +302,40 @@ def install_tenancy_on_objectdb() -> None:
             else:
                 stamp = tenant_value
             setattr(self, self.tenant_field, stamp)
+        elif (
+            self.tenant_value is None
+            and self._state.adding
+            and not unstamped_insert_allowed()
+        ):
+            # No tenant set and this is an INSERT: the stamp above was
+            # skipped, so the row would land ``shard_id=NULL`` — owned by
+            # no shard, matched by no shard's auto-filter, not a valid IC
+            # destination. Refuse rather than create it silently.
+            #
+            # INSERT only (``_state.adding``). UPDATEs on an already-NULL
+            # row must still pass: that is exactly how chargen repairs
+            # the stamp it just deliberately skipped
+            # (``character.save(update_fields=["shard_id"])``).
+            #
+            # Not installed at all in monolith role (see apps.py), so the
+            # guard cannot fire there. On the router — which runs
+            # unscoped by design — every ObjectDB INSERT reaches this
+            # branch; that is intended. Content belongs on a shard, and
+            # the one sanctioned router-side insert opts in explicitly
+            # via allow_unstamped_insert().
+            raise UnstampedInsertError(
+                f"refusing to INSERT {type(self).__name__} "
+                f"key={getattr(self, 'db_key', None)!r} "
+                f"typeclass={getattr(self, 'db_typeclass_path', None)!r} "
+                f"with {self.tenant_field}=NULL: no shard context is set "
+                f"in this thread. A NULL-shard row is owned by no shard. "
+                f"Set one with set_current_shard()/shard_context(), or — "
+                f"if the caller dispatched this work into another thread "
+                f"— wrap the callable in preserve_tenant_context(). If "
+                f"this insert is genuinely meant to be unstamped and is "
+                f"repaired immediately after, wrap just the insert in "
+                f"allow_unstamped_insert()."
+            )
         # NOTE: upstream ``TenantModelMixin.save`` does a temporary
         # ``set_current_tenant(self.tenant_value)`` to scope UPDATEs at
         # the row's own tenant. That logic doesn't compose with our
@@ -366,6 +458,24 @@ def install_tenancy_on_objectdb() -> None:
                 for obj in objs:
                     if obj.tenant_value is None:
                         setattr(obj, obj.tenant_field, stamp)
+            elif not unstamped_insert_allowed():
+                # Second INSERT path, same defect as save(): with no
+                # tenant set the stamping loop above is skipped and every
+                # instance lands shard_id=NULL. Refuse for the same
+                # reason, and honour the same opt-in.
+                unstamped = [
+                    obj for obj in objs if obj.tenant_value is None
+                ]
+                if unstamped:
+                    raise UnstampedInsertError(
+                        f"refusing to bulk_create {len(unstamped)} of "
+                        f"{len(objs)} {manager_cls.__name__} rows with "
+                        f"NULL shard: no shard context is set in this "
+                        f"thread. First offending key="
+                        f"{getattr(unstamped[0], 'db_key', None)!r}. See "
+                        f"allow_unstamped_insert() and "
+                        f"preserve_tenant_context()."
+                    )
             return _original_bulk_create(self, objs, **kwargs)
 
         manager_cls.get_queryset = _tenant_aware_get_queryset
