@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Logging shim for evennia-shards.
 
-See docs/logging.md for the design rationale. One public helper:
+See docs/logging.md for the design rationale. Internal to the library, not
+part of the consumer-facing API — not exported from ``evennia_shards``'s
+top level. One helper:
 
     shard_log(message, level="INFO", trace=False, security=False)
 

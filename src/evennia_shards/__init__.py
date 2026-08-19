@@ -63,7 +63,7 @@ except ImproperlyConfigured as e:
         "setup instructions."
     ) from e
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "ROLE_MONOLITH",
