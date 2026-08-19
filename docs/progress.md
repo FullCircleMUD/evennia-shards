@@ -6,6 +6,30 @@ This is not a changelog (use `git log` for that) and not a roadmap (the phasing 
 
 > **Note on older entries.** Entries before 2026-05-21 describe milestones in the order they happened. Some describe the earlier four-chokepoint isolation design that has since been replaced by django-multitenant ([tenancy.md](tenancy.md)); they're kept as the historical record of how the library got here, not as a description of how the code looks today.
 
+## 2026-08-18 — 0.1.3: refuse NULL-shard inserts; consolidate logging into `shards.log`
+
+An `ObjectDB` insert running with no tenant context set skipped the auto-stamp and wrote
+`shard_id=NULL` silently — no error, no log. Such a row is owned by no shard: no shard's
+auto-filter matches it, and it is not a valid IC destination. Live symptom was mobs spawning
+unstamped, intermittently. Both insert paths (`save()` and `bulk_create`) now raise a new
+`UnstampedInsertError` instead. `allow_unstamped_insert()` is the one sanctioned way through —
+thread-local, so a flag set on the reactor thread can't open the guard for thread-pool work; its
+only library use site is router-side chargen, which inserts unstamped by design and stamps from
+the start location immediately after. The guard fires on INSERT only, so it doesn't block chargen's
+own repair `save()` on an already-NULL row. Not installed in monolith role. On the router —
+unscoped by design — every insert now raises, meaning a fresh database booted router-first fails
+at `initial_setup` rather than silently creating NULL-shard rows; `deployment-topology.md` already
+directs booting shard0 first. Documented in `tenancy.md` and `consumer-constraints.md`.
+
+Also consolidated all library logging — previously split between Evennia's logger in four modules
+and Python's `logging` module in two more — through one `shard_log()` helper into `shards.log`,
+mirroring the sibling libraries' log shims. Five previously-silent failure paths gained logging
+(both NULL-shard refusals, tenancy install, `cross_shard_move` failures and cache evictions,
+cross-shard teleport failure).
+
+**346 tests green** (was 321). Published as https://pypi.org/project/evennia-shards/0.1.3/. Tagged
+`v0.1.3`.
+
 ## 2026-08-15 — 0.1.2: `SHARDS_TICKET_BIND_IP` for proxies that don't preserve client IP
 
 Ticket-based cross-shard auth binds each ticket to the IP it was issued to, refusing a connection
